@@ -1,0 +1,674 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A.L.G Investment — System Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F6F1;
+    --surface:#FFFFFF;
+    --surface-2:#EEF1EA;
+    --ink:#182A20;
+    --ink-soft:#5C6B5F;
+    --border:#DEE4D8;
+    --brand:#1F4E37;
+    --brand-dark:#153728;
+    --brand-tint:#E4EDE6;
+    --gold:#B8862C;
+    --gold-tint:#F5EAD3;
+    --brick:#A24632;
+    --brick-tint:#F5E3DE;
+    --radius-sm:6px;
+    --radius-md:10px;
+    --shadow:0 1px 2px rgba(24,42,32,0.06), 0 4px 14px rgba(24,42,32,0.05);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:"Inter",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3,.brand-word{
+    font-family:"Archivo","Inter",sans-serif;
+    letter-spacing:-0.01em;
+  }
+  button{font-family:inherit;cursor:pointer;}
+  :focus-visible{outline:2px solid var(--brand); outline-offset:2px;}
+
+  /* ---------- App shell ---------- */
+  .app{
+    display:grid;
+    grid-template-columns:224px 1fr;
+    min-height:100vh;
+  }
+  .sidebar{
+    background:var(--brand-dark);
+    color:#EAF1EC;
+    padding:22px 16px;
+    display:flex;
+    flex-direction:column;
+    gap:26px;
+  }
+  .brand{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:0 4px;
+  }
+  .brand-mark{
+    width:34px;height:34px;border-radius:8px;
+    background:var(--gold);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;color:var(--brand-dark);font-size:15px;
+    font-family:"Archivo",sans-serif;
+    flex:none;
+  }
+  .brand-word{font-size:15.5px;font-weight:700;color:#fff;line-height:1.25;}
+  .brand-word small{display:block;font-family:"Inter",sans-serif;font-weight:500;font-size:11px;color:#B7C9BD;}
+
+  nav.primary-nav{display:flex;flex-direction:column;gap:2px;}
+  .nav-btn{
+    display:flex;align-items:center;gap:11px;
+    background:transparent;border:none;color:#CBDBD0;
+    padding:10px 12px;border-radius:8px;font-size:14px;font-weight:500;
+    text-align:left;width:100%;
+    transition:background .15s ease, color .15s ease;
+  }
+  .nav-btn:hover{background:rgba(255,255,255,0.06);color:#fff;}
+  .nav-btn.active{background:var(--gold);color:var(--brand-dark);font-weight:700;}
+  .nav-icon{width:18px;height:18px;flex:none;display:flex;align-items:center;justify-content:center;}
+  .nav-icon svg{width:100%;height:100%;}
+
+  .sidebar-foot{
+    margin-top:auto;
+    border-top:1px solid rgba(255,255,255,0.12);
+    padding-top:14px;
+    font-size:12px;color:#9FB4A6;
+  }
+
+  .main{display:flex;flex-direction:column;min-width:0;}
+
+  .topbar{
+    background:var(--surface);
+    border-bottom:1px solid var(--border);
+    padding:14px 28px;
+    display:flex;align-items:center;justify-content:space-between;
+    gap:16px;flex-wrap:wrap;
+    position:sticky;top:0;z-index:5;
+  }
+  .topbar-title{font-size:19px;font-weight:700;}
+  .topbar-sub{font-size:13px;color:var(--ink-soft);margin-top:2px;}
+  .topbar-right{display:flex;align-items:center;gap:12px;}
+
+  select.branch-select{
+    appearance:none;
+    background:var(--surface-2) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="%235C6B5F"><path d="M5.5 7.5l4.5 4.5 4.5-4.5z"/></svg>') no-repeat right 10px center / 14px;
+    border:1px solid var(--border);
+    padding:8px 30px 8px 12px;
+    border-radius:8px;font-size:13.5px;font-weight:600;color:var(--ink);
+  }
+  .role-chip{
+    display:flex;align-items:center;gap:8px;
+    background:var(--brand-tint);color:var(--brand-dark);
+    padding:6px 12px 6px 6px;border-radius:20px;font-size:13px;font-weight:600;
+  }
+  .role-chip .avatar{
+    width:24px;height:24px;border-radius:50%;background:var(--brand);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;
+  }
+
+  .demo-banner{
+    background:var(--gold-tint);
+    color:#6B4E17;
+    font-size:12.5px;
+    padding:8px 28px;
+    border-bottom:1px solid #E9D7A8;
+    display:flex;align-items:center;gap:8px;
+  }
+  .demo-banner strong{font-weight:700;}
+
+  .view{padding:24px 28px 48px;display:none;}
+  .view.active{display:block;}
+
+  /* ---------- Shared bits ---------- */
+  .card{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:var(--radius-md);
+    box-shadow:var(--shadow);
+  }
+  .section-head{display:flex;align-items:baseline;justify-content:space-between;margin:28px 0 14px;}
+  .section-head:first-child{margin-top:0;}
+  .section-head h2{font-size:16px;font-weight:700;margin:0;}
+  .section-head span{font-size:12.5px;color:var(--ink-soft);}
+
+  /* ---------- Dashboard ---------- */
+  .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+  .stat-card{padding:16px 18px;}
+  .stat-card .label{font-size:12.5px;color:var(--ink-soft);font-weight:600;}
+  .stat-card .value{font-size:24px;font-weight:800;margin-top:6px;font-family:"Archivo",sans-serif;}
+  .stat-card .delta{font-size:12px;margin-top:6px;font-weight:600;}
+  .delta.up{color:var(--brand);}
+  .delta.down{color:var(--brick);}
+
+  .branch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
+  .branch-card{padding:16px 18px;}
+  .branch-card .bh{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .branch-card .bh h3{font-size:14.5px;font-weight:700;margin:0;}
+  .status-dot{width:8px;height:8px;border-radius:50%;background:var(--brand);display:inline-block;margin-right:6px;}
+  .branch-metrics{display:flex;gap:22px;margin-bottom:12px;}
+  .branch-metrics div span{display:block;}
+  .branch-metrics .m-label{font-size:11.5px;color:var(--ink-soft);}
+  .branch-metrics .m-value{font-size:16px;font-weight:700;}
+  .bar-track{height:7px;background:var(--surface-2);border-radius:5px;overflow:hidden;}
+  .bar-fill{height:100%;background:var(--brand);border-radius:5px;}
+  .bar-fill.gold{background:var(--gold);}
+  .flag-row{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12.5px;color:var(--brick);font-weight:600;}
+
+  /* ---------- POS / Sales ---------- */
+  .pos-layout{display:grid;grid-template-columns:1fr 320px;gap:18px;align-items:start;}
+  .chip-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+  .chip{
+    border:1px solid var(--border);background:var(--surface);
+    padding:7px 14px;border-radius:20px;font-size:13px;font-weight:600;color:var(--ink-soft);
+  }
+  .chip.active{background:var(--brand);border-color:var(--brand);color:#fff;}
+  .product-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  .product-card{
+    padding:14px;text-align:left;border:1px solid var(--border);background:var(--surface);
+    border-radius:var(--radius-md);transition:border-color .15s ease, transform .1s ease;
+  }
+  .product-card:hover{border-color:var(--brand);}
+  .product-card:active{transform:scale(0.98);}
+  .product-card .pc-cat{font-size:11px;color:var(--gold);font-weight:700;}
+  .product-card .pc-name{font-size:14px;font-weight:700;margin:5px 0 8px;line-height:1.3;}
+  .product-card .pc-price{font-size:13.5px;color:var(--ink-soft);font-weight:600;}
+
+  .cart-card{padding:16px;position:sticky;top:78px;}
+  .cart-card h3{font-size:14.5px;margin:0 0 12px;}
+  .cart-empty{font-size:13px;color:var(--ink-soft);padding:18px 0;text-align:center;}
+  .cart-item{display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);gap:8px;}
+  .cart-item .ci-name{font-size:13px;font-weight:600;}
+  .cart-item .ci-sub{font-size:11.5px;color:var(--ink-soft);}
+  .qty-ctrl{display:flex;align-items:center;gap:6px;}
+  .qty-ctrl button{width:22px;height:22px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2);font-weight:700;font-size:13px;line-height:1;}
+  .qty-ctrl span{min-width:16px;text-align:center;font-size:13px;font-weight:700;}
+  .cart-total-row{display:flex;justify-content:space-between;padding:12px 0;font-size:15px;font-weight:800;border-top:1px solid var(--border);margin-top:6px;}
+  .pay-toggle{display:flex;gap:8px;margin:12px 0;}
+  .pay-toggle button{flex:1;padding:9px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);font-weight:700;font-size:13px;color:var(--ink-soft);}
+  .pay-toggle button.active{background:var(--brand-tint);border-color:var(--brand);color:var(--brand-dark);}
+  .btn-primary{
+    width:100%;background:var(--brand);color:#fff;border:none;padding:12px;border-radius:8px;
+    font-weight:700;font-size:14px;
+  }
+  .btn-primary:hover{background:var(--brand-dark);}
+  .btn-primary:disabled{background:#B9C4BB;cursor:not-allowed;}
+
+  /* ---------- Stock ---------- */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;}
+  thead th{
+    text-align:left;font-size:11.5px;font-weight:700;color:var(--ink-soft);
+    padding:0 14px 10px;border-bottom:1px solid var(--border);
+  }
+  tbody td{padding:12px 14px;border-bottom:1px solid var(--border);}
+  tbody tr:last-child td{border-bottom:none;}
+  .cat-pill{
+    display:inline-block;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;
+    background:var(--brand-tint);color:var(--brand-dark);
+  }
+  .qty-low{color:var(--brick);font-weight:700;}
+  .flag-pill{
+    display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;color:var(--brick);
+    background:var(--brick-tint);padding:3px 9px;border-radius:20px;
+  }
+
+  /* ---------- Daily closing ---------- */
+  .closing-layout{display:grid;grid-template-columns:1fr 340px;gap:18px;align-items:start;}
+  .cashier-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--border);}
+  .cashier-row:last-child{border-bottom:none;}
+  .cashier-name{font-size:13.5px;font-weight:600;}
+  .cashier-branch{font-size:11.5px;color:var(--ink-soft);}
+  .cashier-amt{font-size:14px;font-weight:700;}
+
+  .input-row{margin-bottom:14px;}
+  .input-row label{display:block;font-size:12.5px;font-weight:600;color:var(--ink-soft);margin-bottom:5px;}
+  .input-wrap{position:relative;}
+  .input-wrap span{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:13.5px;color:var(--ink-soft);font-weight:600;}
+  .input-wrap input{
+    width:100%;padding:9px 12px 9px 28px;border:1px solid var(--border);border-radius:8px;
+    font-size:13.5px;font-weight:600;color:var(--ink);background:var(--surface-2);
+  }
+  .input-wrap input:focus{background:#fff;border-color:var(--brand);}
+  .calc-line{display:flex;justify-content:space-between;font-size:13.5px;padding:7px 0;color:var(--ink-soft);}
+  .calc-line.sub{color:var(--brick);}
+  .calc-final{
+    display:flex;justify-content:space-between;align-items:center;
+    margin-top:10px;padding-top:14px;border-top:2px solid var(--brand-dark);
+  }
+  .calc-final .label{font-size:13px;font-weight:700;}
+  .calc-final .value{font-size:22px;font-weight:800;color:var(--brand-dark);font-family:"Archivo",sans-serif;}
+
+  /* ---------- Responsive ---------- */
+  @media (max-width:980px){
+    .stat-grid{grid-template-columns:repeat(2,1fr);}
+    .branch-grid{grid-template-columns:1fr;}
+    .pos-layout,.closing-layout{grid-template-columns:1fr;}
+    .cart-card{position:static;}
+    .product-grid{grid-template-columns:repeat(2,1fr);}
+  }
+  @media (max-width:680px){
+    .app{grid-template-columns:1fr;}
+    .sidebar{
+      flex-direction:row;align-items:center;padding:12px 14px;gap:14px;
+      overflow-x:auto;
+    }
+    .sidebar-foot{display:none;}
+    nav.primary-nav{flex-direction:row;}
+    .stat-grid{grid-template-columns:1fr 1fr;}
+    .product-grid{grid-template-columns:1fr 1fr;}
+    .view{padding:18px 16px 40px;}
+    .topbar{padding:12px 16px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">ALG</div>
+      <div class="brand-word">A.L.G Investment<small>Nigeria Limited</small></div>
+    </div>
+
+    <nav class="primary-nav" id="primaryNav">
+      <button class="nav-btn active" data-view="dashboard">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></span>
+        Dashboard
+      </button>
+      <button class="nav-btn" data-view="pos">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18l-1.5 9.5a2 2 0 0 1-2 1.7H6.5a2 2 0 0 1-2-1.7L3 6z"/><path d="M8 6V4.5A2.5 2.5 0 0 1 10.5 2h3A2.5 2.5 0 0 1 16 4.5V6"/></svg></span>
+        Sales (POS)
+      </button>
+      <button class="nav-btn" data-view="stock">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></span>
+        Stock
+      </button>
+      <button class="nav-btn" data-view="closing">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span>
+        Daily Closing
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      Preview build<br>v0.1 · Not connected to live data
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="demo-banner">
+      <strong>Preview only:</strong> the numbers and names below are sample data, so you can see how the finished system will look and feel. Nothing here is saved or real.
+    </div>
+
+    <header class="topbar">
+      <div>
+        <div class="topbar-title" id="topbarTitle">Dashboard</div>
+        <div class="topbar-sub" id="topbarSub">All branches, today</div>
+      </div>
+      <div class="topbar-right">
+        <select class="branch-select" id="branchSelect">
+          <option>All Branches</option>
+          <option>Kano Branch</option>
+          <option>Kaduna Branch</option>
+          <option>Sokoto Branch</option>
+          <option>Zaria Branch</option>
+        </select>
+        <div class="role-chip"><span class="avatar">MA</span>Admin / Owner</div>
+      </div>
+    </header>
+
+    <!-- ================= DASHBOARD ================= -->
+    <section class="view active" id="view-dashboard">
+      <div class="section-head"><h2>Today at a glance</h2><span>Updated a few seconds ago</span></div>
+      <div class="stat-grid">
+        <div class="card stat-card">
+          <div class="label">Total Sales Today</div>
+          <div class="value">₦4,286,500</div>
+          <div class="delta up">▲ 12% vs. yesterday</div>
+        </div>
+        <div class="card stat-card">
+          <div class="label">Expenses + Expenditures</div>
+          <div class="value">₦318,200</div>
+          <div class="delta down">▲ across 4 branches</div>
+        </div>
+        <div class="card stat-card">
+          <div class="label">Credit Given Today</div>
+          <div class="value">₦540,000</div>
+          <div class="delta down">7 customers</div>
+        </div>
+        <div class="card stat-card">
+          <div class="label">Net Total (all branches)</div>
+          <div class="value">₦3,428,300</div>
+          <div class="delta up">After deductions</div>
+        </div>
+      </div>
+
+      <div class="section-head"><h2>Branch performance</h2><span>Tap a branch to drill in</span></div>
+      <div class="branch-grid">
+        <div class="card branch-card">
+          <div class="bh"><h3><span class="status-dot"></span>Kano Branch</h3><span class="cat-pill">Fertilizer · Cement</span></div>
+          <div class="branch-metrics">
+            <div><span class="m-label">Sales</span><span class="m-value">₦1,840,000</span></div>
+            <div><span class="m-label">Net</span><span class="m-value">₦1,512,000</span></div>
+          </div>
+          <div class="bar-track"><div class="bar-fill" style="width:82%"></div></div>
+        </div>
+        <div class="card branch-card">
+          <div class="bh"><h3><span class="status-dot"></span>Kaduna Branch</h3><span class="cat-pill">Cereals · Rice</span></div>
+          <div class="branch-metrics">
+            <div><span class="m-label">Sales</span><span class="m-value">₦1,120,500</span></div>
+            <div><span class="m-label">Net</span><span class="m-value">₦944,300</span></div>
+          </div>
+          <div class="bar-track"><div class="bar-fill gold" style="width:64%"></div></div>
+          <div class="flag-row">⚠ 2 stock movements not yet matched to a sale</div>
+        </div>
+        <div class="card branch-card">
+          <div class="bh"><h3><span class="status-dot" style="background:var(--gold)"></span>Sokoto Branch</h3><span class="cat-pill">Kwano · Spaghetti</span></div>
+          <div class="branch-metrics">
+            <div><span class="m-label">Sales</span><span class="m-value">₦742,000</span></div>
+            <div><span class="m-label">Net</span><span class="m-value">₦610,500</span></div>
+          </div>
+          <div class="bar-track"><div class="bar-fill" style="width:47%"></div></div>
+        </div>
+        <div class="card branch-card">
+          <div class="bh"><h3><span class="status-dot"></span>Zaria Branch</h3><span class="cat-pill">Fertilizer · Cereals</span></div>
+          <div class="branch-metrics">
+            <div><span class="m-label">Sales</span><span class="m-value">₦584,000</span></div>
+            <div><span class="m-label">Net</span><span class="m-value">₦361,500</span></div>
+          </div>
+          <div class="bar-track"><div class="bar-fill" style="width:35%"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= POS / SALES ================= -->
+    <section class="view" id="view-pos">
+      <div class="section-head"><h2>Record a sale — Kano Branch</h2><span>Cashier: Amina Bello</span></div>
+      <div class="pos-layout">
+        <div>
+          <div class="chip-row" id="chipRow">
+            <button class="chip active" data-cat="all">All</button>
+            <button class="chip" data-cat="Fertilizer">Fertilizer</button>
+            <button class="chip" data-cat="Cement">Cement</button>
+            <button class="chip" data-cat="Kwano">Kwano</button>
+            <button class="chip" data-cat="Cereals">Cereals</button>
+            <button class="chip" data-cat="Rice">Rice</button>
+            <button class="chip" data-cat="Spaghetti">Spaghetti</button>
+          </div>
+          <div class="product-grid" id="productGrid"></div>
+        </div>
+
+        <div class="card cart-card">
+          <h3>Current sale</h3>
+          <div id="cartBody"><div class="cart-empty">No items added yet.<br>Tap a product to add it.</div></div>
+          <div class="cart-total-row"><span>Total</span><span id="cartTotal">₦0</span></div>
+          <div class="pay-toggle">
+            <button class="active" id="payCash">Cash</button>
+            <button id="payCredit">Credit</button>
+          </div>
+          <button class="btn-primary" id="completeSale" disabled>Complete Sale</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= STOCK ================= -->
+    <section class="view" id="view-stock">
+      <div class="section-head"><h2>Stock on hand</h2><span>Across all branches</span></div>
+      <div class="card" style="padding:6px 0;overflow-x:auto;">
+        <table>
+          <thead>
+            <tr><th>Product</th><th>Category</th><th>Branch</th><th>Qty in stock</th><th>Last movement</th><th></th></tr>
+          </thead>
+          <tbody id="stockBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================= DAILY CLOSING ================= -->
+    <section class="view" id="view-closing">
+      <div class="section-head"><h2>Daily closing — Kano Branch</h2><span>Friday, 11 Sept 2026</span></div>
+      <div class="closing-layout">
+        <div class="card" style="padding:16px 18px;">
+          <h3 style="font-size:14.5px;margin:0 0 4px;">Sales by cashier</h3>
+          <div class="cashier-row">
+            <div><div class="cashier-name">Amina Bello</div><div class="cashier-branch">Morning shift</div></div>
+            <div class="cashier-amt">₦1,120,000</div>
+          </div>
+          <div class="cashier-row">
+            <div><div class="cashier-name">Yusuf Garba</div><div class="cashier-branch">Afternoon shift</div></div>
+            <div class="cashier-amt">₦720,000</div>
+          </div>
+          <div class="cashier-row">
+            <div><div class="cashier-name">Fatima Sani</div><div class="cashier-branch">Evening shift</div></div>
+            <div class="cashier-amt">₦0</div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:16px 18px;">
+          <h3 style="font-size:14.5px;margin:0 0 14px;">Today's deductions</h3>
+          <div class="input-row">
+            <label>Expenses</label>
+            <div class="input-wrap"><span>₦</span><input type="number" id="inExpenses" value="45000"></div>
+          </div>
+          <div class="input-row">
+            <label>Expenditures</label>
+            <div class="input-wrap"><span>₦</span><input type="number" id="inExpenditures" value="60000"></div>
+          </div>
+          <div class="input-row">
+            <label>Credit given</label>
+            <div class="input-wrap"><span>₦</span><input type="number" id="inCredit" value="120000"></div>
+          </div>
+
+          <div class="calc-line"><span>Total sales of the day</span><span id="calcSales">₦1,840,000</span></div>
+          <div class="calc-line sub"><span>− Expenses, expenditures &amp; credit</span><span id="calcDeduct">₦225,000</span></div>
+          <div class="calc-final"><span class="label">Net total for the day</span><span class="value" id="calcFinal">₦1,615,000</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ---------- Nav ----------
+  const navBtns = document.querySelectorAll('.nav-btn');
+  const views = document.querySelectorAll('.view');
+  const titles = {
+    dashboard: ['Dashboard', 'All branches, today'],
+    pos: ['Sales (POS)', 'Kano Branch · record a new sale'],
+    stock: ['Stock', 'Current stock across all branches'],
+    closing: ['Daily Closing', 'Kano Branch · end-of-day summary']
+  };
+  navBtns.forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      navBtns.forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      const key = btn.dataset.view;
+      views.forEach(v=>v.classList.remove('active'));
+      document.getElementById('view-'+key).classList.add('active');
+      document.getElementById('topbarTitle').textContent = titles[key][0];
+      document.getElementById('topbarSub').textContent = titles[key][1];
+    });
+  });
+
+  // ---------- POS data ----------
+  const products = [
+    {name:'Dangote Urea', cat:'Fertilizer', price:22000},
+    {name:'Indorama Urea', cat:'Fertilizer', price:21500},
+    {name:'Super Tech Urea', cat:'Fertilizer', price:20800},
+    {name:'Golden 20-10-10', cat:'Fertilizer', price:19500},
+    {name:'Matrix 20-10-5', cat:'Fertilizer', price:18700},
+    {name:'Nagari 15-15-15', cat:'Fertilizer', price:19000},
+    {name:'Kasko 20-10-10', cat:'Fertilizer', price:18900},
+    {name:'Indorama NPK', cat:'Fertilizer', price:21000},
+    {name:'Mangal Cement', cat:'Cement', price:8500},
+    {name:'Blockmaster Cement', cat:'Cement', price:8200},
+    {name:'Dangote 3X Cement', cat:'Cement', price:8700},
+    {name:'Sokoto Cement', cat:'Cement', price:8100},
+    {name:'Aarti', cat:'Kwano', price:15200},
+    {name:'Arti Long', cat:'Kwano', price:15600},
+    {name:'Kam', cat:'Kwano', price:14100},
+    {name:'Sumo', cat:'Kwano', price:14800},
+    {name:'Wake', cat:'Cereals', price:62000},
+    {name:'Alkama', cat:'Cereals', price:48000},
+    {name:'Masara', cat:'Cereals', price:39000},
+    {name:'Dawa', cat:'Cereals', price:41000},
+    {name:'BUA Rice', cat:'Rice', price:75000},
+    {name:'Gerawa Rice', cat:'Rice', price:69000},
+    {name:'IRS Pasta', cat:'Spaghetti', price:9800},
+    {name:'Crown Pasta', cat:'Spaghetti', price:9500},
+  ];
+  const grid = document.getElementById('productGrid');
+  const chipRow = document.getElementById('chipRow');
+  const cartBody = document.getElementById('cartBody');
+  const cartTotalEl = document.getElementById('cartTotal');
+  const completeBtn = document.getElementById('completeSale');
+  const naira = n => '₦' + n.toLocaleString('en-NG');
+
+  let activeCat = 'all';
+  let cart = {}; // name -> {price, qty}
+
+  function renderProducts(){
+    grid.innerHTML = '';
+    products
+      .filter(p => activeCat==='all' || p.cat===activeCat)
+      .forEach(p=>{
+        const card = document.createElement('button');
+        card.className = 'product-card';
+        card.innerHTML = `<div class="pc-cat">${p.cat}</div><div class="pc-name">${p.name}</div><div class="pc-price">${naira(p.price)}</div>`;
+        card.addEventListener('click', ()=> addToCart(p));
+        grid.appendChild(card);
+      });
+  }
+
+  function addToCart(p){
+    if(!cart[p.name]) cart[p.name] = {price:p.price, qty:0};
+    cart[p.name].qty++;
+    renderCart();
+  }
+  function changeQty(name, delta){
+    if(!cart[name]) return;
+    cart[name].qty += delta;
+    if(cart[name].qty<=0) delete cart[name];
+    renderCart();
+  }
+  function renderCart(){
+    const names = Object.keys(cart);
+    if(names.length===0){
+      cartBody.innerHTML = '<div class="cart-empty">No items added yet.<br>Tap a product to add it.</div>';
+      completeBtn.disabled = true;
+      cartTotalEl.textContent = naira(0);
+      return;
+    }
+    let total = 0;
+    cartBody.innerHTML = names.map(name=>{
+      const item = cart[name];
+      const lineTotal = item.price*item.qty;
+      total += lineTotal;
+      return `<div class="cart-item">
+        <div><div class="ci-name">${name}</div><div class="ci-sub">${naira(item.price)} each</div></div>
+        <div class="qty-ctrl">
+          <button aria-label="Decrease" data-name="${name}" data-delta="-1">−</button>
+          <span>${item.qty}</span>
+          <button aria-label="Increase" data-name="${name}" data-delta="1">+</button>
+        </div>
+      </div>`;
+    }).join('');
+    cartTotalEl.textContent = naira(total);
+    completeBtn.disabled = false;
+    cartBody.querySelectorAll('button[data-name]').forEach(btn=>{
+      btn.addEventListener('click', ()=> changeQty(btn.dataset.name, parseInt(btn.dataset.delta,10)));
+    });
+  }
+
+  chipRow.querySelectorAll('.chip').forEach(chip=>{
+    chip.addEventListener('click', ()=>{
+      chipRow.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+      chip.classList.add('active');
+      activeCat = chip.dataset.cat;
+      renderProducts();
+    });
+  });
+
+  const payCash = document.getElementById('payCash');
+  const payCredit = document.getElementById('payCredit');
+  [payCash, payCredit].forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      payCash.classList.remove('active'); payCredit.classList.remove('active');
+      btn.classList.add('active');
+    });
+  });
+
+  completeBtn.addEventListener('click', ()=>{
+    completeBtn.textContent = 'Sale recorded ✓';
+    setTimeout(()=>{
+      cart = {};
+      renderCart();
+      completeBtn.textContent = 'Complete Sale';
+    }, 900);
+  });
+
+  renderProducts();
+  renderCart();
+
+  // ---------- Stock table ----------
+  const stock = [
+    {name:'Dangote Urea', cat:'Fertilizer', branch:'Kano', qty:412, last:'Received · 2h ago', flag:false},
+    {name:'Golden 20-10-10', cat:'Fertilizer', branch:'Kaduna', qty:18, last:'Sold · 20m ago', flag:false},
+    {name:'Mangal Cement', cat:'Cement', branch:'Kano', qty:640, last:'Received · yesterday', flag:false},
+    {name:'Aarti', cat:'Kwano', branch:'Sokoto', qty:9, last:'Moved out · 3h ago', flag:true},
+    {name:'Wake', cat:'Cereals', branch:'Kaduna', qty:120, last:'Moved out · 5h ago', flag:true},
+    {name:'BUA Rice', cat:'Rice', branch:'Zaria', qty:266, last:'Received · today', flag:false},
+    {name:'IRS Pasta', cat:'Spaghetti', branch:'Sokoto', qty:54, last:'Sold · 1h ago', flag:false},
+  ];
+  document.getElementById('stockBody').innerHTML = stock.map(s=>`
+    <tr>
+      <td style="font-weight:600;">${s.name}</td>
+      <td><span class="cat-pill">${s.cat}</span></td>
+      <td>${s.branch}</td>
+      <td class="${s.qty<20?'qty-low':''}">${s.qty} bags</td>
+      <td style="color:var(--ink-soft);">${s.last}</td>
+      <td>${s.flag ? '<span class="flag-pill">⚠ Not matched to a sale</span>' : ''}</td>
+    </tr>
+  `).join('');
+
+  // ---------- Daily closing calculator ----------
+  const salesTotal = 1840000;
+  const inExpenses = document.getElementById('inExpenses');
+  const inExpenditures = document.getElementById('inExpenditures');
+  const inCredit = document.getElementById('inCredit');
+  const calcSales = document.getElementById('calcSales');
+  const calcDeduct = document.getElementById('calcDeduct');
+  const calcFinal = document.getElementById('calcFinal');
+
+  function recalc(){
+    const e = Number(inExpenses.value)||0;
+    const x = Number(inExpenditures.value)||0;
+    const c = Number(inCredit.value)||0;
+    const deduct = e+x+c;
+    calcSales.textContent = naira(salesTotal);
+    calcDeduct.textContent = '− ' + naira(deduct);
+    calcFinal.textContent = naira(salesTotal-deduct);
+  }
+  [inExpenses, inExpenditures, inCredit].forEach(el=> el.addEventListener('input', recalc));
+  recalc();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+python -m PyInstaller RafawaApp.spec --clean
+
+.venv\Scripts\python.exe -m PyInstaller RafawaApp.spec
+
+Get-ChildItem -Path . -Filter "__pycache__" -Recurse | Remove-Item -Force -Recurse

@@ -1,0 +1,443 @@
+# apps/product_management_app/features/cashier/views/cashier_sales.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, List
+
+from PySide2.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QFrame,
+    QSplitter
+)
+from PySide2.QtCore import Qt
+
+from apps.product_management_app.features.receipts.activity_receipt_printer import ActivityReceipt, ShopMeta
+from apps.product_management_app.app_state import state, Product
+from apps.product_management_app.features.cashier.dialogs.sale_checkout_dialog import SaleCheckoutDialog
+from apps.product_management_app.features.cashier.dialogs.sale_item_dialog import SaleItemDialog
+from apps.product_management_app.features.profiling.dialogs.sale_payment_dialog import SalePaymentDialog
+from database.services.receipt_service import ReceiptService
+from apps.product_management_app.utils.receipt_generator import ReceiptGenerator
+from database.services.sales_service import SaleService
+from database.models import Party
+from database.session import get_session
+from datetime import datetime
+
+
+@dataclass
+class CartItem:
+    product_id: int
+    product_type: str
+    name: str
+    unit_price: float
+    unit_cost_at_sale: float
+    qty_bags: int
+    total_weight_kg: float
+
+    @property
+    def subtotal(self) -> float:
+        ptype = (self.product_type or "").strip().lower()
+        if ptype == "fertilizer":
+            return float(self.qty_bags) * float(self.unit_price)
+        return float(self.total_weight_kg) * float(self.unit_price)
+
+
+class CashierSalesView(QWidget):
+
+    def __init__(self):
+        super().__init__()
+
+        self.cart: List[CartItem] = []
+        self.current_category: str = ""  # crops | fertilizer
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # ================= HEADER =================
+        header = QHBoxLayout()
+        root.addLayout(header)
+
+        title = QLabel("Sales Console")
+        title.setObjectName("Title")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.category_cb = QComboBox()
+        self.category_cb.addItems(["Select Category", "Crops", "Fertilizer"])
+        header.addWidget(self.category_cb)
+
+        self.btn_checkout = QPushButton("Finalize Sale")
+        self.btn_checkout.setObjectName("PrimaryButton")
+        header.addWidget(self.btn_checkout)
+
+        # ================= MAIN SPLIT =================
+        splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(splitter, 1)
+
+        # =====================================================
+        # LEFT PANEL → CUSTOMER + PRODUCT SEARCH
+        # =====================================================
+        left = QFrame()
+        left.setObjectName("Card")
+        l = QVBoxLayout(left)
+        l.setContentsMargins(12, 12, 12, 12)
+        l.setSpacing(10)
+
+        # ---- Customer Section ----
+        l.addWidget(QLabel("Customer"))
+
+        self.customer_cb = QComboBox()
+        l.addWidget(self.customer_cb)
+
+        self.walkin_name = QLineEdit()
+        self.walkin_name.setPlaceholderText("New account name / Walk-in name")
+        l.addWidget(self.walkin_name)
+
+        # 🚀 NEW: Dynamic Point-of-Sale Account Registration Mode Dropdown Selector Toggle
+        self.walkin_type_cb = QComboBox()
+        self.walkin_type_cb.addItems([
+            "Casual Walk-In (No Permanent Ledger Account)",
+            "Permanent Regular Customer (Opens Lines of Credit/History)"
+        ])
+        l.addWidget(self.walkin_type_cb)
+
+        l.addSpacing(12)
+
+        # ---- Product Section ----
+        l.addWidget(QLabel("Product"))
+
+        self.prod_search = QLineEdit()
+        self.prod_search.setPlaceholderText("Search product…")
+        l.addWidget(self.prod_search)
+
+        self.prod_pick = QComboBox()
+        l.addWidget(self.prod_pick)
+
+        self.btn_add = QPushButton("Add Item")
+        self.btn_add.setObjectName("PrimaryButton")
+        l.addWidget(self.btn_add)
+
+        l.addStretch(1)
+        splitter.addWidget(left)
+
+        # =====================================================
+        # RIGHT PANEL → CART
+        # =====================================================
+        right = QFrame()
+        right.setObjectName("Card")
+        r = QVBoxLayout(right)
+        r.setContentsMargins(12, 12, 12, 12)
+        r.setSpacing(8)
+
+        r.addWidget(QLabel("Cart"))
+
+        self.cart_table = QTableWidget(0, 5)
+        self.cart_table.setHorizontalHeaderLabels([
+            "Product", "Rate", "Bags", "Kg", "Subtotal"
+        ])
+        self.cart_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.cart_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.cart_table.horizontalHeader().setStretchLastSection(True)
+        r.addWidget(self.cart_table, 1)
+
+        btn_row = QHBoxLayout()
+        r.addLayout(btn_row)
+
+        self.btn_remove = QPushButton("Remove Selected")
+        self.btn_clear = QPushButton("Clear Cart")
+
+        btn_row.addWidget(self.btn_remove)
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addStretch(1)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(1, 2)
+
+        # ================= WIRING =================
+        self.category_cb.currentTextChanged.connect(self._on_category_changed)
+        self.prod_search.textChanged.connect(self._refresh_product_picker)
+        self.btn_add.clicked.connect(self._add_to_cart)
+        self.btn_remove.clicked.connect(self._remove_selected)
+        self.btn_clear.clicked.connect(self._clear_cart)
+        self.btn_checkout.clicked.connect(self._checkout)
+
+        # Wire customer selection listener to manage modifier component properties dynamically
+        self.customer_cb.currentIndexChanged.connect(self._sync_customer_ui)
+
+        # Initialize combobox dataset lists
+        self._refresh_customer_combobox()
+        self._refresh_product_picker()
+
+    def _refresh_customer_combobox(self):
+        """
+        🔄 Populates/Refreshes the structural combo box selection with database regular accounts
+        """
+        self.customer_cb.blockSignals(True)
+        self.customer_cb.clear()
+        self.customer_cb.addItem("Walk-in customer / New Account", None)
+        for c in getattr(state, "customers", []):
+            self.customer_cb.addItem(f"{c.full_name} ({c.phone})", c.id)
+        self.customer_cb.blockSignals(False)
+        self._sync_customer_ui()
+
+    def _sync_customer_ui(self):
+        """
+        🛡️ Toggles the point-of-sale input controls context based on active dropdown parameters
+        """
+        is_walkin = (self.customer_cb.currentData() is None)
+        self.walkin_name.setVisible(is_walkin)
+        self.walkin_type_cb.setVisible(is_walkin)
+
+    def _on_category_changed(self, text: str):
+        cat = text.strip().lower()
+        if cat not in ("crops", "fertilizer"):
+            self.current_category = ""
+            self.prod_pick.clear()
+            return
+
+        if self.cart:
+            existing = self.cart.product_type
+            if existing != cat:
+                QMessageBox.warning(
+                    self,
+                    "Ledger Conflict",
+                    "Cannot change category while cart contains items.\nClear cart first."
+                )
+                self.category_cb.blockSignals(True)
+                self.category_cb.setCurrentText(existing.capitalize())
+                self.category_cb.blockSignals(False)
+                return
+
+        self.current_category = cat
+        self._refresh_product_picker()
+
+    def _refresh_product_picker(self):
+        self.prod_pick.clear()
+        if not self.current_category:
+            return
+
+        items = SaleService.list_products_for_sale(
+            q=self.prod_search.text(),
+            limit=500
+        )
+
+        for p in items:
+            ptype = str(p.get("product_type") or "").strip().lower()
+            if ptype != self.current_category:
+                continue
+
+            self.prod_pick.addItem(
+                f"{p['name']} • {p['sku']} • stock:{p['stock']:,.2f} • ₦{p['sale_rate']:,.2f}",
+                p["id"]
+            )
+
+    def _add_to_cart(self):
+        if not self.current_category:
+            QMessageBox.information(self, "Sale", "Select category first.")
+            return
+
+        pid = self.prod_pick.currentData()
+        if pid is None:
+            QMessageBox.information(self, "Sale", "Select a product.")
+            return
+
+        p = SaleService.get_product_for_sale(int(pid))
+        if not p:
+            QMessageBox.warning(self, "Sale", "Product unavailable.")
+            return
+
+        dlg = SaleItemDialog(
+            self,
+            product_id=int(p["id"]),
+            product_name=str(p["name"]),
+            product_type=self.current_category,
+            unit_price=float(p.get("sale_rate") or 0.0),
+        )
+
+        if dlg.exec_() != dlg.Accepted:
+            return
+
+        payload = dlg.payload()
+        variant = payload.get("variant", "Default")
+        label = str(p["name"]) if variant.lower() == "default" else f"{p['name']} • {variant}"
+
+        self.cart.append(CartItem(
+            product_id=int(p["id"]),
+            product_type=self.current_category,
+            name=label,
+            unit_price=float(payload["unit_price"]),
+            unit_cost_at_sale=float(payload["unit_cost_at_sale"]),
+            qty_bags=int(payload["qty_bags"]),
+            total_weight_kg=float(payload["total_weight_kg"]),
+        ))
+
+        self._refresh_cart()
+
+    def _selected_cart_index(self) -> Optional[int]:
+        r = self.cart_table.currentRow()
+        if r < 0 or r >= len(self.cart):
+            return None
+        return r
+
+    def _remove_selected(self):
+        idx = self._selected_cart_index()
+        if idx is None:
+            QMessageBox.information(self, "Cart", "Select a cart row first.")
+            return
+        self.cart.pop(idx)
+        self._refresh_cart()
+
+    def _clear_cart(self):
+        if not self.cart:
+            return
+        ok = QMessageBox.question(self, "Confirm", "Clear entire cart?", QMessageBox.Yes | QMessageBox.No)
+        if ok == QMessageBox.Yes:
+            self.cart.clear()
+            self._refresh_cart()
+
+    def _refresh_cart(self):
+        self.cart_table.setRowCount(0)
+        for it in self.cart:
+            row = self.cart_table.rowCount()
+            self.cart_table.insertRow(row)
+
+            vals = [
+                it.name,
+                f"{it.unit_price:,.2f}",
+                str(int(it.qty_bags)),
+                f"{it.total_weight_kg:,.2f}",
+                f"{it.subtotal:,.2f}",
+            ]
+
+            for c, v in enumerate(vals):
+                cell = QTableWidgetItem(v)
+                if c in (1, 2, 3, 4):
+                    cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.cart_table.setItem(row, c, cell)
+
+    def _checkout(self):
+        if not self.cart:
+            QMessageBox.information(self, "Checkout", "Cart is empty.")
+            return
+
+        types = set(str(x.product_type or "").strip().lower() for x in self.cart)
+        types.discard("")
+        if len(types) > 1:
+            QMessageBox.warning(self, "Checkout", "Mixed carts not allowed.")
+            return
+
+        for x in self.cart:
+            if int(x.qty_bags) <= 0:
+                QMessageBox.warning(self, "Checkout", f"Missing Bags: {x.name}")
+                return
+            if x.product_type != "fertilizer" and float(x.total_weight_kg) <= 0:
+                QMessageBox.warning(self, "Checkout", f"Missing Kg: {x.name}")
+                return
+
+        cid = self.customer_cb.currentData()
+        walkin = self.walkin_name.text().strip()
+        buyer_party_id = int(cid) if cid is not None else 0
+
+        # ✅ CRITICAL ARCHITECTURAL EXTENSION: Handle Multi-Lane Point-Of-Sale Registrations
+        if buyer_party_id <= 0:
+            target_name = walkin if walkin else "Walk-in Customer"
+            
+            # Read selection string index state from dropdown choice layout
+            if self.walkin_type_cb.currentIndex() == 1:
+                # 👑 STRATEGY PATH A: Instantiate a permanent registered customer configuration on the fly!
+                new_cust = state.create_customer(full_name=target_name, phone="")
+                buyer_party_id = int(new_cust.id) if new_cust else 0
+            else:
+                # 👑 STRATEGY PATH B: File under the casual temporary walkin lane database entity structure
+                buyer_party_id = state.get_or_lazy_create_walkin(target_name, "")
+
+            # Sync runtime cache pools concurrently to make new profiles immediately active
+            state._load_customers_from_db()
+            state._load_walkins_from_db()
+            
+            # Instantly re-hydrate self combobox component so the account option updates for future operations
+            self._refresh_customer_combobox()
+
+        total_revenue = sum(x.subtotal for x in self.cart)
+
+        dlg = SaleCheckoutDialog(
+            self,
+            customer_id=buyer_party_id if buyer_party_id > 0 else None,
+            customer_label=walkin if walkin else self.customer_cb.currentText(),
+            walkin_name=walkin,
+            total=float(total_revenue),
+            total_cost=0.0,
+            total_profit=0.0,
+        )
+        if dlg.exec_() != dlg.Accepted:
+            return
+
+        checkout = dlg.payload()
+        discount = float(checkout.get("discount") or 0.0)
+        grand_total = max(total_revenue - discount, 0.0)
+
+        created_by = state.require_user_id()
+
+        res = SaleService.record({
+            "buyer_party_id": int(buyer_party_id or 0),
+            "walkin_name": walkin,
+            "created_by_user_id": created_by,
+            "items": [{
+                "product_id": x.product_id,
+                "product_type": x.product_type,
+                "qty_bags": x.qty_bags,
+                "total_weight_kg": x.total_weight_kg,
+                "unit_price": x.unit_price,
+            } for x in self.cart],
+            "discount": float(discount),
+            "total": float(grand_total),
+            "note": checkout.get("note") or "",
+        })
+
+        ref = str(res.get("reference") or "")
+        sale_id = int(res.get("sale_id") or 0)
+
+        from database.services.payment_center import PaymentCenter
+
+        PaymentCenter.handle_sale_creation(
+            party_id=int(buyer_party_id or 0),
+            sale_id=int(sale_id),
+            sale_total=float(grand_total),
+            created_by_user_id=created_by
+        )
+
+        if sale_id > 0 and buyer_party_id > 0:
+            with get_session() as s:
+                party = s.query(Party).get(int(buyer_party_id))
+
+            dlg = SalePaymentDialog(
+                party=party,
+                user_id=created_by,
+                parent=self
+            )
+            dlg.exec_()
+
+        # --------------------------------------------------
+        # PRINT SALE RECEIPT (BACKEND TRUTH)
+        # --------------------------------------------------
+        try:
+            if sale_id > 0:
+                payload = ReceiptService.build_sale_receipt(sale_id)
+                ReceiptGenerator.generate(
+                    payload["receipt_type"],
+                    payload["meta"],
+                    payload["items"],
+                    payload["totals"]
+                )
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Print Error",
+                f"Sale recorded but receipt printing failed:\n{e}"
+            )
+
+        QMessageBox.information(self, "Recorded", f"Sale recorded: {ref}")
+        self.cart.clear()
+        self._refresh_cart()
+        self._refresh_product_picker()

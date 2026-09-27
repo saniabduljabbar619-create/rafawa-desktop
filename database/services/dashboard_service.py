@@ -1,0 +1,948 @@
+# database/services/dashboard_service.py
+from __future__ import annotations
+import json
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+from datetime import date
+
+from sqlalchemy import func, case
+from sqlalchemy.orm import joinedload
+from database.session import get_session
+
+from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
+from database.models.product import Product
+from database.models.payment import Payment
+from database.models.advance import Advance
+from database.models.advance_allocations import AdvanceAllocation
+from database.models.sale_return import SaleReturn
+from database.models.sale_discount import SaleDiscount
+from database.models.purchase_return import PurchaseReturn 
+from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+from database.models.user import User
+from database.models.party import Party
+from database.models.purchase import Purchase
+from database.models.sale import Sale
+from database.models.deletion_log import DeletionLog
+
+
+class DeletionNotAllowed(Exception):
+    """Raised when a delete is attempted without a valid acting admin user id."""
+    pass
+
+# Signed movement groups - local aliases for the shared, canonical
+# classification in database/models/stock_movement.py, not an
+# independent copy.
+IN_MOVES = STOCK_IN_TYPES
+OUT_MOVES = STOCK_OUT_TYPES
+
+
+def _sum_stock_totals() -> Dict[str, float]:
+    """
+    Stock totals from stock_movements joined to products.product_type.
+    - fertilizer: bags total
+    - crops: bags + kg total
+    """
+    with get_session() as s:
+        # Bags signed sum
+        signed_bags = case(
+            (StockMovement.movement_type.in_(IN_MOVES), func.coalesce(StockMovement.qty_bags, 0)),
+            (StockMovement.movement_type.in_(OUT_MOVES), -func.coalesce(StockMovement.qty_bags, 0)),
+            else_=0,
+        )
+
+        # Kg signed sum
+        signed_kg = case(
+            (StockMovement.movement_type.in_(IN_MOVES), func.coalesce(StockMovement.total_weight_kg, 0)),
+            (StockMovement.movement_type.in_(OUT_MOVES), -func.coalesce(StockMovement.total_weight_kg, 0)),
+            else_=0,
+        )
+
+        fert_bags = (
+            s.query(func.coalesce(func.sum(signed_bags), 0))
+            .join(Product, Product.id == StockMovement.product_id)
+            .filter(Product.product_type == "fertilizer")
+            .scalar()
+        )
+
+        crops_bags = (
+            s.query(func.coalesce(func.sum(signed_bags), 0))
+            .join(Product, Product.id == StockMovement.product_id)
+            .filter(Product.product_type == "crops")
+            .scalar()
+        )
+
+        crops_kg = (
+            s.query(func.coalesce(func.sum(signed_kg), 0))
+            .join(Product, Product.id == StockMovement.product_id)
+            .filter(Product.product_type == "crops")
+            .scalar()
+        )
+
+    return {
+        "fertilizer_bags": float(fert_bags or 0),
+        "crops_bags": float(crops_bags or 0),
+        "crops_kg": float(crops_kg or 0),
+    }
+
+
+def _sum_advances_global(scope: str = "all") -> Dict[str, Dict[str, float]]:
+    start, end = _resolve_scope(scope)
+
+    advances = {
+        "crops": {"in": 0.0, "out": 0.0},
+        "fertilizers": {"in": 0.0, "out": 0.0},
+    }
+
+    with get_session() as s:
+        query = s.query(
+            Advance.direction,
+            Advance.advance_type,
+            Advance.ledger,
+            func.coalesce(func.sum(func.coalesce(Advance.amount, 0)), 0)
+        ).filter(Advance.status != "voided")
+
+        if start:
+            query = query.filter(Advance.created_at >= start)
+        if end:
+            query = query.filter(Advance.created_at <= end)
+
+        rows = query.group_by(
+            Advance.direction,
+            Advance.advance_type,
+            Advance.ledger
+        ).all()
+
+        for direction, adv_type, ledger, total in rows:
+            direction = (direction or "").lower()
+            adv_type = (adv_type or "").lower()
+            ledger = (ledger or "").lower()
+            total = float(total or 0)
+
+            # Route ledger
+            if adv_type == "crops":
+                target = "crops"
+            elif adv_type == "fertilizer":
+                target = "fertilizers"
+            elif adv_type == "money":
+                target = "fertilizers" if ledger == "fertilizers" else "crops"
+            else:
+                continue
+
+            if direction == "received":
+                advances[target]["in"] += total
+            elif direction == "given":
+                advances[target]["out"] += total
+
+    return advances
+
+
+def _sum_paid_cashflow(scope: str = "all") -> Dict[str, float]:
+    """
+    Cashflow totals from payments table.
+    Exclude entity_type='advance' and ledger transfer roles to protect metrics.
+    """
+    start, end = _resolve_scope(scope)
+    with get_session() as s:
+        query_in = s.query(func.coalesce(func.sum(func.coalesce(Payment.amount, 0)), 0)) \
+            .filter(Payment.direction == "in") \
+            .filter(Payment.entity_type != "advance") \
+            .filter(Payment.method != "advance") \
+            .filter(~Payment.notes.like("%Advance settlement%")) \
+            .filter(Payment.status != "voided")
+
+        if start:
+            query_in = query_in.filter(Payment.created_at >= start)
+        if end:
+            query_in = query_in.filter(Payment.created_at <= end)
+        paid_in = query_in.scalar()
+
+        query_out = s.query(func.coalesce(func.sum(func.coalesce(Payment.amount, 0)), 0)) \
+            .filter(Payment.direction == "out") \
+            .filter(Payment.entity_type != "advance") \
+            .filter(Payment.method != "advance") \
+            .filter(~Payment.notes.like("%Advance settlement%")) \
+            .filter(Payment.status != "voided")
+
+        if start:
+            query_out = query_out.filter(Payment.created_at >= start)
+        if end:
+            query_out = query_out.filter(Payment.created_at <= end)
+
+        paid_out = query_out.scalar()
+
+    paid_in = float(paid_in or 0)
+    paid_out = float(paid_out or 0)
+    return {"paid_in": paid_in, "paid_out": paid_out, "net": paid_in - paid_out}
+
+
+def _top_crops_by_kg(limit: int = 5) -> List[dict]:
+    with get_session() as s:
+        signed_kg = case(
+            (StockMovement.movement_type.in_(IN_MOVES), func.coalesce(StockMovement.total_weight_kg, 0)),
+            (StockMovement.movement_type.in_(OUT_MOVES), -func.coalesce(StockMovement.total_weight_kg, 0)),
+            else_=0,
+        )
+
+        rows = (
+            s.query(
+                Product.id.label("id"),
+                Product.name.label("name"),
+                Product.sku.label("sku"),
+                func.coalesce(func.sum(signed_kg), 0).label("net_kg"),
+            )
+            .outerjoin(StockMovement, StockMovement.product_id == Product.id)
+            .filter(Product.product_type == "crops")
+            .filter(Product.is_active == True)  # noqa: E712
+            .group_by(Product.id, Product.name, Product.sku)
+            .order_by(func.coalesce(func.sum(signed_kg), 0).desc())
+            .limit(int(limit))
+            .all()
+        )
+
+    out = []
+    for r in rows:
+        out.append({
+            "product_id": int(r.id),
+            "name": str(r.name or ""),
+            "sku": str(r.sku or ""),
+            "net_kg": float(r.net_kg or 0),
+        })
+    return out
+
+
+def get_admin_dashboard_snapshot(scope: str = "all"):
+    stock = _sum_stock_totals()
+    advances = get_advance_remaining_summary(scope)
+
+    return {
+        "stock": stock,
+        "advances": advances,
+        "top_crops": _top_crops_by_kg(limit=5),
+    }
+
+
+def get_purchase_payment_snapshot(
+    role: str, 
+    user_id: int | None, 
+    start_date: date | None = None, 
+    end_date: date | None = None,
+    scope: str | None = None
+):
+    if scope and not start_date and not end_date:
+        start_dt, end_dt = _resolve_scope(scope)
+        start_date = start_dt.date() if start_dt else None
+        end_date = end_dt.date() if end_dt else None
+
+    with get_session() as s:
+        query = s.query(Purchase).options(joinedload(Purchase.supplier))
+
+        if role != "admin":
+            query = query.filter(Purchase.created_by_user_id == user_id)
+
+        if start_date:
+            query = query.filter(func.date(Purchase.created_at) >= start_date)
+        if end_date:
+            query = query.filter(func.date(Purchase.created_at) <= end_date)
+
+        purchases = query.all()
+
+        summary = {
+            "paid": {"count": 0, "total": 0.0},
+            "partial": {"count": 0, "total_balance": 0.0},
+            "unpaid": {"count": 0, "total_balance": 0.0},
+        }
+
+        rows = []
+
+        purchase_ids = [p.id for p in purchases]
+
+        # Batch-aggregate payments/allocations/returns for every purchase in
+        # this page in one round trip each, instead of 3 queries per
+        # purchase - the previous per-row loop turned a dashboard refresh
+        # into 3N+1 sequential DB round trips, which is what made the
+        # screen hang once there were a few hundred purchases.
+        paid_map: dict = {}
+        alloc_map: dict = {}
+        return_map: dict = {}
+
+        if purchase_ids:
+            paid_map = dict(
+                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
+                .filter(Payment.entity_type == "purchase")
+                .filter(Payment.entity_id.in_(purchase_ids))
+                .filter(Payment.direction == "out")
+                .filter(Payment.method != "advance")
+                .filter(~Payment.notes.like("%Advance settlement%"))
+                .filter(Payment.status != "voided")
+                .group_by(Payment.entity_id)
+                .all()
+            )
+
+            alloc_map = dict(
+                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                .filter(AdvanceAllocation.entity_type == "purchase")
+                .filter(AdvanceAllocation.entity_id.in_(purchase_ids))
+                .group_by(AdvanceAllocation.entity_id)
+                .all()
+            )
+
+            return_map = dict(
+                s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
+                .filter(PurchaseReturn.purchase_id.in_(purchase_ids))
+                .group_by(PurchaseReturn.purchase_id)
+                .all()
+            )
+
+            adjustment_map = dict(
+                s.query(PurchasePriceAdjustment.purchase_id, func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
+                .filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids))
+                .group_by(PurchasePriceAdjustment.purchase_id)
+                .all()
+            )
+
+        for purchase in purchases:
+            raw_total = float(purchase.total_amount or 0)
+
+            # 1. Outbound cash payments (Exclude non-cash advance settle rows)
+            paid_total = float(paid_map.get(purchase.id, 0) or 0)
+
+            # 2. Advance wallet amounts allocated
+            alloc_total = float(alloc_map.get(purchase.id, 0) or 0)
+
+            # 3. Returns
+            return_total = abs(float(return_map.get(purchase.id, 0) or 0))
+
+            # 3b. Price adjustments - a real, additional amount now
+            # genuinely owed (e.g. a supplier renegotiating after
+            # delivery), not an assumption - adds to the total the same
+            # way a return subtracts from it.
+            adjustment_total = float(adjustment_map.get(purchase.id, 0) or 0)
+
+            # 4. CLEAN FINANCIAL MATHEMATICS
+            net_total = max(raw_total - return_total + adjustment_total, 0.0)
+            settled = paid_total + alloc_total
+            balance = max(net_total - settled, 0.0)
+
+            # 5. STATUS DETERMINATION LOGIC
+            if net_total <= 0:
+                status = "PAID"
+                summary["paid"]["count"] += 1
+                summary["paid"]["total"] += 0.0
+            elif settled <= 0:
+                status = "UNPAID"
+                summary["unpaid"]["count"] += 1
+                summary["unpaid"]["total_balance"] += balance
+            elif balance > 0:
+                status = "PARTIAL"
+                summary["partial"]["count"] += 1
+                summary["partial"]["total_balance"] += balance
+            else:
+                status = "PAID"
+                summary["paid"]["count"] += 1
+                summary["paid"]["total"] += net_total
+
+            rows.append({
+                "purchase_id": purchase.id,
+                "supplier": purchase.supplier.display_name,
+                "total": net_total,                
+                "paid": min(settled, net_total),   
+                "balance": balance,                
+                "status": status,
+            })
+
+    return {
+        "summary": summary,
+        "rows": rows,
+    }
+
+def get_sale_payment_snapshot(
+    role: str, 
+    user_id: int | None, 
+    start_date: date | None = None, 
+    end_date: date | None = None,
+    scope: str | None = None
+):
+    if scope and not start_date and not end_date:
+        start_dt, end_dt = _resolve_scope(scope)
+        start_date = start_dt.date() if start_dt else None
+        end_date = end_dt.date() if end_dt else None
+
+    def apply_isolation(query, model):
+        if role == "cashier" and user_id:
+            query = query.filter(model.created_by_user_id == user_id)
+        return query
+
+    with get_session() as s:
+        sales_query = s.query(Sale).options(joinedload(Sale.buyer))
+        sales_query = apply_isolation(sales_query, Sale)
+
+        if start_date:
+            sales_query = sales_query.filter(func.date(Sale.created_at) >= start_date)
+        if end_date:
+            sales_query = sales_query.filter(func.date(Sale.created_at) <= end_date)
+
+        sales = sales_query.all()
+        rows = []
+
+        paid_count = 0
+        paid_total = 0.0
+        partial_count = 0
+        partial_balance_total = 0.0
+        unpaid_count = 0
+        unpaid_balance_total = 0.0
+
+        sale_ids = [sale.id for sale in sales]
+
+        # Batch-aggregate payments/allocations/returns/discounts for every
+        # sale on this page in one round trip each, instead of 4 queries
+        # per sale - see the matching note in get_purchase_payment_snapshot.
+        pay_map: dict = {}
+        alloc_map: dict = {}
+        return_map: dict = {}
+        discount_map: dict = {}
+
+        if sale_ids:
+            pay_query = (
+                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
+                .filter(Payment.entity_type == "sale")
+                .filter(Payment.entity_id.in_(sale_ids))
+                .filter(Payment.direction == "in")
+                .filter(Payment.method != "advance")
+                .filter(~Payment.notes.like("%Advance settlement%"))
+                .filter(Payment.status != "voided")
+            )
+            pay_query = apply_isolation(pay_query, Payment)
+            pay_map = dict(pay_query.group_by(Payment.entity_id).all())
+
+            alloc_map = dict(
+                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                .filter(AdvanceAllocation.entity_type == "sale")
+                .filter(AdvanceAllocation.entity_id.in_(sale_ids))
+                .group_by(AdvanceAllocation.entity_id)
+                .all()
+            )
+
+            return_map = dict(
+                s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
+                .filter(SaleReturn.sale_id.in_(sale_ids))
+                .group_by(SaleReturn.sale_id)
+                .all()
+            )
+
+            discount_map = dict(
+                s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
+                .filter(SaleDiscount.sale_id.in_(sale_ids))
+                .group_by(SaleDiscount.sale_id)
+                .all()
+            )
+
+        for sale in sales:
+            raw_total = float(sale.total_amount or 0.0)
+
+            # 1. Inbound cash payments (Exclude non-cash advance settlement rows)
+            paid = float(pay_map.get(sale.id, 0) or 0.0)
+
+            # 2. Advance wallet amounts allocated
+            alloc_total = float(alloc_map.get(sale.id, 0) or 0)
+
+            # 3. Sales returns
+            return_total = abs(float(return_map.get(sale.id, 0) or 0.0))
+
+            # 3b. Manually-applied discounts (the Payments section's "lazy
+            # calculator") - same treatment as a return: reduces what's
+            # genuinely still owed, without any cash actually moving.
+            discount_total = float(discount_map.get(sale.id, 0) or 0.0)
+
+            # 4. CLEAN FINANCIAL MATHEMATICS
+            net_total = max(raw_total - return_total - discount_total, 0.0)
+            settled = paid + alloc_total
+            balance = max(net_total - settled, 0.0)
+
+            # 5. STATUS DETERMINATION LOGIC
+            if net_total <= 0:
+                status = "PAID"
+                paid_count += 1
+                paid_total += 0.0
+            elif settled <= 0:
+                status = "UNPAID"
+                unpaid_count += 1
+                unpaid_balance_total += balance
+            elif balance > 0:
+                status = "PARTIAL"
+                partial_count += 1
+                partial_balance_total += balance
+            else:
+                status = "PAID"
+                paid_count += 1
+                paid_total += net_total
+
+            # 6. CAPPED VIEW PAYLOAD FOR THE SALES UI TABLES
+            rows.append({
+                "sale_id": sale.id,
+                "customer": sale.buyer.display_name if sale.buyer else "Walk-in Customer",
+                "total": net_total,                
+                "paid": min(settled, net_total),   
+                "balance": balance,                
+                "status": status,
+            })
+
+        return {
+            "summary": {
+                "paid": {"count": paid_count, "total": paid_total},
+                "partial": {"count": partial_count, "total_balance": partial_balance_total},
+                "unpaid": {"count": unpaid_count, "total_balance": unpaid_balance_total},
+            },
+            "rows": rows,
+        }
+
+def get_advance_settlement_snapshot(
+    direction: str,
+    role: str,
+    user_id,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+) -> dict:
+
+    direction = direction.upper()
+    direction_map = {
+        "IN": "received",
+        "OUT": "given",
+    }
+
+    if direction not in direction_map:
+        raise ValueError("Invalid direction")
+
+    db_direction = direction_map[direction]
+
+    with get_session() as session:
+        # 1. Subquery to calculate invoice allocations applied to advances
+        allocated = (
+            session.query(
+                AdvanceAllocation.advance_id,
+                func.coalesce(func.sum(AdvanceAllocation.amount), 0).label("allocated")
+            )
+            .group_by(AdvanceAllocation.advance_id)
+            .subquery()
+        )
+
+        # 2. Subquery to calculate direct external cash/bank payments made against advances
+        paid_settlements = (
+            session.query(
+                Payment.entity_id.label("advance_id"),
+                func.coalesce(func.sum(Payment.amount), 0).label("total_paid")
+            )
+            .filter(Payment.entity_type == "advance")
+            .filter(Payment.status != "voided")
+            .group_by(Payment.entity_id)
+            .subquery()
+        )
+
+        # 3. Main Query incorporating BOTH subqueries to compute the true remaining balance
+        query = (
+            session.query(
+                Advance,
+                Party.display_name,
+                User.username,
+                (
+                    Advance.amount 
+                    - func.coalesce(allocated.c.allocated, 0) 
+                    - func.coalesce(paid_settlements.c.total_paid, 0)
+                ).label("remaining")
+            )
+            .join(Party, Party.id == Advance.party_id)
+            .outerjoin(User, User.id == Advance.created_by_user_id)
+            .outerjoin(allocated, Advance.id == allocated.c.advance_id)
+            .outerjoin(paid_settlements, Advance.id == paid_settlements.c.advance_id)
+        )
+
+        query = query.filter(Advance.direction == db_direction)
+        query = query.filter(Advance.advance_type == "money")
+        query = query.filter(Advance.status == "completed")
+
+        if start_date:
+            query = query.filter(func.date(Advance.created_at) >= start_date)
+        if end_date:
+            query = query.filter(func.date(Advance.created_at) <= end_date)
+
+        if role == "cashier" and user_id:
+            query = query.filter(Advance.created_by_user_id == user_id)
+
+        # Only fetch items that still have a balance greater than 0
+        query = query.filter(
+            (
+                Advance.amount 
+                - func.coalesce(allocated.c.allocated, 0) 
+                - func.coalesce(paid_settlements.c.total_paid, 0)
+            ) > 0
+        )
+
+        db_rows = query.order_by(Advance.created_at.asc()).all()
+
+        rows = []
+        total_amount = 0.0
+
+        for adv, party_name, username, remaining in db_rows:
+            remaining = float(remaining or 0)
+            total_amount += remaining
+
+            rows.append({
+                "advance_id": adv.id,
+                "date": adv.created_at.strftime("%Y-%m-%d"),
+                "party_name": party_name or "",
+                "reference": f"ADV-{adv.id}",
+                "amount": remaining, 
+                "qty_bags": float(adv.qty_bags or 0),
+                "total_weight_kg": float(adv.total_weight_kg or 0),
+                "created_by": username or "",
+                "note": adv.notes or "",
+            })
+
+        return {
+            "summary": {
+                "count": len(rows),
+                "total_amount": total_amount,
+            },
+            "rows": rows,
+        }
+
+
+def get_advance_grand_summary(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    scope: Optional[str] = None,
+) -> dict:
+    """
+    Total OUTSTANDING (remaining) advances GIVEN and RECEIVED, in money
+    advances only.
+
+    This previously summed the raw `Advance.amount` across every
+    advance_type (crops/fertilizer/money) and every non-voided status,
+    ignored the caller's date range entirely, and was hardcoded to
+    scope="today" - three different ways it could never agree with the
+    money/completed/remaining-balance numbers shown in the table above it
+    or in the dashboard cards. It now uses the exact same filters and the
+    same (amount - allocated - paid) remaining-balance calculation as
+    get_advance_settlement_snapshot / get_advance_remaining_summary, so
+    all three numbers on screen are computed the same way.
+
+    Accepts an explicit start_date/end_date (matching whatever the caller
+    is already filtering by) or, for backward compatibility, a `scope`
+    keyword ("today"/"week"/"month") which is resolved the same way the
+    rest of this module resolves scopes.
+    """
+    if scope and not start_date and not end_date:
+        start_dt, end_dt = _resolve_scope(scope)
+        start_date = start_dt.date() if start_dt else None
+        end_date = end_dt.date() if end_dt else None
+
+    with get_session() as s:
+        allocated = (
+            s.query(
+                AdvanceAllocation.advance_id,
+                func.coalesce(func.sum(AdvanceAllocation.amount), 0).label("allocated")
+            )
+            .group_by(AdvanceAllocation.advance_id)
+            .subquery()
+        )
+
+        paid_settlements = (
+            s.query(
+                Payment.entity_id.label("advance_id"),
+                func.coalesce(func.sum(Payment.amount), 0).label("total_paid")
+            )
+            .filter(Payment.entity_type == "advance")
+            .filter(Payment.status != "voided")
+            .group_by(Payment.entity_id)
+            .subquery()
+        )
+
+        remaining_expr = (
+            Advance.amount
+            - func.coalesce(allocated.c.allocated, 0)
+            - func.coalesce(paid_settlements.c.total_paid, 0)
+        )
+
+        query = (
+            s.query(Advance.direction, func.coalesce(func.sum(remaining_expr), 0))
+            .outerjoin(allocated, Advance.id == allocated.c.advance_id)
+            .outerjoin(paid_settlements, Advance.id == paid_settlements.c.advance_id)
+            .filter(Advance.advance_type == "money")
+            .filter(Advance.status == "completed")
+            .filter(remaining_expr > 0)
+        )
+
+        if start_date:
+            query = query.filter(func.date(Advance.created_at) >= start_date)
+        if end_date:
+            query = query.filter(func.date(Advance.created_at) <= end_date)
+
+        totals = dict(query.group_by(Advance.direction).all())
+
+    received_total = float(totals.get("received", 0) or 0)
+    given_total = float(totals.get("given", 0) or 0)
+
+    return {
+        "received": received_total,
+        "given": given_total,
+        "net": received_total - given_total,
+    }
+
+
+def _resolve_scope(scope: str):
+    now = datetime.now()
+
+    if scope == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start, now
+
+    if scope == "week":
+        start = now - timedelta(days=now.weekday())
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start, now
+
+    if scope == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start, now
+
+    return None, None
+
+
+def get_advance_remaining_summary(scope: str = "all"):
+    # `scope` used to be accepted here and silently dropped - the query
+    # below had no date filter at all, so every caller got the same
+    # all-time totals no matter what scope they asked for. Wire it up for
+    # real so this stays correct if/when a caller other than "all" is
+    # used again (see the scope="today"->"all" comment in
+    # get_admin_dashboard_snapshot's caller).
+    start, end = _resolve_scope(scope)
+
+    with get_session() as s:
+        query = (
+            s.query(
+                Advance.id,
+                Advance.direction,
+                Advance.amount
+            )
+            .filter(Advance.advance_type == "money")
+            .filter(Advance.status == "completed")
+        )
+
+        if start:
+            query = query.filter(Advance.created_at >= start)
+        if end:
+            query = query.filter(Advance.created_at <= end)
+
+        advances = query.all()
+
+        advance_in = 0.0
+        advance_out = 0.0
+
+        advance_ids = [adv_id for adv_id, _direction, _amount in advances]
+
+        # Batch-aggregate allocations/payments for every advance in one
+        # round trip each, instead of 2 queries per advance - see the
+        # matching note in get_purchase_payment_snapshot.
+        alloc_map: dict = {}
+        payment_map: dict = {}
+
+        if advance_ids:
+            alloc_map = dict(
+                s.query(AdvanceAllocation.advance_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                .filter(AdvanceAllocation.advance_id.in_(advance_ids))
+                .group_by(AdvanceAllocation.advance_id)
+                .all()
+            )
+
+            payment_map = dict(
+                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
+                .filter(Payment.entity_type == "advance")
+                .filter(Payment.entity_id.in_(advance_ids))
+                .filter(Payment.status != "voided")
+                .group_by(Payment.entity_id)
+                .all()
+            )
+
+        for adv_id, direction, amount in advances:
+            remaining = (
+                float(amount or 0)
+                - float(alloc_map.get(adv_id, 0) or 0)
+                - float(payment_map.get(adv_id, 0) or 0)
+            )
+
+            if remaining <= 0:
+                continue
+
+            if direction == "received":
+                advance_in += remaining
+            elif direction == "given":
+                advance_out += remaining
+
+        return {
+            "advance_in_remaining": advance_in,
+            "advance_out_remaining": advance_out,
+        }
+
+
+# =====================================================================
+# HARD DELETE + AUDIT TRAIL
+#
+# These permanently remove a row (and everything financially tied to
+# it — payments, advance allocations, returns, discounts, price
+# adjustments) so the dashboard's totals stay correct after the row is
+# gone. Before anything is deleted, a DeletionLog row is written
+# capturing WHO deleted it and a JSON snapshot of what it looked like,
+# since a hard delete otherwise leaves no trace at all.
+#
+# `deleted_by_user_id` must be the id of the currently logged-in admin
+# performing the action — NOT the `user_id` used elsewhere in this file
+# for cashier row-scoping (that one is frequently None for admins).
+# Callers must not omit it.
+# =====================================================================
+
+def _require_actor(deleted_by_user_id: Optional[int]) -> int:
+    if not deleted_by_user_id:
+        raise DeletionNotAllowed(
+            "A deleted_by_user_id (the acting admin's user id) is required to delete this record."
+        )
+    return int(deleted_by_user_id)
+
+
+def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
+    deleted_by_user_id = _require_actor(deleted_by_user_id)
+
+    with get_session() as s:
+        purchase = s.query(Purchase).filter(Purchase.id == purchase_id).first()
+        if not purchase:
+            raise ValueError(f"Purchase {purchase_id} not found")
+
+        snapshot = {
+            "id": purchase.id,
+            "supplier_id": getattr(purchase, "supplier_id", None),
+            "supplier": purchase.supplier.display_name if getattr(purchase, "supplier", None) else None,
+            "total_amount": float(purchase.total_amount or 0),
+            "created_by_user_id": getattr(purchase, "created_by_user_id", None),
+            "created_at": purchase.created_at.isoformat() if purchase.created_at else None,
+        }
+
+        try:
+            # Dependents first, in case FKs aren't set up to cascade.
+            s.query(Payment).filter(
+                Payment.entity_type == "purchase", Payment.entity_id == purchase_id
+            ).delete(synchronize_session=False)
+
+            s.query(AdvanceAllocation).filter(
+                AdvanceAllocation.entity_type == "purchase", AdvanceAllocation.entity_id == purchase_id
+            ).delete(synchronize_session=False)
+
+            s.query(PurchaseReturn).filter(
+                PurchaseReturn.purchase_id == purchase_id
+            ).delete(synchronize_session=False)
+
+            s.query(PurchasePriceAdjustment).filter(
+                PurchasePriceAdjustment.purchase_id == purchase_id
+            ).delete(synchronize_session=False)
+
+            s.add(DeletionLog(
+                entity_type="purchase",
+                entity_id=purchase_id,
+                entity_snapshot=json.dumps(snapshot, default=str),
+                deleted_by_user_id=deleted_by_user_id,
+                reason=reason,
+            ))
+
+            s.delete(purchase)
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+
+
+def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
+    deleted_by_user_id = _require_actor(deleted_by_user_id)
+
+    with get_session() as s:
+        sale = s.query(Sale).filter(Sale.id == sale_id).first()
+        if not sale:
+            raise ValueError(f"Sale {sale_id} not found")
+
+        snapshot = {
+            "id": sale.id,
+            "buyer_id": getattr(sale, "buyer_id", None),
+            "customer": sale.buyer.display_name if getattr(sale, "buyer", None) else None,
+            "total_amount": float(sale.total_amount or 0),
+            "created_by_user_id": getattr(sale, "created_by_user_id", None),
+            "created_at": sale.created_at.isoformat() if sale.created_at else None,
+        }
+
+        try:
+            s.query(Payment).filter(
+                Payment.entity_type == "sale", Payment.entity_id == sale_id
+            ).delete(synchronize_session=False)
+
+            s.query(AdvanceAllocation).filter(
+                AdvanceAllocation.entity_type == "sale", AdvanceAllocation.entity_id == sale_id
+            ).delete(synchronize_session=False)
+
+            s.query(SaleReturn).filter(
+                SaleReturn.sale_id == sale_id
+            ).delete(synchronize_session=False)
+
+            s.query(SaleDiscount).filter(
+                SaleDiscount.sale_id == sale_id
+            ).delete(synchronize_session=False)
+
+            s.add(DeletionLog(
+                entity_type="sale",
+                entity_id=sale_id,
+                entity_snapshot=json.dumps(snapshot, default=str),
+                deleted_by_user_id=deleted_by_user_id,
+                reason=reason,
+            ))
+
+            s.delete(sale)
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+
+
+def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
+    deleted_by_user_id = _require_actor(deleted_by_user_id)
+
+    with get_session() as s:
+        advance = s.query(Advance).filter(Advance.id == advance_id).first()
+        if not advance:
+            raise ValueError(f"Advance {advance_id} not found")
+
+        snapshot = {
+            "id": advance.id,
+            "party_id": getattr(advance, "party_id", None),
+            "direction": advance.direction,
+            "advance_type": advance.advance_type,
+            "amount": float(advance.amount or 0),
+            "created_by_user_id": getattr(advance, "created_by_user_id", None),
+            "created_at": advance.created_at.isoformat() if advance.created_at else None,
+        }
+
+        try:
+            s.query(Payment).filter(
+                Payment.entity_type == "advance", Payment.entity_id == advance_id
+            ).delete(synchronize_session=False)
+
+            s.query(AdvanceAllocation).filter(
+                AdvanceAllocation.advance_id == advance_id
+            ).delete(synchronize_session=False)
+
+            s.add(DeletionLog(
+                entity_type="advance",
+                entity_id=advance_id,
+                entity_snapshot=json.dumps(snapshot, default=str),
+                deleted_by_user_id=deleted_by_user_id,
+                reason=reason,
+            ))
+
+            s.delete(advance)
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise

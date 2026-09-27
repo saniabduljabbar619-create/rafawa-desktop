@@ -1,0 +1,1 @@
+# apps/product_management_app/features/cashier/dialogs/__init__.py

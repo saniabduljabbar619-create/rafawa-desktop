@@ -1,0 +1,50 @@
+from database.session import get_session
+from sqlalchemy import text
+
+class WalkinService:
+
+    WALKIN_PARTY_ID = 11
+
+    @staticmethod
+    def list_traders():
+
+        with get_session() as s:
+
+            rows = s.execute(text("""
+                SELECT
+                    walkin_name,
+                    SUM(sales_count) AS sales,
+                    SUM(purchase_count) AS purchases
+                FROM (
+
+                    SELECT
+                        walkin_name,
+                        COUNT(*) AS sales_count,
+                        0 AS purchase_count
+                    FROM sales
+                    WHERE buyer_party_id = :pid
+                    GROUP BY walkin_name
+
+                    UNION ALL
+
+                    SELECT
+                        walkin_name,
+                        0 AS sales_count,
+                        COUNT(*) AS purchase_count
+                    FROM purchases
+                    WHERE supplier_party_id = :pid
+                    GROUP BY walkin_name
+
+                ) x
+                GROUP BY walkin_name
+                ORDER BY walkin_name
+            """), {"pid": WalkinService.WALKIN_PARTY_ID}).fetchall()
+
+        return [
+            {
+                "name": r.walkin_name,
+                "sales": int(r.sales or 0),
+                "purchases": int(r.purchases or 0)
+            }
+            for r in rows
+        ]
