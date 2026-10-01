@@ -18,6 +18,12 @@ from database.models.stock_movement import StockMovement
 from database.models.advance_allocations import AdvanceAllocation
 
 
+# Tolerance for float kg comparisons: the UI clamps to a 2-decimal spin box,
+# so the "remaining" figure (sold - returned) can differ from what the user
+# can type by float noise (e.g. 100.1 - 33.7 = 66.39999999999999).
+_KG_EPS = 1e-6
+
+
 class ReturnService:
 
     # ---------------------------------------------------------
@@ -70,6 +76,9 @@ class ReturnService:
         qty_bags = int(qty_bags or 0)
         qty_kg = float(qty_kg or 0.0)
 
+        if qty_bags < 0 or qty_kg < 0:
+            raise ValueError("Return quantity cannot be negative.")
+
         if qty_bags <= 0 and qty_kg <= 0:
             raise ValueError("Return quantity must be provided.")
 
@@ -116,7 +125,7 @@ class ReturnService:
                 if qty_bags > (sold_bags - returned_bags):
                     raise ValueError("Return bags exceed remaining quantity.")
 
-                if not is_fert and qty_kg > (sold_kg - returned_kg):
+                if not is_fert and qty_kg > (sold_kg - returned_kg) + _KG_EPS:
                     raise ValueError("Return kg exceed remaining quantity.")
 
                 rate = float(item.unit_cost_rate or 0.0)
@@ -166,7 +175,7 @@ class ReturnService:
                         )
                         .order_by(AdvanceAllocation.id.desc())
                         .all()
-                )
+                    )
                     for alloc in allocations:
                         alloc_amt = float(alloc.amount or 0.0)
                         if return_val_to_release >= alloc_amt:
@@ -226,7 +235,7 @@ class ReturnService:
             if qty_bags > (sold_bags - returned_bags):
                 raise ValueError("Return bags exceed remaining quantity.")
 
-            if not is_fert and qty_kg > (sold_kg - returned_kg):
+            if not is_fert and qty_kg > (sold_kg - returned_kg) + _KG_EPS:
                 raise ValueError("Return kg exceed remaining quantity.")
 
             rate = float(item.unit_sale_rate or 0.0)

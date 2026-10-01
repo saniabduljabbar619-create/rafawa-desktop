@@ -11,6 +11,7 @@ from database.models.purchase_item import PurchaseItem
 from database.models.stock_movement import StockMovement
 from database.models.party import Party
 from database.models.payment import Payment
+from database.models.purchase_return import PurchaseReturn
 
 
 class PurchaseService:
@@ -299,13 +300,26 @@ class PurchaseService:
         sku = row["sku"]
         name = row["product_name"]
 
-        product = session.query(Product).filter(Product.sku == sku).first()
+        if sku:
+            product = session.query(Product).filter(Product.sku == sku).first()
+        else:
+            # A blank SKU must never match "the first product with a blank
+            # SKU" - that silently overwrote an unrelated product's name,
+            # type and cost. Fall back to an exact name + type match among
+            # SKU-less products instead.
+            product = (
+                session.query(Product)
+                .filter(func.lower(Product.name) == name.lower())
+                .filter(Product.product_type == row["product_type"])
+                .filter((Product.sku.is_(None)) | (Product.sku == ""))
+                .first()
+            )
 
         if not product:
 
             product = Product(
                 name=name,
-                sku=sku,
+                sku=sku or None,
                 product_type=row["product_type"],
                 unit_label="bag" if row["product_type"] == "fertilizer" else "kg",
                 default_cost_rate=row["unit_cost"],
@@ -428,6 +442,18 @@ class PurchaseService:
                     "voided). Void the specific payment(s) first if they're "
                     "wrong; this action is only for a transaction that was "
                     "never paid against at all."
+                )
+
+            has_return = (
+                s.query(PurchaseReturn.id)
+                .filter(PurchaseReturn.purchase_id == purchase_id)
+                .first()
+            )
+            if has_return is not None:
+                raise ValueError(
+                    "Cannot void this purchase - goods have already been "
+                    "returned against it. Voiding would take the returned "
+                    "stock out a second time."
                 )
 
             items = s.query(PurchaseItem).filter(PurchaseItem.purchase_id == purchase_id).all()

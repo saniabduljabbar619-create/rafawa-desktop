@@ -14,6 +14,7 @@ from database.models.sale import Sale
 from database.models.sale_item import SaleItem
 from database.models.party import Party
 from database.models.payment import Payment
+from database.models.sale_return import SaleReturn
 
 
 class SaleService:
@@ -87,11 +88,16 @@ class SaleService:
                     stock_bags,
                 )
                 .outerjoin(StockMovement, StockMovement.product_id == Product.id)
+                .filter(Product.is_active.is_(True))
                 .group_by(Product.id)
                 .order_by(Product.id.desc())
-                .limit(limit)
-                .all()
             )
+
+            # Search / zero-stock filtering happens below in Python (it
+            # needs the per-type stock figure), so the LIMIT must come AFTER
+            # it - applying it in SQL first silently dropped matches that
+            # fell outside the newest `limit` products.
+            rows = rows.all()
 
         out = []
 
@@ -135,6 +141,9 @@ class SaleService:
                 "cost_rate": cost_rate,
                 "sale_rate": sale_rate,
             })
+
+            if len(out) >= limit:
+                break
 
         return out
 
@@ -619,6 +628,18 @@ class SaleService:
                     "voided). Void the specific payment(s) first if they're "
                     "wrong; this action is only for a transaction that was "
                     "never paid against at all."
+                )
+
+            has_return = (
+                s.query(SaleReturn.id)
+                .filter(SaleReturn.sale_id == sale_id)
+                .first()
+            )
+            if has_return is not None:
+                raise ValueError(
+                    "Cannot void this sale - goods have already been returned "
+                    "against it. Voiding would put the returned stock back a "
+                    "second time."
                 )
 
             items = s.query(SaleItem).filter(SaleItem.sale_id == sale_id).all()
