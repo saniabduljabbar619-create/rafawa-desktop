@@ -57,7 +57,7 @@ class IntakeCartDialog(QDialog):
         header.addWidget(self.btn_add_item)
 
         self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Product", "SKU", "Bags", "Qty (KG)", "Rate"])
+        self.table.setHorizontalHeaderLabels(["Product", "SKU", "Bags", "Qty (KG)", "Price"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -118,12 +118,12 @@ class IntakeCartDialog(QDialog):
 
         if self.intake_type == "fertilizer":
             if rate <= 0:
-                QMessageBox.warning(self, "Item", "Rate per Bag must be > 0.")
+                QMessageBox.warning(self, "Item", "Price Per Bag must be > 0.")
                 return
             total_kg = 0.0
         else:
             if total_kg <= 0 or rate <= 0:
-                QMessageBox.warning(self, "Item", "Total KG and Rate per KG must be > 0.")
+                QMessageBox.warning(self, "Item", "Total KG and Price Per Kg must be > 0.")
                 return
 
         sku = str(payload.get("sku") or "").strip() or state.make_intake_sku(

@@ -64,7 +64,7 @@ class CropsIntakeDialog(QDialog):
         self.qty_bags.setValue(1)
         r3.addWidget(self.qty_bags, 1)
 
-        r3.addWidget(QLabel("Rate per kg:"))
+        r3.addWidget(QLabel("Price Per Kg:"))
         self.rate = QDoubleSpinBox()
         self.rate.setDecimals(2)
         self.rate.setMinimum(0.0)

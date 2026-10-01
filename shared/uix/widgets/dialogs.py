@@ -1,9 +1,12 @@
 # shared/uix/widgets/dialogs.py
+import re
+
 from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QDoubleSpinBox, QSpinBox, QPushButton, QMessageBox
+    QDoubleSpinBox, QSpinBox, QPushButton, QMessageBox, QWidget, QHeaderView
 )
 from PySide2.QtCore import Qt
+from PySide2.QtGui import QColor
 
 from shared.config.constants import LEDGER_CROPS, LEDGER_FERTILIZERS
 from shared.uix.layout.scrollable import make_scrollable_dialog
@@ -314,13 +317,16 @@ from PySide2.QtWidgets import QTableWidget, QTableWidgetItem
 class DeliveryIntakeDialog(QDialog):
     """
     Delivery/Intake supports:
-      - Exact mode: per-bag weights table
+      - Exact mode: one row per "bags round" - bags, weight (kg) and price per kg
+        (the row total is computed); bags/kg/amount are the sums of the rows
       - Quick mode: total kg input
       - Quick mode: avg kg per bag input
       - Bulk mode: bag-count x kg pattern lines (for 500+ bags)
     Always:
       total_amount = total_kg * rate_per_kg
     """
+
+    SELECT_PRODUCT = "Select Product"
 
     MODE_EXACT = "Exact (Per-bag weights)"
     MODE_TOTAL = "Quick (Total KG)"
@@ -340,6 +346,7 @@ class DeliveryIntakeDialog(QDialog):
         layout.addWidget(QLabel("Product *"))
         self.product_in = QComboBox()
         self.product_in.setEditable(True)
+        self.product_in.lineEdit().setPlaceholderText(self.SELECT_PRODUCT)
         layout.addWidget(self.product_in)
 
         
@@ -357,11 +364,13 @@ class DeliveryIntakeDialog(QDialog):
         row.addWidget(QLabel("Mode"))
         self.mode_in = QComboBox()
         self.mode_in.addItems([self.MODE_EXACT, self.MODE_TOTAL, self.MODE_AVG, self.MODE_BULK])
+        self.mode_in.setCurrentText(self.MODE_TOTAL)          # the everyday mode is the default
         row.addWidget(self.mode_in, 2)
 
         row.addSpacing(10)
 
-        row.addWidget(QLabel("Bags *"))
+        self.bags_lbl = QLabel("Bags *")
+        row.addWidget(self.bags_lbl)
         self.bags_in = QSpinBox()
         self.bags_in.setMinimum(1)
         self.bags_in.setMaximum(100000)
@@ -370,7 +379,8 @@ class DeliveryIntakeDialog(QDialog):
 
         row.addSpacing(10)
 
-        row.addWidget(QLabel("Rate per Kg *"))
+        self.rate_lbl = QLabel("Price Per Kg *")
+        row.addWidget(self.rate_lbl)
         self.rate_in = QDoubleSpinBox()
         self.rate_in.setDecimals(2)
         self.rate_in.setMinimum(0.01)
@@ -405,7 +415,8 @@ class DeliveryIntakeDialog(QDialog):
         quick.addWidget(self.avgkg_in, 1)
 
         # Bulk pattern input (hidden unless bulk mode)
-        layout.addWidget(QLabel("Bulk Pattern (one per line)"))
+        self.bulk_lbl = QLabel("Bulk Pattern (one per line)")
+        layout.addWidget(self.bulk_lbl)
         self.bulk_in = QTextEdit()
         self.bulk_in.setPlaceholderText(
             "Examples:\n"
@@ -420,15 +431,31 @@ class DeliveryIntakeDialog(QDialog):
         self.bulk_hint.setStyleSheet("color: #666;")
         layout.addWidget(self.bulk_hint)
 
-        # Weights table (Exact mode)
-        self.weights_title = QLabel("Weights per bag (Kg) *")
-        layout.addWidget(self.weights_title)
+        # Exact mode: one row per round of bags
+        self.exact_box = QWidget()
+        ev = QVBoxLayout(self.exact_box)
+        ev.setContentsMargins(0, 0, 0, 0)
+        ev.setSpacing(6)
+        self.weights_title = QLabel("Rounds - one row per batch of bags (bags, total weight, price per kg) *")
+        ev.addWidget(self.weights_title)
 
-        self.weights_tbl = QTableWidget(0, 2)
-        self.weights_tbl.setHorizontalHeaderLabels(["Bag #", "Weight (Kg)"])
-        self.weights_tbl.horizontalHeader().setStretchLastSection(True)
+        self.weights_tbl = QTableWidget(0, 4)
+        self.weights_tbl.setHorizontalHeaderLabels(["Bags Round", "Weight (kg)", "Price Per Kg", "Total"])
+        self.weights_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.weights_tbl.verticalHeader().setVisible(False)
         self.weights_tbl.setEditTriggers(QTableWidget.AllEditTriggers)
-        layout.addWidget(self.weights_tbl)
+        self.weights_tbl.setMinimumHeight(170)
+        ev.addWidget(self.weights_tbl)
+
+        round_btns = QHBoxLayout()
+        self.btn_add_round = QPushButton("+ Add Round")
+        self.btn_remove_round = QPushButton("Remove Round")
+        round_btns.addWidget(self.btn_add_round)
+        round_btns.addWidget(self.btn_remove_round)
+        round_btns.addStretch(1)
+        ev.addLayout(round_btns)
+        layout.addWidget(self.exact_box)
+        self._rounds_busy = False
 
         # One-line compute preview
         self.compute_line = QLabel("Compute: --")
@@ -462,11 +489,13 @@ class DeliveryIntakeDialog(QDialog):
 
         # Events
         self.mode_in.currentTextChanged.connect(self._apply_mode)
-        self.bags_in.valueChanged.connect(self._on_bags_changed)
+        self.bags_in.valueChanged.connect(lambda _n: self._recalc_totals())
+        self.btn_add_round.clicked.connect(lambda: self._add_round_row())
+        self.btn_remove_round.clicked.connect(self._remove_round_row)
         self.rate_in.valueChanged.connect(self._recalc_totals)
         self.totalkg_in.valueChanged.connect(self._recalc_totals)
         self.avgkg_in.valueChanged.connect(self._recalc_totals)
-        self.weights_tbl.itemChanged.connect(lambda _it: self._recalc_totals())
+        self.weights_tbl.itemChanged.connect(self._on_round_changed)
         self.bulk_in.textChanged.connect(self._recalc_totals)
         self.ledger_in.currentTextChanged.connect(lambda _t: self._recalc_totals())
 
@@ -474,7 +503,7 @@ class DeliveryIntakeDialog(QDialog):
         self._apply_ledger_rules()
 
         # init
-        self._rebuild_weight_rows(self.bags_in.value())
+        self._add_round_row()
         self._apply_mode(self.mode_in.currentText())
         self._reload_products()
 
@@ -486,8 +515,8 @@ class DeliveryIntakeDialog(QDialog):
         is_avg = (mode == self.MODE_AVG)
         is_bulk = (mode == self.MODE_BULK)
 
-        self.weights_title.setVisible(is_exact)
-        self.weights_tbl.setVisible(is_exact)
+        self.exact_box.setVisible(is_exact)
+        self._sync_exact_fields()
 
         self.totalkg_lbl.setVisible(is_total)
         self.totalkg_in.setVisible(is_total)
@@ -495,6 +524,7 @@ class DeliveryIntakeDialog(QDialog):
         self.avgkg_lbl.setVisible(is_avg)
         self.avgkg_in.setVisible(is_avg)
 
+        self.bulk_lbl.setVisible(is_bulk)
         self.bulk_in.setVisible(is_bulk)
         self.bulk_hint.setVisible(is_bulk)
 
@@ -505,56 +535,116 @@ class DeliveryIntakeDialog(QDialog):
         return row if isinstance(row, dict) else {}
 
     def _product_text(self) -> str:
-        return (self.product_in.currentText() or "").strip()
+        txt = (self.product_in.currentText() or "").strip()
+        return "" if txt.lower() == self.SELECT_PRODUCT.lower() else txt
 
 
-    def _on_bags_changed(self, n: int):
-        if self.mode_in.currentText() == self.MODE_EXACT:
-            self._rebuild_weight_rows(n)
-        else:
-            self._recalc_totals()
+    # ---- exact mode: rounds -------------------------------------------------
+    def _sync_exact_fields(self):
+        """In exact crops mode the rounds table owns bags and price, so the two top fields step aside."""
+        exact = (not self._is_fertilizer()) and self.mode_in.currentText() == self.MODE_EXACT
+        for w in (self.bags_lbl, self.bags_in, self.rate_lbl, self.rate_in):
+            w.setVisible(not exact)
 
-    def _rebuild_weight_rows(self, n: int):
-        existing = []
-        for r in range(self.weights_tbl.rowCount()):
-            item = self.weights_tbl.item(r, 1)
-            existing.append(item.text().strip() if item else "")
+    def _add_round_row(self):
+        t = self.weights_tbl
+        self._rounds_busy = True
+        try:
+            r = t.rowCount()
+            t.insertRow(r)
+            for c in range(3):
+                it = QTableWidgetItem("")
+                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                t.setItem(r, c, it)
+            tot = QTableWidgetItem("")
+            tot.setFlags(Qt.ItemIsEnabled)
+            tot.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            tot.setForeground(QColor("#047857"))
+            f = tot.font()
+            f.setBold(True)
+            tot.setFont(f)
+            t.setItem(r, 3, tot)
+        finally:
+            self._rounds_busy = False
 
-        self.weights_tbl.blockSignals(True)
-        self.weights_tbl.setRowCount(0)
-
-        for i in range(n):
-            row = self.weights_tbl.rowCount()
-            self.weights_tbl.insertRow(row)
-
-            bag_item = QTableWidgetItem(str(i + 1))
-            bag_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            bag_item.setTextAlignment(Qt.AlignCenter)
-            self.weights_tbl.setItem(row, 0, bag_item)
-
-            wtxt = existing[i] if i < len(existing) else ""
-            w_item = QTableWidgetItem(wtxt)
-            w_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.weights_tbl.setItem(row, 1, w_item)
-
-        self.weights_tbl.blockSignals(False)
+    def _remove_round_row(self):
+        t = self.weights_tbl
+        r = t.currentRow()
+        if r < 0:
+            r = t.rowCount() - 1
+        if r >= 0:
+            t.removeRow(r)
+        if t.rowCount() == 0:
+            self._add_round_row()
         self._recalc_totals()
 
-    def _read_weights_exact(self):
-        weights = []
+    @staticmethod
+    def _num(txt):
+        txt = (txt or "").replace(",", "").strip()
+        try:
+            return float(txt)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_bags(txt):
+        m = re.match(r"^\s*(\d+)\s*(bags?)?\s*$", txt or "", re.IGNORECASE)
+        return int(m.group(1)) if m else None
+
+    def _row_texts(self, r):
+        out = []
+        for c in range(3):
+            it = self.weights_tbl.item(r, c)
+            out.append(it.text().strip() if it else "")
+        return out
+
+    def _on_round_changed(self, item):
+        if self._rounds_busy or item.column() == 3:
+            return
+        t = self.weights_tbl
+        r = item.row()
+        bags, kg, price = self._row_texts(r)
+        k, p = self._num(kg), self._num(price)
+        self._rounds_busy = True
+        try:
+            total_item = t.item(r, 3)
+            if total_item is not None:
+                total_item.setText(f"{k * p:,.2f}" if k and p and k > 0 and p > 0 else "")
+        finally:
+            self._rounds_busy = False
+        # keep one blank row at the bottom so the next round can be typed straight away
+        if any(self._row_texts(t.rowCount() - 1)):
+            self._add_round_row()
+        self._recalc_totals()
+
+    def _read_rounds(self):
+        """-> ([(bags, kg, price_per_kg), ...], "") or (None, error). Blank rows are ignored."""
+        rounds = []
         for r in range(self.weights_tbl.rowCount()):
-            item = self.weights_tbl.item(r, 1)
-            txt = (item.text().strip() if item else "")
-            if not txt:
-                return None, f"Weight missing on bag #{r+1}"
-            try:
-                w = float(txt)
-            except Exception:
-                return None, f"Invalid weight on bag #{r+1}"
-            if w <= 0:
-                return None, f"Weight must be > 0 on bag #{r+1}"
-            weights.append(w)
-        return weights, ""
+            texts = self._row_texts(r)
+            if not any(texts):
+                continue
+            bags = self._parse_bags(texts[0])
+            kg = self._num(texts[1])
+            price = self._num(texts[2])
+            if bags is None or bags <= 0:
+                return None, f"Round #{r + 1}: enter the number of bags."
+            if kg is None or kg <= 0:
+                return None, f"Round #{r + 1}: enter the weight in kg."
+            if price is None or price <= 0:
+                return None, f"Round #{r + 1}: enter the price per kg."
+            rounds.append((bags, kg, price))
+        if not rounds:
+            return None, "Add at least one round (bags, weight and price per kg)."
+        return rounds, ""
+
+    def _exact_totals(self):
+        """-> (bags, kg, amount, rounds, error)"""
+        rounds, err = self._read_rounds()
+        if rounds is None:
+            return 0, 0.0, 0.0, None, err
+        return (sum(b for b, _k, _p in rounds), sum(k for _b, k, _p in rounds),
+                sum(k * p for _b, k, p in rounds), rounds, "")
 
     def _parse_bulk_pattern(self):
         """
@@ -606,10 +696,10 @@ class DeliveryIntakeDialog(QDialog):
         mode = self.mode_in.currentText()
 
         if mode == self.MODE_EXACT:
-            weights, err = self._read_weights_exact()
-            if weights is None:
+            _bags, kg, _amt, rounds, err = self._exact_totals()
+            if rounds is None:
                 return None, err, None, None
-            return float(sum(weights)), "", weights, None
+            return float(kg), "", [k for _b, k, _p in rounds], None
 
         if mode == self.MODE_TOTAL:
             total = float(self.totalkg_in.value())
@@ -641,6 +731,21 @@ class DeliveryIntakeDialog(QDialog):
 
     def _recalc_totals(self):
         is_fert = self._is_fertilizer()
+        if (not is_fert) and self.mode_in.currentText() == self.MODE_EXACT:
+            bags, kg, amt, rounds, err = self._exact_totals()
+            if rounds is None:
+                self.compute_line.setText(f"Compute: -- ({err})")
+                self.total_kg_lbl.setText("Total Kg: --")
+                self.total_amt_lbl.setText("Total Amount: --")
+                return
+            n = len(rounds)
+            self.compute_line.setText(
+                f"Compute: {n} round{'s' if n != 1 else ''}, {bags} bags, {kg:,.2f}kg "
+                f"= {amt:,.2f}  |  Ledger: {self._ledger_value()}")
+            self.total_kg_lbl.setText(f"Total Kg: {kg:,.2f}   |   Bags: {bags}")
+            self.total_amt_lbl.setText(f"Total Amount: {amt:,.2f}")
+            return
+
         total_kg, err, _weights, bulk_items = self._get_total_kg()
         rate = float(self.rate_in.value())
         bags = int(self.bags_in.value())
@@ -697,13 +802,19 @@ class DeliveryIntakeDialog(QDialog):
 
         rate = float(self.rate_in.value())
         bags = int(self.bags_in.value())
+        exact_amount = None
+        if (not is_fert) and self.mode_in.currentText() == self.MODE_EXACT:
+            e_bags, e_kg, e_amt, rounds, _err = self._exact_totals()
+            if rounds:
+                bags, total_kg, exact_amount = e_bags, e_kg, e_amt
+                rate = e_amt / e_kg          # weighted average, so kg x rate == the sum of the rows
         if (not is_fert) and self.mode_in.currentText() == self.MODE_BULK and bulk_items:
             bags = int(sum(c for c, _kg in bulk_items))
 
         row = self.product_in.currentData()
         row = row if isinstance(row, dict) else {}
 
-        typed = (self.product_in.currentText() or "").strip()
+        typed = self._product_text()
 
         product_id = int(row.get("id") or 0)
         sku = (row.get("sku") or "").strip()
@@ -734,7 +845,7 @@ class DeliveryIntakeDialog(QDialog):
             }
 
         # crops
-        total_amt = float(total_kg) * float(rate)
+        total_amt = exact_amount if exact_amount is not None else float(total_kg) * float(rate)
         return {
             "datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "ledger": self._ledger_value(),
@@ -770,9 +881,13 @@ class DeliveryIntakeDialog(QDialog):
 
         self.product_in.blockSignals(True)
         self.product_in.clear()
+        # Always start on the placeholder, even when products exist, so nothing
+        # is picked by accident.
+        self.product_in.addItem(self.SELECT_PRODUCT, None)
         for r in rows:
             label = f"{r['name']}  ({r['sku']})"
             self.product_in.addItem(label, r)
+        self.product_in.setCurrentIndex(0)
         self.product_in.blockSignals(False)
 
         # ✅ UX: if user switches to fertilizers, nudge them immediately
@@ -796,19 +911,9 @@ class DeliveryIntakeDialog(QDialog):
         # UI labels
         self.rate_in.setPrefix("")  # optional; keep clean
         if is_fert:
-            # Turn "Rate per Kg" into "Price per Bag"
-            # simplest: just change the label widget text if you kept a reference
-            # If you didn't store it, replace the static QLabel with self.rate_lbl at creation time.
-            try:
-                self.rate_lbl.setText("Price per Bag *")
-            except Exception:
-                pass
-            self.weights_title.setText("Weights per bag (Kg) *")  # irrelevant but hidden anyway
+            self.rate_lbl.setText("Price Per Bag *")
         else:
-            try:
-                self.rate_lbl.setText("Rate per Kg *")
-            except Exception:
-                pass
+            self.rate_lbl.setText("Price Per Kg *")
 
         # Hide kg controls when fertilizer
         self.totalkg_lbl.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_TOTAL))
@@ -817,9 +922,10 @@ class DeliveryIntakeDialog(QDialog):
         self.avgkg_lbl.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_AVG))
         self.avgkg_in.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_AVG))
 
-        self.weights_title.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_EXACT))
-        self.weights_tbl.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_EXACT))
+        self.exact_box.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_EXACT))
+        self._sync_exact_fields()
 
+        self.bulk_lbl.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_BULK))
         self.bulk_in.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_BULK))
         self.bulk_hint.setVisible((not is_fert) and (self.mode_in.currentText() == self.MODE_BULK))
 
@@ -828,7 +934,16 @@ class DeliveryIntakeDialog(QDialog):
     def _on_save(self):
         product = self._product_text()
         if not product:
-            QMessageBox.critical(self, "Validation Error", "Product is required.")
+            QMessageBox.critical(self, "Validation Error", "Select a product first.")
+            return
+
+        # Exact crops: the rounds table carries bags, weight and price
+        if (not self._is_fertilizer()) and self.mode_in.currentText() == self.MODE_EXACT:
+            _b, _k, _a, rounds, err = self._exact_totals()
+            if rounds is None:
+                QMessageBox.critical(self, "Validation Error", err)
+                return
+            self.accept()
             return
 
         if float(self.rate_in.value()) <= 0:
