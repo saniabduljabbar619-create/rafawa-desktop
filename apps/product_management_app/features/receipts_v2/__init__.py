@@ -21,6 +21,7 @@ from .receipt_models import (          # pure, always safe to import
 )
 from .receipt_render import render_receipt
 from .shop import get_shop
+from .weigh_slip import render_weigh_slip
 
 # Qt-dependent entry points. Guarded so the pure pieces (models/render) can be
 # imported and unit-tested even in an environment without PySide2.
@@ -38,7 +39,7 @@ except Exception:  # pragma: no cover
 __all__ = [
     "print_receipt", "print_delivery_and_full",
     "print_full_then_optional_delivery", "preview_and_print",
-    "render_receipt", "get_shop",
+    "render_receipt", "get_shop", "render_weigh_slip",
     "MODE_DELIVERY", "MODE_FULL",
     "SALE", "PURCHASE", "ADVANCE", "PAYMENT", "SALE_RETURN", "PURCHASE_RETURN",
     "ReceiptDoc", "ReceiptLine", "PaymentLine", "ShopInfo", "PartyInfo",

@@ -26,6 +26,19 @@ _log = logging.getLogger("rafawa.security")
 
 ADMIN_ROLES = frozenset({"admin", "pm"})
 
+# Weigher workspace. The weigher records WHAT arrived (bags and kg); admin/cashier decide the
+# price, take payment and finalize the intake. A weigher has no say in any of the latter.
+WEIGH_ROLES = frozenset({"weigher", "admin", "pm"})          # may create tickets and record rounds
+INTAKE_ROLES = frozenset({"admin", "pm", "cashier"})         # may verify, price, pay and finalize
+
+# Which workspaces each role may open (anything unlisted is treated like an admin).
+_WORKSPACES_BY_ROLE = {"cashier": frozenset({"cashier"}), "weigher": frozenset({"weigher"})}
+
+
+def workspace_allowed(role: str, workspace_key: str) -> bool:
+    allowed = _WORKSPACES_BY_ROLE.get((role or "").strip().lower())
+    return True if allowed is None else workspace_key in allowed
+
 
 class PermissionDenied(PermissionError):
     """The current user's role may not perform this action."""

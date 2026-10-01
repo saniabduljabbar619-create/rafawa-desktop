@@ -86,6 +86,13 @@ class ProductManagementMainWindow(QMainWindow):
         if workspace_key not in self.workspaces:
             return
 
+        # A cashier opens only Cashier, a weigher only Weigher; admin may open any.
+        from shared.auth.permissions import current_role, workspace_allowed
+        if not workspace_allowed(current_role(), workspace_key):
+            from PySide2.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Not allowed", "Your account cannot open that workspace.")
+            return
+
         spec = self.workspaces[workspace_key]
         self.active_workspace_key = workspace_key
 

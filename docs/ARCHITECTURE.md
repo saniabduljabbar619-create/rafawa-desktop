@@ -24,3 +24,31 @@ Rules of thumb
 Drawer engine (`services/drawer/`): `compute.py` (per-cashier drawer), `ledger.py`
 (cross-cashier settlement ledger), `lists.py` (party totals / transaction lists / search).
 `services/drawer_service.py` remains as the import path the rest of the app uses.
+
+
+## Workspaces and roles
+
+| Role | Opens | Can |
+|---|---|---|
+| `admin` / `pm` | Product Management, Cashier, Weigher | everything |
+| `cashier` | Cashier only | sales, payments, **Weigh Tickets** (verify, price, finalize) |
+| `weigher` | Weigher only | register/select a party, weigh rounds, print the slip |
+
+`shared/auth/permissions.py` holds the role sets (`WEIGH_ROLES`, `INTAKE_ROLES`) and
+`workspace_allowed()`; the launcher and `main.open_workspace` both use it.
+
+**Weigher flow** (`services/weigh_service.py`, models in `models/weigh_ticket.py`, screens in
+`features/weigher/`):
+
+```
+weigher:        register/select party -> product/area/grade -> record rounds (1-3 or partial bags + kg)
+                -> auto totals -> choose slip (full/summary) -> submit -> print & sign   [no prices]
+admin/cashier:  Weigh Tickets -> Open Intake -> verify & edit rounds -> confirm price per kg
+                -> amount = kg x price -> Finalize (creates the Purchase) -> payment -> receipt
+```
+
+The weigher has **no authority over price, payment or finalization** - the service refuses those
+calls for the role and never returns a price to a weigher. A ticket is `open` (being weighed) ->
+`submitted` (locked for the weigher) -> `finalized` (a `Purchase` exists) or `cancelled`.
+Finalizing takes a row lock on the ticket so two terminals cannot book it twice. Corrections made
+at intake are written to `audit_logs`.

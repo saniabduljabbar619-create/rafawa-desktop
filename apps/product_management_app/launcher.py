@@ -10,7 +10,7 @@ cashier is routed away immediately (existing, already-correct logic -
 see _refresh_ui, unchanged in substance).
 
 Public interface unchanged: LauncherView is a QWidget with a
-workspace_selected(str) signal emitting "pm" or "cashier" - main.py
+workspace_selected(str) signal emitting "pm", "cashier" or "weigher" - main.py
 only ever touches that signal, nothing internal.
 """
 from PySide2.QtWidgets import (
@@ -337,11 +337,18 @@ class LauncherView(QWidget):
             "Sales checkout, intake delivery, payments and daily operations.",
             "Open Cashier",
         )
+        self.card_weigher = _WorkspaceCard(
+            "Weigher",
+            "Register who is delivering, weigh each round, print the slip - the cashier prices and pays.",
+            "Open Weigher",
+        )
         self.card_pm.clicked.connect(lambda: self.workspace_selected.emit("pm"))
         self.card_cashier.clicked.connect(lambda: self.workspace_selected.emit("cashier"))
+        self.card_weigher.clicked.connect(lambda: self.workspace_selected.emit("weigher"))
 
         row.addWidget(self.card_pm, 1)
         row.addWidget(self.card_cashier, 1)
+        row.addWidget(self.card_weigher, 1)
         outer.addLayout(row)
         outer.addStretch(1)
 
@@ -381,10 +388,18 @@ class LauncherView(QWidget):
         self.status.setText(f"Logged in as: {sess.username} \u2022 {sess.role}")
 
         role = (sess.role or "").strip().lower()
+        from shared.auth.permissions import workspace_allowed
+        self.card_pm.setVisible(workspace_allowed(role, "pm"))
+        self.card_cashier.setVisible(workspace_allowed(role, "cashier"))
+        self.card_weigher.setVisible(workspace_allowed(role, "weigher"))
         if role == "cashier":
             # Auto-route immediately - a cashier never sees this screen
             # at all, matching the existing, already-correct behavior.
             self.workspace_selected.emit("cashier")
+            return
+        if role == "weigher":
+            # Same for a weigher: straight to the Weigher workspace.
+            self.workspace_selected.emit("weigher")
             return
 
         self._stack.setCurrentIndex(1)
