@@ -7,9 +7,10 @@ from typing import Optional, List, Dict, Any
 from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QFrame,
-    QSplitter
+    QSplitter, QHeaderView
 )
 from PySide2.QtCore import Qt
+from PySide2.QtGui import QColor
 
 from apps.product_management_app.features.receipts.activity_receipt_printer import ActivityReceipt, ShopMeta
 from apps.product_management_app.app_state import state, Product
@@ -27,6 +28,7 @@ from apps.product_management_app.features.cashier.dialogs.quick_purchase_dialog 
 from database.models import Party
 from database.session import get_session
 from datetime import datetime
+from shared.uix.widgets.cards import Segmented, chip, style_table
 
 
 @dataclass
@@ -65,9 +67,15 @@ class CashierSalesView(QWidget):
         header = QHBoxLayout()
         root.addLayout(header)
 
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
         title = QLabel("Sales Console")
         title.setObjectName("Title")
-        header.addWidget(title)
+        self.subtitle = QLabel("Pick a customer, add products, then finalize the sale")
+        self.subtitle.setStyleSheet("color:#6b7280; font-size:12px;")
+        titles.addWidget(title)
+        titles.addWidget(self.subtitle)
+        header.addLayout(titles)
         header.addStretch(1)
 
         # Standalone Quick Purchase - for the case a product sits at ZERO
@@ -76,10 +84,26 @@ class CashierSalesView(QWidget):
         # there is no point buying stock for a sale that has no buyer yet.
         self.btn_quick_purchase = QPushButton("Quick Purchase")
         self.btn_quick_purchase.setEnabled(False)
+        self.btn_quick_purchase.setMinimumHeight(38)
         header.addWidget(self.btn_quick_purchase)
+
+        total_box = QVBoxLayout()
+        total_box.setSpacing(0)
+        cap = QLabel("CART TOTAL")
+        cap.setStyleSheet("color:#6b7280; font-size:10px; font-weight:700; letter-spacing:1px;")
+        cap.setAlignment(Qt.AlignRight)
+        self.total_lbl = QLabel("₦0.00")
+        self.total_lbl.setStyleSheet("color:#0f766e; font-size:22px; font-weight:700;")
+        self.total_lbl.setAlignment(Qt.AlignRight)
+        total_box.addWidget(cap)
+        total_box.addWidget(self.total_lbl)
+        header.addLayout(total_box)
+        header.addSpacing(8)
 
         self.btn_checkout = QPushButton("Finalize Sale")
         self.btn_checkout.setObjectName("PrimaryButton")
+        self.btn_checkout.setMinimumHeight(38)
+        self.btn_checkout.setMinimumWidth(130)
         header.addWidget(self.btn_checkout)
 
         # ================= MAIN SPLIT =================
@@ -116,6 +140,9 @@ class CashierSalesView(QWidget):
             "Casual Walk-In (No Permanent Ledger Account)",
             "Permanent Regular Customer (Opens Lines of Credit/History)"
         ])
+        for _cb in (self.customer_cb, self.walkin_type_cb):
+            _cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+            _cb.setMinimumContentsLength(14)
         l.addWidget(self.walkin_type_cb)
 
         l.addStretch(1)
@@ -138,15 +165,19 @@ class CashierSalesView(QWidget):
         products_label.setObjectName("SectionLabel")
         m.addWidget(products_label)
 
-        cat_row = QHBoxLayout()
-        cat_row.addWidget(QLabel("Category:"))
+        # The combo stays the single source of truth (cart-lock logic, tests);
+        # the segmented buttons are just its friendlier face.
         self.category_cb = QComboBox()
         self.category_cb.addItems(["Select Category", "Crops", "Fertilizer"])
-        cat_row.addWidget(self.category_cb, 1)
-        m.addLayout(cat_row)
+        self.category_cb.setVisible(False)
+        m.addWidget(self.category_cb)
+        self.category_seg = Segmented([("Crops", "Crops"), ("Fertilizer", "Fertilizer")], default_first=False)
+        m.addWidget(self.category_seg)
 
         self.prod_search = QLineEdit()
         self.prod_search.setPlaceholderText("Search product…")
+        self.prod_search.setClearButtonEnabled(True)
+        self.prod_search.setMinimumHeight(32)
         m.addWidget(self.prod_search)
 
         self.prod_table = QTableWidget(0, 4)
@@ -154,11 +185,19 @@ class CashierSalesView(QWidget):
         self.prod_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.prod_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.prod_table.horizontalHeader().setStretchLastSection(True)
-        self.prod_table.setAlternatingRowColors(True)
+        style_table(self.prod_table, 42)
+        self.prod_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.prod_table.horizontalHeader().setMinimumSectionSize(60)
+        self.prod_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         m.addWidget(self.prod_table, 1)
+        self.prod_hint = QLabel("Choose Crops or Fertilizer to see what is in stock")
+        self.prod_hint.setAlignment(Qt.AlignCenter)
+        self.prod_hint.setStyleSheet("color:#9ca3af; font-size:12px; padding:14px;")
+        m.addWidget(self.prod_hint)
 
         self.btn_add = QPushButton("Add Item")
         self.btn_add.setObjectName("PrimaryButton")
+        self.btn_add.setMinimumHeight(36)
         m.addWidget(self.btn_add)
 
         splitter.addWidget(middle)
@@ -172,7 +211,14 @@ class CashierSalesView(QWidget):
         r.setContentsMargins(12, 12, 12, 12)
         r.setSpacing(8)
 
-        r.addWidget(QLabel("Cart"))
+        cart_head = QHBoxLayout()
+        cart_title = QLabel("Cart")
+        cart_title.setObjectName("SectionLabel")
+        cart_head.addWidget(cart_title)
+        self.cart_count_chip = chip("0 items", "grey")
+        cart_head.addWidget(self.cart_count_chip)
+        cart_head.addStretch(1)
+        r.addLayout(cart_head)
 
         self.cart_table = QTableWidget(0, 5)
         self.cart_table.setHorizontalHeaderLabels([
@@ -181,7 +227,19 @@ class CashierSalesView(QWidget):
         self.cart_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.cart_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.cart_table.horizontalHeader().setStretchLastSection(True)
+        style_table(self.cart_table, 40)
+        self.cart_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.cart_table.horizontalHeader().setMinimumSectionSize(60)
+        self.cart_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         r.addWidget(self.cart_table, 1)
+        self.cart_hint = QLabel("The cart is empty.\nPick a product and press Add Item.")
+        self.cart_hint.setAlignment(Qt.AlignCenter)
+        self.cart_hint.setStyleSheet("color:#9ca3af; font-size:12px; padding:14px;")
+        r.addWidget(self.cart_hint)
+        self.cart_total_row = QLabel("")
+        self.cart_total_row.setAlignment(Qt.AlignRight)
+        self.cart_total_row.setStyleSheet("font-size:15px; font-weight:700; color:#0f766e; padding:6px 4px;")
+        r.addWidget(self.cart_total_row)
 
         btn_row = QHBoxLayout()
         r.addLayout(btn_row)
@@ -202,12 +260,17 @@ class CashierSalesView(QWidget):
         btn_row.addStretch(1)
 
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)   # customer - narrow
-        splitter.setStretchFactor(1, 3)   # products - the widest, most important panel now
-        splitter.setStretchFactor(2, 3)   # cart
+        splitter.setStretchFactor(0, 1)   # customer - narrow
+        splitter.setStretchFactor(1, 4)   # products - the widest, most important panel now
+        splitter.setStretchFactor(2, 4)   # cart
+
+        self._splitter = splitter
+        self._sized_once = False
+        splitter.setChildrenCollapsible(False)
 
         # ================= WIRING =================
         self.category_cb.currentTextChanged.connect(self._on_category_changed)
+        self.category_seg.changed.connect(self.category_cb.setCurrentText)
         self.prod_search.textChanged.connect(self._refresh_product_table)
         self.prod_table.cellDoubleClicked.connect(self._add_to_cart)
         self.btn_add.clicked.connect(self._add_to_cart)
@@ -225,6 +288,14 @@ class CashierSalesView(QWidget):
         # Initialize combobox dataset lists
         self._refresh_customer_combobox()
         self._refresh_product_table()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._sized_once:
+            # the product list and cart need the room; the customer card is narrow
+            self._sized_once = True
+            w = max(self._splitter.width(), 900)
+            self._splitter.setSizes([int(w * 0.25), int(w * 0.375), int(w * 0.375)])
 
     def _refresh_customer_combobox(self):
         """
@@ -248,6 +319,8 @@ class CashierSalesView(QWidget):
         except Exception:
             pass  # picker still works with just regular customers if this fails
         self.customer_cb.blockSignals(False)
+        if self.customer_cb.lineEdit():
+            self.customer_cb.lineEdit().setCursorPosition(0)
 
         # Make the picker type-to-search (matches on name OR phone).
         self._make_customer_cb_searchable()
@@ -279,9 +352,13 @@ class CashierSalesView(QWidget):
         # a real customer/supplier pick, OR a walk-in name has been typed.
         has_customer = (not is_walkin) or bool(self.walkin_name.text().strip())
         self.btn_quick_purchase.setEnabled(has_customer)
+        if self.customer_cb.lineEdit():
+            self.customer_cb.lineEdit().setCursorPosition(0)
 
     def _on_category_changed(self, text: str):
         cat = text.strip().lower()
+        self.category_seg.clear() if cat not in ("crops", "fertilizer") else self.category_seg.set_key(text.strip())
+        self.prod_hint.setVisible(cat not in ("crops", "fertilizer"))
         if cat not in ("crops", "fertilizer"):
             self.current_category = ""
             self.prod_table.setRowCount(0)
@@ -298,6 +375,7 @@ class CashierSalesView(QWidget):
                 self.category_cb.blockSignals(True)
                 self.category_cb.setCurrentText(existing.capitalize())
                 self.category_cb.blockSignals(False)
+                self.category_seg.set_key(existing.capitalize())
                 return
 
         self.current_category = cat
@@ -324,9 +402,12 @@ class CashierSalesView(QWidget):
             self.prod_table.setItem(row, 1, QTableWidgetItem(str(p["sku"])))
             stock_item = QTableWidgetItem(f"{p['stock']:,.2f}")
             stock_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if float(p["stock"] or 0) <= 5:
+                stock_item.setForeground(QColor("#b91c1c"))
             self.prod_table.setItem(row, 2, stock_item)
             rate_item = QTableWidgetItem(f"₦{p['sale_rate']:,.2f}")
             rate_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            rate_item.setForeground(QColor("#047857"))
             self.prod_table.setItem(row, 3, rate_item)
 
     def _add_to_cart(self):
@@ -464,6 +545,13 @@ class CashierSalesView(QWidget):
                 if c in (1, 2, 3, 4):
                     cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.cart_table.setItem(row, c, cell)
+
+        total = sum(it.subtotal for it in self.cart)
+        n = len(self.cart)
+        self.total_lbl.setText(f"₦{total:,.2f}")
+        self.cart_total_row.setText(f"Total  ₦{total:,.2f}" if n else "")
+        self.cart_hint.setVisible(n == 0)
+        self.cart_count_chip.setText(f"{n} item{'s' if n != 1 else ''}")
 
     def _maybe_quick_purchase(self):
         """

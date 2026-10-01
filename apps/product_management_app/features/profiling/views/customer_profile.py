@@ -9,15 +9,41 @@ from PySide2.QtWidgets import (
 import re
 from datetime import date as _date, datetime as _dt
 from PySide2.QtCore import Qt, QDate
+from PySide2.QtWidgets import QFrame
 from PySide2.QtGui import QColor, QFont
 from typing import Optional
 
 from database.services.party_balance_service import PartyBalanceService
+from shared.uix.widgets.cards import avatar, chip
 from apps.product_management_app.app_state import state
 from shared.config.constants import LEDGER_CROPS, LEDGER_FERTILIZERS
 from apps.product_management_app.features.receipts_v2 import (
     print_receipt, print_full_then_optional_delivery, PURCHASE, ADVANCE, MODE_FULL,
 )
+
+
+_PROFILE_QSS = """
+#ProfileBanner { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0b2a24, stop:1 #115e59); border-radius:14px; }
+#ProfileBanner QLabel { background:transparent; }
+#ProfileName { color:#ffffff; font-size:22px; font-weight:700; }
+#ProfileMeta { color:rgba(255,255,255,0.72); font-size:12px; }
+#ProfileBalCaption { color:rgba(255,255,255,0.6); font-size:10px; font-weight:700; letter-spacing:2px; }
+#ProfileBalance { color:#ffffff; font-size:26px; font-weight:700; }
+#SumGroup { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; }
+#SumHeading { color:#6b7280; font-size:10px; font-weight:700; letter-spacing:1px; background:transparent; }
+#SumCaption { color:#9ca3af; font-size:11px; background:transparent; }
+QTabWidget#ProfileTabs::pane { border:none; border-top:1px solid #e5e7eb; background:transparent; }
+QTabWidget#ProfileTabs QTabBar::tab { background:transparent; color:#6b7280; padding:9px 14px; border:none;
+    border-bottom:2px solid transparent; font-weight:600; }
+QTabWidget#ProfileTabs QTabBar::tab:hover { color:#111827; }
+QTabWidget#ProfileTabs QTabBar::tab:selected { color:#0f766e; border-bottom:2px solid #0f766e; }
+#ProfileRoot QTableWidget { background:#ffffff; border:1px solid #e5e7eb; border-radius:10px;
+    gridline-color:transparent; alternate-background-color:#f9fafb; outline:0; }
+#ProfileRoot QTableWidget::item { padding:4px 8px; border-bottom:1px solid #f1f5f9; }
+#ProfileRoot QTableWidget::item:selected { background:#ecfdf5; color:#065f46; }
+#ProfileRoot QTableWidget QHeaderView::section { background:#f8fafc; color:#6b7280; border:none;
+    border-bottom:1px solid #e5e7eb; padding:8px; font-size:11px; font-weight:700; }
+"""
 
 
 class CustomerProfileView(QWidget):
@@ -30,62 +56,76 @@ class CustomerProfileView(QWidget):
         self.session_user_id = state.require_user_id()
         self.mode = mode
 
+        self.setObjectName("ProfileRoot")
+        self.setStyleSheet(_PROFILE_QSS)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         # ---------------------------------------------------------
-        # HEADER
+        # HEADER BANNER
         # ---------------------------------------------------------
-        header = QHBoxLayout()
-        layout.addLayout(header)
+        banner = QFrame()
+        banner.setObjectName("ProfileBanner")
+        bl = QHBoxLayout(banner)
+        bl.setContentsMargins(20, 16, 20, 16)
+        bl.setSpacing(16)
 
+        display_name = customer.full_name if customer else f"{walkin_name}"
+        bl.addWidget(avatar(display_name, 56, on_dark=True))
+
+        ident = QVBoxLayout()
+        ident.setSpacing(4)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        title = QLabel(display_name)
+        title.setObjectName("ProfileName")
+        name_row.addWidget(title)
         if customer:
-            title = QLabel(customer.full_name)
+            active = str(customer.status).lower() == "active"
+            name_row.addWidget(chip("Active" if active else str(customer.status).title(),
+                                    "green" if active else "amber"))
+            if getattr(customer, "is_supplier", False):
+                name_row.addWidget(chip("Also a Supplier", "blue"))
         else:
-            title = QLabel(f"Walk-in Trader: {walkin_name}")
-
-        title.setStyleSheet("font-size:18px; font-weight:700;")
-        header.addWidget(title)
-
-        if customer and getattr(customer, "is_supplier", False):
-            badge = QLabel("Also a Supplier")
-            badge.setStyleSheet(
-                "background:#eef2ff; color:#4338ca; border-radius:10px;"
-                " padding:2px 10px; font-weight:700; font-size:11px;"
-            )
-            header.addWidget(badge)
-
-        header.addStretch(1)
-
+            name_row.addWidget(chip("Walk-in Trader", "amber"))
+        name_row.addStretch(1)
+        ident.addLayout(name_row)
         if customer:
-            meta = QLabel(
-                f"ID: {customer.id}   |   Phone: {customer.phone}   |   Status: {customer.status}"
-            )
+            bits = [f"ID {customer.id}"]
+            if customer.phone:
+                bits.append(customer.phone)
+            if customer.email:
+                bits.append(customer.email)
+            if customer.address:
+                bits.append(customer.address)
+            meta = QLabel("   -   ".join(bits))
         else:
-            meta = QLabel(
-                f"Walk-in Trader   |   Name: {self.walkin_name}"
-            )
+            meta = QLabel("No permanent account - transactions are grouped by name")
+        meta.setObjectName("ProfileMeta")
+        ident.addWidget(meta)
+        bl.addLayout(ident, 1)
 
-        meta.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        header.addWidget(meta)
+        bal_box = QVBoxLayout()
+        bal_box.setSpacing(0)
+        cap = QLabel("OWES US")
+        cap.setObjectName("ProfileBalCaption")
+        cap.setAlignment(Qt.AlignRight)
+        self.banner_balance = QLabel("0.00")
+        self.banner_balance.setObjectName("ProfileBalance")
+        self.banner_balance.setAlignment(Qt.AlignRight)
+        bal_box.addWidget(cap)
+        bal_box.addWidget(self.banner_balance)
+        bl.addLayout(bal_box)
 
-        # ---------------------------------------------------------
-        # ACTIONS
-        # ---------------------------------------------------------
-        actions = QHBoxLayout()
-        layout.addLayout(actions)
-
-        self.btn_new_activity = QPushButton("New Activity")
-        self.btn_new_activity.setMinimumHeight(30)
-
-        actions.addWidget(self.btn_new_activity)
-        actions.addStretch(1)
-
+        self.btn_new_activity = QPushButton("+  New Activity")
+        self.btn_new_activity.setObjectName("PrimaryButton")
+        self.btn_new_activity.setMinimumHeight(36)
+        bl.addWidget(self.btn_new_activity, 0, Qt.AlignVCenter)
         if self.mode == "cashier":
             self.btn_new_activity.setVisible(False)
-
         self.btn_new_activity.clicked.connect(self.new_activity)
+        layout.addWidget(banner)
 
         # ---------------------------------------------------------
         # SUMMARY BAR
@@ -96,6 +136,8 @@ class CustomerProfileView(QWidget):
         # TABS SCAFFOLDING
         # ---------------------------------------------------------
         tabs = QTabWidget()
+        tabs.setObjectName("ProfileTabs")
+        tabs.setDocumentMode(True)
         self.tabs = tabs
         layout.addWidget(tabs, 1)
 
@@ -1212,45 +1254,41 @@ class CustomerProfileView(QWidget):
         self.refresh_all()
 
     def _build_summary_bar(self, parent_layout):
-        box = QGroupBox("Summary (Overall)")
-        root = QVBoxLayout(box)
-        grid = QHBoxLayout()
+        """Three themed groups of two figures. The value labels keep their old names."""
+        row = QHBoxLayout()
+        row.setSpacing(12)
 
-        def make_card(card_title, color):
-            w = QGroupBox(card_title)
-            l = QVBoxLayout(w)
-            val = QLabel("0.00")
-            val.setAlignment(Qt.AlignCenter)
-            val.setStyleSheet(f"font-size:18px; font-weight:700; color:{color};")
-            l.addWidget(val)
-            return w, val
+        def group(heading, cards):
+            box = QFrame()
+            box.setObjectName("SumGroup")
+            gl = QVBoxLayout(box)
+            gl.setContentsMargins(14, 10, 14, 10)
+            gl.setSpacing(6)
+            h = QLabel(heading.upper())
+            h.setObjectName("SumHeading")
+            gl.addWidget(h)
+            inner = QHBoxLayout()
+            inner.setSpacing(18)
+            labels = []
+            for caption, color in cards:
+                col = QVBoxLayout()
+                col.setSpacing(0)
+                c = QLabel(caption)
+                c.setObjectName("SumCaption")
+                v = QLabel("0.00")
+                v.setStyleSheet(f"font-size:18px; font-weight:700; color:{color}; background:transparent;")
+                col.addWidget(c)
+                col.addWidget(v)
+                inner.addLayout(col)
+                labels.append(v)
+            gl.addLayout(inner)
+            row.addWidget(box, 1)
+            return labels
 
-        pay_box = QGroupBox("Payables")
-        pay_lay = QHBoxLayout(pay_box)
-        p1, self.sum_payable = make_card("Payable", "#c0392b")
-        p2, self.sum_paid = make_card("Paid", "#e67e22")
-        pay_lay.addWidget(p1)
-        pay_lay.addWidget(p2)
-
-        rec_box = QGroupBox("Receivables")
-        rec_lay = QHBoxLayout(rec_box)
-        r1, self.sum_receivable = make_card("Receivable", "#27ae60")
-        r2, self.sum_received = make_card("Received", "#16a085")
-        rec_lay.addWidget(r1)
-        rec_lay.addWidget(r2)
-
-        adv_box = QGroupBox("Advances")
-        adv_lay = QHBoxLayout(adv_box)
-        a1, self.sum_adv_in = make_card("Advance IN", "#2980b9")
-        a2, self.sum_adv_out = make_card("Advance OUT", "#8e44ad")
-        adv_lay.addWidget(a1)
-        adv_lay.addWidget(a2)
-
-        grid.addWidget(pay_box)
-        grid.addWidget(rec_box)
-        grid.addWidget(adv_box)
-        root.addLayout(grid)
-        parent_layout.addWidget(box)
+        self.sum_payable, self.sum_paid = group("Payables", [("Payable", "#b91c1c"), ("Paid", "#c2410c")])
+        self.sum_receivable, self.sum_received = group("Receivables", [("Receivable", "#047857"), ("Received", "#0f766e")])
+        self.sum_adv_in, self.sum_adv_out = group("Advances", [("Advance in", "#1d4ed8"), ("Advance out", "#7c3aed")])
+        parent_layout.addLayout(row)
 
     def _compute_totals(self):
         if not self.customer:
@@ -1276,6 +1314,7 @@ class CustomerProfileView(QWidget):
         self.sum_received.setText(f"{received:,.2f}")
         self.sum_adv_in.setText(f"{adv_in:,.2f}")
         self.sum_adv_out.setText(f"{adv_out:,.2f}")
+        self.banner_balance.setText(f"{receivable:,.2f}")
 
     def refresh_all(self):
         self._operator_cache = {}
