@@ -187,6 +187,8 @@ class SalesOrderService:
     def dispatch(sales_order_id: int, dispatched_by_user_id: int, driver_id: int = None) -> Dict[str, Any]:
         sales_order_id = int(sales_order_id or 0)
         dispatched_by_user_id = int(dispatched_by_user_id or 0)
+        if dispatched_by_user_id <= 0:
+            raise ValueError("dispatched_by_user_id is required.")
 
         with get_session() as s:
             order = s.get(SalesOrder, sales_order_id)
@@ -212,9 +214,10 @@ class SalesOrderService:
             needed_kg_by_pid: Dict[int, float] = {}
             needed_bags_by_pid: Dict[int, float] = {}
             for it in items:
-                if _is_fert(it.product_type_snapshot):
-                    needed_bags_by_pid[it.product_id] = needed_bags_by_pid.get(it.product_id, 0.0) + float(it.dispatched_qty_bags)
-                else:
+                # Bags are tracked for BOTH types (crops are dual-tracked kg +
+                # bags), so every line's bags must be covered and deducted.
+                needed_bags_by_pid[it.product_id] = needed_bags_by_pid.get(it.product_id, 0.0) + float(it.dispatched_qty_bags)
+                if not _is_fert(it.product_type_snapshot):
                     needed_kg_by_pid[it.product_id] = needed_kg_by_pid.get(it.product_id, 0.0) + float(it.dispatched_weight_kg)
 
             for pid, needed in needed_kg_by_pid.items():
@@ -258,7 +261,7 @@ class SalesOrderService:
                 s.add(StockMovement(
                     product_id=it.product_id,
                     movement_type="sale_out",
-                    qty_bags=float(it.dispatched_qty_bags) if is_fert else 0,
+                    qty_bags=float(it.dispatched_qty_bags),
                     total_weight_kg=0 if is_fert else float(it.dispatched_weight_kg),
                     unit_rate=float(it.my_price),
                     reference_type="sales_order_item",
@@ -419,6 +422,8 @@ class SalesOrderService:
         """
         sales_order_id = int(sales_order_id or 0)
         confirmed_by_user_id = int(confirmed_by_user_id or 0)
+        if confirmed_by_user_id <= 0:
+            raise ValueError("confirmed_by_user_id is required.")
 
         with get_session() as s:
             order = s.get(SalesOrder, sales_order_id)
@@ -470,6 +475,11 @@ class SalesOrderService:
 
                 if company_qty <= 0:
                     raise ValueError(f"Line #{item_id}: company quantity must be > 0.")
+                # A negative accepted/rejected/price would still satisfy the
+                # sum check below (e.g. 150 + -50 = 100) and inflate the total.
+                if accepted < 0 or rejected < 0 or company_price < 0:
+                    raise ValueError(
+                        f"Line #{item_id}: accepted, rejected and price cannot be negative.")
                 # Never just trusted from the caller - accepted + rejected
                 # must genuinely account for the whole confirmed quantity.
                 if abs((accepted + rejected) - company_qty) > 0.01:
@@ -495,10 +505,22 @@ class SalesOrderService:
                 total += final_line_amount
 
                 if rejected > 0:
+                    if is_fert:
+                        bags_back = rejected
+                    else:
+                        # Crops are dual-tracked: dispatch deducted the bags
+                        # too, so the rejected share of them goes back in
+                        # proportion to the rejected share of the weight.
+                        sent_kg = float(item.dispatched_weight_kg or 0)
+                        sent_bags = float(item.dispatched_qty_bags or 0)
+                        bags_back = (
+                            min(sent_bags, round(sent_bags * rejected / sent_kg))
+                            if sent_kg > 0 else 0
+                        )
                     s.add(StockMovement(
                         product_id=item.product_id,
                         movement_type="return_in",
-                        qty_bags=rejected if is_fert else 0,
+                        qty_bags=bags_back,
                         total_weight_kg=0 if is_fert else rejected,
                         unit_rate=company_price,
                         reference_type="sales_order_item",
