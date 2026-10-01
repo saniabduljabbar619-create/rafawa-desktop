@@ -29,6 +29,10 @@ class Sidebar(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
+        brand = QLabel("RAFAWA")
+        brand.setObjectName("SidebarBrand")
+        outer.addWidget(brand)
+
         self._header = QLabel("Product Management")
         self._header.setStyleSheet("font-size: 14px; font-weight: 700; padding: 12px 12px 4px 12px;")
         self._header.setObjectName("SidebarHeader")
@@ -44,6 +48,11 @@ class Sidebar(QWidget):
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll, 1)
+
+        from shared.version import __version__
+        footer = QLabel(f"Version {__version__}")
+        footer.setObjectName("SidebarFooter")
+        outer.addWidget(footer)
 
         content = QWidget()
         content.setStyleSheet("background: transparent;")

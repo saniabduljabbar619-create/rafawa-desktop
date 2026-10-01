@@ -235,10 +235,8 @@ def run():
     # and why scrollbars could end up effectively invisible everywhere,
     # even though this app's own QSS defines visible colors for both.
     app.setStyle("Fusion")
-    app.setStyleSheet(APP_STYLESHEET)
-    from shared.uix.table_polish import TablePolisher
-    app._table_polisher = TablePolisher(app)          # keep a reference alive
-    app.installEventFilter(app._table_polisher)
+    from shared.uix.theme import apply_theme
+    apply_theme(app)
     win = ProductManagementMainWindow()
     win.setWindowTitle(f"Rafawa Desktop {__version__}")
     win.show()

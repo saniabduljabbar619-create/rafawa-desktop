@@ -3,8 +3,29 @@
 
 APP_STYLESHEET = """
 /* Global */
-QMainWindow { background: #f6f7fb; }
-QWidget { font-size: 12px; color: #111827; font-family: Segoe UI, Arial; }
+QMainWindow { background: #f3f5f8; }
+QWidget { font-size: 12px; color: #111827; font-family: "Segoe UI Variable", "Segoe UI", Inter, Arial; }
+
+/* Page canvas: one calm off-white behind every screen (previously the OS
+   default grey, which clashed with the white top bar and cards). */
+QStackedWidget#ContentStack { background: #f3f5f8; }
+QDialog { background: #f3f5f8; }
+QMessageBox { background: #ffffff; }
+QGroupBox {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    margin-top: 14px;
+    padding: 10px;
+    font-weight: 700;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: #0b2a24;
+}
 
 /* TopBar */
 QWidget#TopBar {
@@ -14,6 +35,27 @@ QWidget#TopBar {
 QWidget#TopBar QLabel {
     font-size: 14px;
     font-weight: 700;
+}
+QLabel#UserChip {
+    background: #ecfdf5;
+    color: #065f46;
+    border: 1px solid #a7f3d0;
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#SidebarBrand {
+    color: #34d399;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 3px;
+    padding: 16px 14px 0 14px;
+}
+QLabel#SidebarFooter {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 10px;
+    padding: 8px 14px 10px 14px;
 }
 QWidget#TopBar QPushButton {
     background: #f3f4f6;
@@ -99,6 +141,25 @@ QLabel#SectionLabel {
     letter-spacing: 1px;
     padding-top: 3px;
 }
+
+/* Button roles (set automatically from the button text by shared/uix/table_polish.py,
+   or by hand with setProperty("role", "primary" | "danger")). */
+QPushButton[role="primary"] {
+    background: #1f8f6b;
+    color: #ffffff;
+    border: 1px solid #1f8f6b;
+}
+QPushButton[role="primary"]:hover { background: #177a5b; border-color: #177a5b; }
+QPushButton[role="primary"]:pressed { background: #136a50; }
+QPushButton[role="primary"]:disabled { background: #9ca3af; border-color: #9ca3af; color: #ffffff; }
+QPushButton[role="danger"] {
+    background: #ffffff;
+    color: #b91c1c;
+    border: 1px solid #fca5a5;
+}
+QPushButton[role="danger"]:hover { background: #fef2f2; border-color: #f87171; }
+QPushButton[role="danger"]:pressed { background: #fee2e2; }
+QPushButton[role="danger"]:disabled { color: #fca5a5; border-color: #fee2e2; background: #ffffff; }
 
 /* Primary buttons (inside screens) - only when explicitly marked */
 QPushButton#PrimaryButton {
@@ -317,3 +378,24 @@ QPushButton#PrimaryButton:default {
 }
 
 """
+
+def apply_theme(app) -> None:
+    """
+    One place that dresses the whole application: Fusion style (the one Qt style that
+    honours QSS reliably), the stylesheet, a matching palette for widgets QSS does not
+    reach, and the app-wide table/button polisher. Used by the real app and the GUI tests.
+    """
+    from PySide2.QtGui import QColor, QPalette
+    from shared.uix.table_polish import TablePolisher
+
+    app.setStyle("Fusion")
+    palette = app.palette()
+    palette.setColor(QPalette.Window, QColor("#f3f5f8"))
+    palette.setColor(QPalette.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.AlternateBase, QColor("#f8fafc"))
+    palette.setColor(QPalette.Highlight, QColor("#1f8f6b"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    app.setPalette(palette)
+    app.setStyleSheet(APP_STYLESHEET)
+    app._table_polisher = TablePolisher(app)          # keep a reference alive
+    app.installEventFilter(app._table_polisher)

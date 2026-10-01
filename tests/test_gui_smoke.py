@@ -21,12 +21,8 @@ from tests.conftest import (ADMIN_ID, CASHIER_A, CUSTOMER_ID, SUPPLIER_ID, make_
 @pytest.fixture(scope="session")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    from shared.uix.theme import APP_STYLESHEET
-    app.setStyle("Fusion")
-    app.setStyleSheet(APP_STYLESHEET)
-    from shared.uix.table_polish import TablePolisher
-    app._table_polisher = TablePolisher(app)
-    app.installEventFilter(app._table_polisher)
+    from shared.uix.theme import apply_theme
+    apply_theme(app)
     return app
 
 
@@ -219,3 +215,24 @@ def test_reports_screen_shows_figures_and_exports(qapp, world, no_modals, monkey
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
     view.btn_export.click()
     assert out.exists() and any(k == "information" for k, _ in no_modals)
+
+
+@pytest.mark.skipif(not os.getenv("RAFAWA_SCREENSHOT_DIR"), reason="set RAFAWA_SCREENSHOT_DIR to capture screens")
+def test_capture_full_window_screenshots(qapp, world):
+    """The whole main window (sidebar + top bar + a screen) for both workspaces."""
+    from pathlib import Path
+    from apps.product_management_app.main import ProductManagementMainWindow
+    out = Path(os.environ["RAFAWA_SCREENSHOT_DIR"])
+    out.mkdir(parents=True, exist_ok=True)
+    win = ProductManagementMainWindow()
+    win.resize(1360, 820)
+    win.show()
+    qapp.processEvents()
+    for workspace, routes in (("pm", ["admin.dashboard", "profiles.customers", "catalog.products", "admin.reports"]),
+                              ("cashier", ["cashier.sales", "cashier.payments"])):
+        win.open_workspace(workspace)
+        for route in routes:
+            win.navigate(route)
+            qapp.processEvents()
+            win.grab().save(str(out / f"window_{workspace}_{route}.png"))
+    win.close()

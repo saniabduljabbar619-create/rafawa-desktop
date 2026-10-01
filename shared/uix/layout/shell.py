@@ -26,8 +26,7 @@ class AppShell(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.sync_status_bar = SyncStatusBar()
-        outer.addWidget(self.sync_status_bar)
+        self.sync_status_bar = SyncStatusBar()      # added at the bottom, below the content
 
         row = QWidget()
         root = QHBoxLayout(row)
@@ -47,7 +46,11 @@ class AppShell(QWidget):
         right.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
+        self.stack.setObjectName("ContentStack")
+        self.stack.setAttribute(Qt.WA_StyledBackground, True)
         right.addWidget(self.stack, 1)
+
+        outer.addWidget(self.sync_status_bar)
 
         self.sidebar.route_selected.connect(self.navigate)
 
