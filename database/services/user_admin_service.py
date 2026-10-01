@@ -65,8 +65,8 @@ class UserAdminService:
             raise ValueError("Username must be at least 3 characters.")
         if len(password) < 6:
             raise ValueError("Password must be at least 6 characters.")
-        if role_name not in ("admin", "cashier"):
-            raise ValueError("role_name must be 'admin' or 'cashier'.")
+        if role_name not in ("admin", "cashier", "weigher"):
+            raise ValueError("role_name must be 'admin', 'cashier' or 'weigher'.")
 
         with get_session() as s:
             # username uniqueness

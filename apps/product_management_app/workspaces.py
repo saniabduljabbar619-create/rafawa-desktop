@@ -54,6 +54,9 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.purchase_orders.views.suppliers_view import SuppliersView
     from apps.product_management_app.features.business_history.views.cashier_list_view import CashierHistoryListView
     from apps.product_management_app.features.reports.views.reports_view import ReportsView
+    from apps.product_management_app.features.weigher.views.weigher_station import WeigherStationView
+    from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
+    from apps.product_management_app.features.weigher.views.weigh_tickets_admin import WeighTicketsAdminView
 
     # 👑 THE ANCHOR BLUEPRINTS: Import the completed executive analytics and valuation dashboards
     from apps.product_management_app.features.catalog.views.product_profit_view import ProductProfitView
@@ -81,6 +84,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
                 SidebarItem(label="Sales", route="catalog.sales"),
                 SidebarItem(label="Profits", route="catalog.profits"),
             ]),
+            SidebarItem(label="Weigh Tickets", route="admin.weigh_tickets"),
             SidebarItem(label="Returns", route="admin.returns"),
             SidebarItem(label="Orders", children=[
                 SidebarItem(label="Sales Orders", route="admin.sales_orders"),
@@ -102,6 +106,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.profits": lambda: ProductProfitView(),
             "catalog.capital": lambda: ProductCapitalView(),
             "catalog.live_valuation": lambda: ProductInventoryCapitalView(),
+            "admin.weigh_tickets": lambda: WeighTicketsAdminView(mode="admin"),
             "admin.returns": lambda: AdminReturnsView(),
             "admin.sales_orders": lambda: CompaniesView(mode="admin"),
             "admin.purchase_orders": lambda: SuppliersView(mode="admin"),
@@ -118,6 +123,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.products": "Catalog • Products",
             "catalog.sales": "Catalog • Sales",
             "catalog.profits": "Catalog • Realized Profit & Margins",
+            "admin.weigh_tickets": "Weigh Tickets",
             "admin.returns": "Returns",
             "admin.sales_orders": "Sales Orders",
             "admin.purchase_orders": "Purchase Orders",
@@ -133,6 +139,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
         sidebar_title="Cashier",
         menu=[
             SidebarItem(label="Sales (Checkout)", route="cashier.sales"),
+            SidebarItem(label="Weigh Tickets", route="cashier.weigh_tickets"),
             SidebarItem(label="Cashier Purchase", route="cashier.intake"),
             SidebarItem(label="Payments", route="cashier.payments"),
             SidebarItem(label="Profiles", children=[
@@ -150,6 +157,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
         ],
         routes={
             "cashier.sales": lambda: CashierSalesView(),
+            "cashier.weigh_tickets": lambda: WeighTicketsAdminView(mode="cashier"),
             "cashier.intake": lambda: CashierIntakeView(),
             "cashier.payments": lambda: CashierPaymentsView(),
             "cashier.customers": lambda: CustomersListView(mode="cashier"),
@@ -163,6 +171,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
         default_route="cashier.sales",
         title_map={
             "cashier.sales": "Sales (Checkout)",
+            "cashier.weigh_tickets": "Weigh Tickets",
             "cashier.intake": "Cashier Purchase",
             "cashier.payments": "Payments",
             "cashier.customers": "Customers",
@@ -175,4 +184,23 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
         },
     )
 
-    return {"pm": pm, "cashier": cashier}
+    weigher = WorkspaceSpec(
+        key="weigher",
+        window_title="Rafawa – Weigher",
+        sidebar_title="Weigher",
+        menu=[
+            SidebarItem(label="Weighing Station", route="weigher.station"),
+            SidebarItem(label="My Tickets", route="weigher.tickets"),
+        ],
+        routes={
+            "weigher.station": lambda: WeigherStationView(),
+            "weigher.tickets": lambda: WeigherTicketsView(),
+        },
+        default_route="weigher.station",
+        title_map={
+            "weigher.station": "Weighing Station",
+            "weigher.tickets": "My Tickets",
+        },
+    )
+
+    return {"pm": pm, "cashier": cashier, "weigher": weigher}

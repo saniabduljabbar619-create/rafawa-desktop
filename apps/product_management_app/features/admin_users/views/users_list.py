@@ -29,6 +29,7 @@ class CreateUserDialog(QDialog):
         self.role = QComboBox()
         self.role.addItem("Admin", "admin")
         self.role.addItem("Cashier", "cashier")
+        self.role.addItem("Weigher", "weigher")
 
         form.addRow("Username", self.username)
         form.addRow("Password", self.password)

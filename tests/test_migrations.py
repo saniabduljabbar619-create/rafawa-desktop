@@ -23,8 +23,9 @@ def test_fresh_database_gets_full_schema_at_head(tmp_path):
     r = _alembic(url, "upgrade", "head")
     assert r.returncode == 0, r.stderr
     t = _tables(url)
-    assert {"users", "sales", "payments", "audit_logs", "alembic_version"} <= t
-    assert "0003" in _alembic(url, "current").stderr + _alembic(url, "current").stdout
+    assert {"users", "sales", "payments", "audit_logs", "alembic_version",
+            "weigh_tickets", "weigh_ticket_lines", "weigh_rounds"} <= t
+    assert "0004" in _alembic(url, "current").stderr + _alembic(url, "current").stdout
 
 
 def test_existing_installation_is_upgraded_in_place(tmp_path):
