@@ -5,6 +5,7 @@ from PySide2.QtWidgets import (
 )
 
 from apps.product_management_app.app_state import state
+from shared.uix.widgets.product_select import add_select_placeholder
 
 
 class PaymentDialog(QDialog):
@@ -161,6 +162,7 @@ class PaymentDialog(QDialog):
             self.product.clear()
             for p in prods:
                 self.product.addItem(p["name"], int(p["id"]))
+            add_select_placeholder(self.product)
 
     def _on_confirm(self):
         payload = self.payload()

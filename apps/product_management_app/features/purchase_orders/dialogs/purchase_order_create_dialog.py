@@ -12,6 +12,7 @@ from PySide2.QtCore import Qt
 from apps.product_management_app.app_state import state
 from database.session import get_session
 from database.models.product import Product
+from shared.uix.widgets.product_select import add_select_placeholder
 
 
 def _is_fert(ptype: str) -> bool:
@@ -218,6 +219,7 @@ class PurchaseOrderCreateDialog(QDialog):
         self.product_cb.clear()
         for p in products:
             self.product_cb.addItem(p.name, {"id": p.id, "type": p.product_type})
+        add_select_placeholder(self.product_cb)
         if not products:
             QMessageBox.warning(self, "No Products", "No active products found for this category.")
         self._sync_fields_for_selected_product()
@@ -231,6 +233,7 @@ class PurchaseOrderCreateDialog(QDialog):
     def _add_line(self):
         data = self.product_cb.currentData()
         if data is None:
+            QMessageBox.information(self, "Add Line", "Select a product first.")
             return
         weight = float(self.weight_in.value())
         bags = float(self.bags_in.value())
