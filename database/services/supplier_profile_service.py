@@ -21,6 +21,7 @@ from datetime import datetime
 from sqlalchemy import select, desc, func
 
 from database.session import get_session
+from database.services.document_balance import document_balances
 from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 from database.models.purchase import Purchase
@@ -419,20 +420,8 @@ class SupplierProfileService:
             ).scalars().all()
             received_total = round(sum(_f(pay.amount) for pay in payments), 2)
 
-            # Same formula as the ledger / dashboard: net of returns and
-            # discounts, and advance-allocated amounts count as settled too.
-            from database.models.advance_allocations import AdvanceAllocation
-            from database.services.party_ledger_service import PartyLedgerService
-            net_total = PartyLedgerService._net_totals_for_sales(s, [int(sale.id)]).get(int(sale.id), 0.0)
-            cash_received = round(sum(
-                _f(pay.amount) for pay in payments
-                if (pay.method or "").lower() != "advance"), 2)
-            alloc_total = _f(
-                s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "sale",
-                        AdvanceAllocation.entity_id == sale.id)
-                .scalar()
-            )
+            # Same formula as the ledger / drawer / dashboard (one shared definition).
+            bal = document_balances(s, "sale", [int(sale.id)])[int(sale.id)]
 
             creator = (s.get(User, int(sale.created_by_user_id))
                       if sale.created_by_user_id else None)
@@ -448,8 +437,8 @@ class SupplierProfileService:
                 "discount": _f(sale.discount),
                 "total_amount": _f(sale.total_amount),
                 "received_total": received_total,
-                "net_total": round(net_total, 2),
-                "balance": round(max(net_total - cash_received - alloc_total, 0.0), 2),
+                "net_total": round(bal.net_total, 2),
+                "balance": round(bal.balance, 2),
                 "lines": lines,
                 "payments": [{
                     "id": int(pay.id),
@@ -502,21 +491,8 @@ class SupplierProfileService:
             ).scalars().all()
             paid_total = round(sum(_f(pay.amount) for pay in payments), 2)
 
-            # Same formula as the ledger / dashboard: net of returns, plus
-            # price adjustments, with advance-allocated amounts counted as
-            # settled and refunds (direction "in") not counted as paid.
-            from database.models.advance_allocations import AdvanceAllocation
-            from database.services.party_ledger_service import PartyLedgerService
-            net_total = PartyLedgerService._net_totals_for_purchases(s, [int(p.id)]).get(int(p.id), 0.0)
-            cash_paid = round(sum(
-                _f(pay.amount) for pay in payments
-                if pay.direction == "out" and (pay.method or "").lower() != "advance"), 2)
-            alloc_total = _f(
-                s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "purchase",
-                        AdvanceAllocation.entity_id == p.id)
-                .scalar()
-            )
+            # Same formula as the ledger / drawer / dashboard (one shared definition).
+            bal = document_balances(s, "purchase", [int(p.id)])[int(p.id)]
 
             from database.models.purchase_price_adjustment import PurchasePriceAdjustment
             adjustment_total = round(
@@ -547,8 +523,8 @@ class SupplierProfileService:
                 # the same way it's folded in everywhere else this
                 # session that computes a purchase's true, current total.
                 "adjustment_total": adjustment_total,
-                "net_total": round(net_total, 2),
-                "balance": round(max(net_total - cash_paid - alloc_total, 0.0), 2),
+                "net_total": round(bal.net_total, 2),
+                "balance": round(bal.balance, 2),
                 "lines": lines,
                 "payments": [{
                     "id": int(pay.id),

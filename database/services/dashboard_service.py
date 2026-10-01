@@ -8,6 +8,7 @@ from datetime import date
 from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 from database.session import get_session
+from database.services.document_balance import document_balances
 from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 
@@ -258,99 +259,30 @@ def get_purchase_payment_snapshot(
 
         rows = []
 
-        purchase_ids = [p.id for p in purchases]
-
-        # Batch-aggregate payments/allocations/returns for every purchase in
-        # this page in one round trip each, instead of 3 queries per
-        # purchase - the previous per-row loop turned a dashboard refresh
-        # into 3N+1 sequential DB round trips, which is what made the
-        # screen hang once there were a few hundred purchases.
-        paid_map: dict = {}
-        alloc_map: dict = {}
-        return_map: dict = {}
-
-        if purchase_ids:
-            paid_map = dict(
-                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
-                .filter(Payment.entity_type == "purchase")
-                .filter(Payment.entity_id.in_(purchase_ids))
-                .filter(Payment.direction == "out")
-                .filter(Payment.method != "advance")
-                .filter(~Payment.notes.like("%Advance settlement%"))
-                .filter(Payment.status != "voided")
-                .group_by(Payment.entity_id)
-                .all()
-            )
-
-            alloc_map = dict(
-                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "purchase")
-                .filter(AdvanceAllocation.entity_id.in_(purchase_ids))
-                .group_by(AdvanceAllocation.entity_id)
-                .all()
-            )
-
-            return_map = dict(
-                s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
-                .filter(PurchaseReturn.purchase_id.in_(purchase_ids))
-                .group_by(PurchaseReturn.purchase_id)
-                .all()
-            )
-
-            adjustment_map = dict(
-                s.query(PurchasePriceAdjustment.purchase_id, func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-                .filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids))
-                .group_by(PurchasePriceAdjustment.purchase_id)
-                .all()
-            )
+        # Paid/balance/status come from the one shared definition (grouped
+        # queries for the whole page, not 3 per purchase).
+        balances = document_balances(s, "purchase", [p.id for p in purchases])
 
         for purchase in purchases:
-            raw_total = float(purchase.total_amount or 0)
+            bal = balances[purchase.id]
+            status = bal.status.upper()                 # PAID | PARTIAL | UNPAID
 
-            # 1. Outbound cash payments (Exclude non-cash advance settle rows)
-            paid_total = float(paid_map.get(purchase.id, 0) or 0)
-
-            # 2. Advance wallet amounts allocated
-            alloc_total = float(alloc_map.get(purchase.id, 0) or 0)
-
-            # 3. Returns
-            return_total = abs(float(return_map.get(purchase.id, 0) or 0))
-
-            # 3b. Price adjustments - a real, additional amount now
-            # genuinely owed (e.g. a supplier renegotiating after
-            # delivery), not an assumption - adds to the total the same
-            # way a return subtracts from it.
-            adjustment_total = float(adjustment_map.get(purchase.id, 0) or 0)
-
-            # 4. CLEAN FINANCIAL MATHEMATICS
-            net_total = max(raw_total - return_total + adjustment_total, 0.0)
-            settled = paid_total + alloc_total
-            balance = max(net_total - settled, 0.0)
-
-            # 5. STATUS DETERMINATION LOGIC
-            if net_total <= 0:
-                status = "PAID"
+            if bal.status == "paid":
                 summary["paid"]["count"] += 1
-                summary["paid"]["total"] += 0.0
-            elif settled <= 0:
-                status = "UNPAID"
-                summary["unpaid"]["count"] += 1
-                summary["unpaid"]["total_balance"] += balance
-            elif balance > 0:
-                status = "PARTIAL"
+                summary["paid"]["total"] += bal.net_total
+            elif bal.status == "partial":
                 summary["partial"]["count"] += 1
-                summary["partial"]["total_balance"] += balance
+                summary["partial"]["total_balance"] += bal.balance
             else:
-                status = "PAID"
-                summary["paid"]["count"] += 1
-                summary["paid"]["total"] += net_total
+                summary["unpaid"]["count"] += 1
+                summary["unpaid"]["total_balance"] += bal.balance
 
             rows.append({
                 "purchase_id": purchase.id,
                 "supplier": purchase.supplier.display_name,
-                "total": net_total,                
-                "paid": min(settled, net_total),   
-                "balance": balance,                
+                "total": bal.net_total,
+                "paid": min(bal.settled, bal.net_total),
+                "balance": bal.balance,
                 "status": status,
             })
 
@@ -397,99 +329,31 @@ def get_sale_payment_snapshot(
         unpaid_count = 0
         unpaid_balance_total = 0.0
 
-        sale_ids = [sale.id for sale in sales]
-
-        # Batch-aggregate payments/allocations/returns/discounts for every
-        # sale on this page in one round trip each, instead of 4 queries
-        # per sale - see the matching note in get_purchase_payment_snapshot.
-        pay_map: dict = {}
-        alloc_map: dict = {}
-        return_map: dict = {}
-        discount_map: dict = {}
-
-        if sale_ids:
-            pay_query = (
-                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
-                .filter(Payment.entity_type == "sale")
-                .filter(Payment.entity_id.in_(sale_ids))
-                .filter(Payment.direction == "in")
-                .filter(Payment.method != "advance")
-                .filter(~Payment.notes.like("%Advance settlement%"))
-                .filter(Payment.status != "voided")
-            )
-            pay_query = apply_isolation(pay_query, Payment)
-            pay_map = dict(pay_query.group_by(Payment.entity_id).all())
-
-            alloc_map = dict(
-                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "sale")
-                .filter(AdvanceAllocation.entity_id.in_(sale_ids))
-                .group_by(AdvanceAllocation.entity_id)
-                .all()
-            )
-
-            return_map = dict(
-                s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
-                .filter(SaleReturn.sale_id.in_(sale_ids))
-                .group_by(SaleReturn.sale_id)
-                .all()
-            )
-
-            discount_map = dict(
-                s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-                .filter(SaleDiscount.sale_id.in_(sale_ids))
-                .group_by(SaleDiscount.sale_id)
-                .all()
-            )
+        # Paid/balance/status come from the one shared definition. Cashiers
+        # only ever see the payments THEY recorded (apply_isolation's rule).
+        balances = document_balances(
+            s, "sale", [sale.id for sale in sales],
+            payments_by_user_id=(user_id if role == "cashier" and user_id else None))
 
         for sale in sales:
-            raw_total = float(sale.total_amount or 0.0)
-
-            # 1. Inbound cash payments (Exclude non-cash advance settlement rows)
-            paid = float(pay_map.get(sale.id, 0) or 0.0)
-
-            # 2. Advance wallet amounts allocated
-            alloc_total = float(alloc_map.get(sale.id, 0) or 0)
-
-            # 3. Sales returns
-            return_total = abs(float(return_map.get(sale.id, 0) or 0.0))
-
-            # 3b. Manually-applied discounts (the Payments section's "lazy
-            # calculator") - same treatment as a return: reduces what's
-            # genuinely still owed, without any cash actually moving.
-            discount_total = float(discount_map.get(sale.id, 0) or 0.0)
-
-            # 4. CLEAN FINANCIAL MATHEMATICS
-            net_total = max(raw_total - return_total - discount_total, 0.0)
-            settled = paid + alloc_total
-            balance = max(net_total - settled, 0.0)
-
-            # 5. STATUS DETERMINATION LOGIC
-            if net_total <= 0:
-                status = "PAID"
+            bal = balances[sale.id]
+            if bal.status == "paid":
                 paid_count += 1
-                paid_total += 0.0
-            elif settled <= 0:
-                status = "UNPAID"
-                unpaid_count += 1
-                unpaid_balance_total += balance
-            elif balance > 0:
-                status = "PARTIAL"
+                paid_total += bal.net_total
+            elif bal.status == "partial":
                 partial_count += 1
-                partial_balance_total += balance
+                partial_balance_total += bal.balance
             else:
-                status = "PAID"
-                paid_count += 1
-                paid_total += net_total
+                unpaid_count += 1
+                unpaid_balance_total += bal.balance
 
-            # 6. CAPPED VIEW PAYLOAD FOR THE SALES UI TABLES
             rows.append({
                 "sale_id": sale.id,
                 "customer": sale.buyer.display_name if sale.buyer else "Walk-in Customer",
-                "total": net_total,                
-                "paid": min(settled, net_total),   
-                "balance": balance,                
-                "status": status,
+                "total": bal.net_total,
+                "paid": min(bal.settled, bal.net_total),
+                "balance": bal.balance,
+                "status": bal.status.upper(),
             })
 
         return {

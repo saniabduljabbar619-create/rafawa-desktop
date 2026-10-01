@@ -26,6 +26,7 @@ from sqlalchemy import select, func, or_, and_, false, String
 from sqlalchemy.exc import IntegrityError
 
 from database.session import get_session
+from database.services.document_balance import document_balances
 from database.services.audit_service import AuditService
 from database.models.payment import Payment
 from database.models.advance import Advance
@@ -75,23 +76,6 @@ def _outside_range_filter(stmt, col, start: Optional[date], end: Optional[date])
     if end:
         conditions.append(col > datetime.combine(end, time.max))
     return stmt.where(or_(*conditions))
-
-
-def _purchase_adjustments(s, ids) -> Dict[int, float]:
-    """Sum of price adjustments per purchase - an extra amount genuinely owed
-    (see PartyLedgerService), so every payment-status calc must include it."""
-    if not ids:
-        return {}
-    from database.models.purchase_price_adjustment import PurchasePriceAdjustment
-    return {
-        int(pid): _f(amt)
-        for pid, amt in (
-            s.query(PurchasePriceAdjustment.purchase_id,
-                    func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0.0))
-            .filter(PurchasePriceAdjustment.purchase_id.in_(ids))
-            .group_by(PurchasePriceAdjustment.purchase_id).all()
-        )
-    }
 
 
 class _LazyMap(dict):
@@ -1469,67 +1453,13 @@ class DrawerService:
                 extra = len(names) - 1
                 return f"{names[0]} +{extra} more" if extra > 0 else names[0]
 
-            # ---- payment status, batch queries for the whole set ----
-            def _paid_and_alloc(entity_type: str, ids: List[int]):
-                if not ids:
-                    return {}, {}
-                paid_rows = (
-                    s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
-                    .filter(Payment.entity_type == entity_type, Payment.entity_id.in_(ids))
-                    # Only the settling direction - a refund (opposite
-                    # direction) must not count as extra money paid.
-                    .filter(Payment.direction == ("in" if entity_type == "sale" else "out"))
-                    .filter(Payment.method != "advance")
-                    .filter(Payment.status != "voided")
-                    .group_by(Payment.entity_id).all()
-                )
-                alloc_rows = (
-                    s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0.0))
-                    .filter(AdvanceAllocation.entity_type == entity_type, AdvanceAllocation.entity_id.in_(ids))
-                    .group_by(AdvanceAllocation.entity_id).all()
-                )
-                return ({int(eid): _f(amt) for eid, amt in paid_rows},
-                       {int(eid): _f(amt) for eid, amt in alloc_rows})
-
-            sale_paid, sale_alloc = _paid_and_alloc("sale", sale_ids)
-            pur_paid, pur_alloc = _paid_and_alloc("purchase", pur_ids)
-            pur_adj = _purchase_adjustments(s, pur_ids)
-
-            sale_returned: Dict[int, float] = {}
-            if sale_ids:
-                for eid, amt in (s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
-                                 .filter(SaleReturn.sale_id.in_(sale_ids))
-                                 .group_by(SaleReturn.sale_id).all()):
-                    sale_returned[int(eid)] = abs(_f(amt))
-
-            pur_returned: Dict[int, float] = {}
-            if pur_ids:
-                for eid, amt in (s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0.0))
-                                 .filter(PurchaseReturn.purchase_id.in_(pur_ids))
-                                 .group_by(PurchaseReturn.purchase_id).all()):
-                    pur_returned[int(eid)] = abs(_f(amt))
-
-            sale_discounts: Dict[int, float] = {}
-            if sale_ids:
-                for eid, amt in (s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-                                 .filter(SaleDiscount.sale_id.in_(sale_ids))
-                                 .group_by(SaleDiscount.sale_id).all()):
-                    sale_discounts[int(eid)] = _f(amt)
-
-            def _status(net_total: float, settled: float) -> str:
-                if net_total <= 0.005:
-                    return "paid"
-                if settled >= net_total - 0.01:
-                    return "paid"
-                if settled > 0.005:
-                    return "partial"
-                return "unpaid"
+            # Paid / balance / status come from the single shared definition.
+            sale_bal = document_balances(s, "sale", sale_ids)
+            pur_bal = document_balances(s, "purchase", pur_ids)
 
             rows: List[Dict[str, Any]] = []
             for sale in sales:
                 sid = int(sale.id)
-                net_total = max(_f(sale.total_amount) - sale_returned.get(sid, 0.0) - sale_discounts.get(sid, 0.0), 0.0)
-                settled = sale_paid.get(sid, 0.0) + sale_alloc.get(sid, 0.0)
                 rows.append({
                     "kind": "sale",
                     "id": sid,
@@ -1538,13 +1468,11 @@ class DrawerService:
                     "amount": _f(sale.total_amount),
                     "created_by": users.get(int(sale.created_by_user_id or 0), ""),
                     "notes": sale.notes or "",
-                    "payment_status": "voided" if sale.status == "voided" else _status(net_total, settled),
+                    "payment_status": sale_bal[sid].status,
                     "product_summary": _product_summary(sale_lines.get(sid, [])),
                 })
             for pur in purchases:
                 pid = int(pur.id)
-                net_total = max(_f(pur.total_amount) - pur_returned.get(pid, 0.0) + pur_adj.get(pid, 0.0), 0.0)
-                settled = pur_paid.get(pid, 0.0) + pur_alloc.get(pid, 0.0)
                 rows.append({
                     "kind": "purchase",
                     "id": pid,
@@ -1553,7 +1481,7 @@ class DrawerService:
                     "amount": _f(pur.total_amount),
                     "created_by": users.get(int(pur.created_by_user_id or 0), ""),
                     "notes": pur.notes or "",
-                    "payment_status": "voided" if pur.status == "voided" else _status(net_total, settled),
+                    "payment_status": pur_bal[pid].status,
                     "product_summary": _product_summary(pur_lines.get(pid, [])),
                 })
 
@@ -1630,57 +1558,8 @@ class DrawerService:
                 extra = len(names) - 1
                 return f"{names[0]} +{extra} more" if extra > 0 else names[0]
 
-            # ---- payment status, batch queries for the whole set ----
-            paid_map: Dict[int, float] = {}
-            alloc_map: Dict[int, float] = {}
-            return_map: Dict[int, float] = {}
-            discount_map: Dict[int, float] = {}
-
-            if doc_ids:
-                pay_direction = "in" if kind == "sale" else "out"
-                paid_rows = (
-                    s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
-                    .filter(Payment.entity_type == kind, Payment.entity_id.in_(doc_ids))
-                    .filter(Payment.direction == pay_direction)
-                    .filter(Payment.method != "advance")
-                    .filter(~Payment.notes.like("%Advance settlement%"))
-                    .filter(Payment.status != "voided")
-                    .group_by(Payment.entity_id).all()
-                )
-                paid_map = {int(eid): _f(amt) for eid, amt in paid_rows}
-
-                alloc_rows = (
-                    s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0.0))
-                    .filter(AdvanceAllocation.entity_type == kind, AdvanceAllocation.entity_id.in_(doc_ids))
-                    .group_by(AdvanceAllocation.entity_id).all()
-                )
-                alloc_map = {int(eid): _f(amt) for eid, amt in alloc_rows}
-
-                if kind == "sale":
-                    for eid, amt in (s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
-                                     .filter(SaleReturn.sale_id.in_(doc_ids))
-                                     .group_by(SaleReturn.sale_id).all()):
-                        return_map[int(eid)] = abs(_f(amt))
-                    for eid, amt in (s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-                                     .filter(SaleDiscount.sale_id.in_(doc_ids))
-                                     .group_by(SaleDiscount.sale_id).all()):
-                        discount_map[int(eid)] = _f(amt)
-                else:
-                    for eid, amt in (s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0.0))
-                                     .filter(PurchaseReturn.purchase_id.in_(doc_ids))
-                                     .group_by(PurchaseReturn.purchase_id).all()):
-                        return_map[int(eid)] = abs(_f(amt))
-
-            adj_map = _purchase_adjustments(s, doc_ids) if kind == "purchase" else {}
-
-            def _status(net_total: float, settled: float) -> str:
-                if net_total <= 0.005:
-                    return "paid"
-                if settled >= net_total - 0.01:
-                    return "paid"
-                if settled > 0.005:
-                    return "partial"
-                return "unpaid"
+            # Paid / balance / status come from the single shared definition.
+            balances = document_balances(s, kind, doc_ids)
 
             rows: List[Dict[str, Any]] = []
             for d in docs:
@@ -1694,8 +1573,6 @@ class DrawerService:
 
                 party_name = parties.get(party_id, d.walkin_name or f"Party#{party_id}")
                 raw_total = _f(d.total_amount)
-                net_total = max(raw_total - return_map.get(did, 0.0) - discount_map.get(did, 0.0) + adj_map.get(did, 0.0), 0.0)
-                settled = paid_map.get(did, 0.0) + alloc_map.get(did, 0.0)
 
                 rows.append({
                     "kind": kind,
@@ -1705,7 +1582,7 @@ class DrawerService:
                     "party_name": party_name,
                     "amount": raw_total,
                     "created_by": users.get(int(d.created_by_user_id or 0), ""),
-                    "payment_status": "voided" if d.status == "voided" else _status(net_total, settled),
+                    "payment_status": balances[did].status,
                     "product_summary": _product_summary(item_lines.get(did, [])),
                 })
 
@@ -1905,58 +1782,9 @@ class DrawerService:
                 extra = len(names) - 1
                 return f"{names[0]} +{extra} more" if extra > 0 else names[0]
 
-            def _paid_and_alloc(entity_type: str, ids: List[int]):
-                if not ids:
-                    return {}, {}
-                paid_rows = (
-                    s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
-                    .filter(Payment.entity_type == entity_type, Payment.entity_id.in_(ids))
-                    # Only the settling direction - a refund (opposite
-                    # direction) must not count as extra money paid.
-                    .filter(Payment.direction == ("in" if entity_type == "sale" else "out"))
-                    .filter(Payment.method != "advance")
-                    .filter(Payment.status != "voided")
-                    .group_by(Payment.entity_id).all()
-                )
-                alloc_rows = (
-                    s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0.0))
-                    .filter(AdvanceAllocation.entity_type == entity_type, AdvanceAllocation.entity_id.in_(ids))
-                    .group_by(AdvanceAllocation.entity_id).all()
-                )
-                return ({int(eid): _f(amt) for eid, amt in paid_rows},
-                       {int(eid): _f(amt) for eid, amt in alloc_rows})
-
-            sale_paid, sale_alloc = _paid_and_alloc("sale", sale_ids)
-            pur_paid, pur_alloc = _paid_and_alloc("purchase", pur_ids)
-            pur_adj = _purchase_adjustments(s, pur_ids)
-
-            sale_returned: Dict[int, float] = {}
-            if sale_ids:
-                for eid, amt in (s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
-                                 .filter(SaleReturn.sale_id.in_(sale_ids))
-                                 .group_by(SaleReturn.sale_id).all()):
-                    sale_returned[int(eid)] = abs(_f(amt))
-            pur_returned: Dict[int, float] = {}
-            if pur_ids:
-                for eid, amt in (s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0.0))
-                                 .filter(PurchaseReturn.purchase_id.in_(pur_ids))
-                                 .group_by(PurchaseReturn.purchase_id).all()):
-                    pur_returned[int(eid)] = abs(_f(amt))
-            sale_discounts: Dict[int, float] = {}
-            if sale_ids:
-                for eid, amt in (s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-                                 .filter(SaleDiscount.sale_id.in_(sale_ids))
-                                 .group_by(SaleDiscount.sale_id).all()):
-                    sale_discounts[int(eid)] = _f(amt)
-
-            def _status(net_total: float, settled: float) -> str:
-                if net_total <= 0.005:
-                    return "paid"
-                if settled >= net_total - 0.01:
-                    return "paid"
-                if settled > 0.005:
-                    return "partial"
-                return "unpaid"
+            # Paid / balance / status come from the single shared definition.
+            sale_bal = document_balances(s, "sale", sale_ids)
+            pur_bal = document_balances(s, "purchase", pur_ids)
 
             parties.prefetch([int(x.buyer_party_id or 0) for x in sales]
                              + [int(x.supplier_party_id or 0) for x in purchases])
@@ -1967,8 +1795,6 @@ class DrawerService:
             for sale in sales:
                 sid = int(sale.id)
                 party_id = int(sale.buyer_party_id or 0)
-                net_total = max(_f(sale.total_amount) - sale_returned.get(sid, 0.0) - sale_discounts.get(sid, 0.0), 0.0)
-                settled = sale_paid.get(sid, 0.0) + sale_alloc.get(sid, 0.0)
                 rows.append({
                     "kind": "sale",
                     "id": sid,
@@ -1978,14 +1804,12 @@ class DrawerService:
                     "amount": _f(sale.total_amount),
                     "created_by": users.get(int(sale.created_by_user_id or 0), ""),
                     "created_by_user_id": int(sale.created_by_user_id or 0),
-                    "payment_status": "voided" if sale.status == "voided" else _status(net_total, settled),
+                    "payment_status": sale_bal[sid].status,
                     "product_summary": _product_summary(sale_lines.get(sid, [])),
                 })
             for pur in purchases:
                 pid = int(pur.id)
                 party_id = int(pur.supplier_party_id or 0)
-                net_total = max(_f(pur.total_amount) - pur_returned.get(pid, 0.0) + pur_adj.get(pid, 0.0), 0.0)
-                settled = pur_paid.get(pid, 0.0) + pur_alloc.get(pid, 0.0)
                 rows.append({
                     "kind": "purchase",
                     "id": pid,
@@ -1995,7 +1819,7 @@ class DrawerService:
                     "amount": _f(pur.total_amount),
                     "created_by": users.get(int(pur.created_by_user_id or 0), ""),
                     "created_by_user_id": int(pur.created_by_user_id or 0),
-                    "payment_status": "voided" if pur.status == "voided" else _status(net_total, settled),
+                    "payment_status": pur_bal[pid].status,
                     "product_summary": _product_summary(pur_lines.get(pid, [])),
                 })
 

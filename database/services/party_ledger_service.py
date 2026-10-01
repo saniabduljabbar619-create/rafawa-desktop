@@ -8,6 +8,7 @@ from datetime import date, datetime as _dt
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.document_balance import document_balances
 from shared.config.constants import WALKIN_PARTY_ID
 
 from database.models.purchase import Purchase
@@ -119,52 +120,14 @@ class PartyLedgerService:
 
     @staticmethod
     def _net_totals_for_sales(s, sale_ids: List[int]) -> Dict[int, float]:
-        if not sale_ids:
-            return {}
-        # A voided sale owes nothing - it stays visible in history but must
-        # drop out of every balance (see SaleService.void_sale).
-        totals = {int(sid): (0.0 if status == "voided" else float(t or 0)) for sid, t, status in
-                   s.query(Sale.id, Sale.total_amount, Sale.status).filter(Sale.id.in_(sale_ids)).all()}
-        returns: Dict[int, float] = {}
-        for sid, amt in (
-            s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0))
-            .filter(SaleReturn.sale_id.in_(sale_ids)).group_by(SaleReturn.sale_id).all()
-        ):
-            returns[int(sid)] = abs(float(amt or 0))
-        discounts: Dict[int, float] = {}
-        for sid, amt in (
-            s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0))
-            .filter(SaleDiscount.sale_id.in_(sale_ids)).group_by(SaleDiscount.sale_id).all()
-        ):
-            discounts[int(sid)] = float(amt or 0)
-        return {
-            sid: max(totals.get(sid, 0.0) - returns.get(sid, 0.0) - discounts.get(sid, 0.0), 0.0)
-            for sid in sale_ids
-        }
+        # A voided sale owes nothing; discounts/returns netted - see document_balance.
+        bals = document_balances(s, "sale", sale_ids)
+        return {int(sid): (bals[int(sid)].net_total if int(sid) in bals else 0.0) for sid in sale_ids}
 
     @staticmethod
     def _net_totals_for_purchases(s, purchase_ids: List[int]) -> Dict[int, float]:
-        if not purchase_ids:
-            return {}
-        # Same as sales: a voided purchase is owed nothing.
-        totals = {int(pid): (0.0 if status == "voided" else float(t or 0)) for pid, t, status in
-                   s.query(Purchase.id, Purchase.total_amount, Purchase.status).filter(Purchase.id.in_(purchase_ids)).all()}
-        returns: Dict[int, float] = {}
-        for pid, amt in (
-            s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
-            .filter(PurchaseReturn.purchase_id.in_(purchase_ids)).group_by(PurchaseReturn.purchase_id).all()
-        ):
-            returns[int(pid)] = abs(float(amt or 0))
-        adjustments: Dict[int, float] = {}
-        for pid, amt in (
-            s.query(PurchasePriceAdjustment.purchase_id, func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-            .filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids)).group_by(PurchasePriceAdjustment.purchase_id).all()
-        ):
-            adjustments[int(pid)] = float(amt or 0)
-        return {
-            pid: max(totals.get(pid, 0.0) - returns.get(pid, 0.0) + adjustments.get(pid, 0.0), 0.0)
-            for pid in purchase_ids
-        }
+        bals = document_balances(s, "purchase", purchase_ids)
+        return {int(pid): (bals[int(pid)].net_total if int(pid) in bals else 0.0) for pid in purchase_ids}
 
     @staticmethod
     def payment_document_balances(party_id: int) -> Dict[int, Dict[str, float]]:
