@@ -24,6 +24,9 @@ def qapp():
     from shared.uix.theme import APP_STYLESHEET
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLESHEET)
+    from shared.uix.table_polish import TablePolisher
+    app._table_polisher = TablePolisher(app)
+    app.installEventFilter(app._table_polisher)
     return app
 
 
@@ -172,3 +175,30 @@ def test_login_screen_shows_lockout_message(qapp, world):
     view.password.setText("right-pass")
     view._attempt_login()                                       # correct, but locked out
     assert "Try again in" in view.auth_error.text()
+
+
+# ---------------------------------------------------------------- developer tool
+@pytest.mark.skipif(not os.getenv("RAFAWA_SCREENSHOT_DIR"), reason="set RAFAWA_SCREENSHOT_DIR to capture screens")
+def test_capture_screenshots(qapp, world):
+    """Render every screen to a PNG (visual review of UI changes):
+    RAFAWA_SCREENSHOT_DIR=/tmp/shots QT_QPA_PLATFORM=offscreen pytest tests/test_gui_smoke.py -k screenshots"""
+    from pathlib import Path
+    out = Path(os.environ["RAFAWA_SCREENSHOT_DIR"])
+    out.mkdir(parents=True, exist_ok=True)
+    from apps.product_management_app.workspaces import build_workspaces
+    from apps.product_management_app.launcher import LauncherView
+    from shared.auth.session import set_session
+    for workspace, spec in build_workspaces().items():
+        for route, factory in spec.routes.items():
+            w = factory()
+            w.resize(1280, 800)
+            w.show()
+            qapp.processEvents()
+            w.grab().save(str(out / f"{workspace}_{route}.png"))
+            w.close()
+    set_session(None)
+    launcher = LauncherView()
+    launcher.resize(1280, 800)
+    launcher.show()
+    qapp.processEvents()
+    launcher.grab().save(str(out / "launcher_login.png"))

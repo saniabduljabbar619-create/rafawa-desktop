@@ -236,6 +236,9 @@ def run():
     # even though this app's own QSS defines visible colors for both.
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLESHEET)
+    from shared.uix.table_polish import TablePolisher
+    app._table_polisher = TablePolisher(app)          # keep a reference alive
+    app.installEventFilter(app._table_polisher)
     win = ProductManagementMainWindow()
     win.setWindowTitle(f"Rafawa Desktop {__version__}")
     win.show()
