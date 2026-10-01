@@ -21,7 +21,7 @@ Business rules belong in `database/services/` so they can be tested without the 
 ```bash
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt -r requirements-dev.txt
-cp .env.template .env                                   # then fill in the database settings
+cp .env.example .env                                    # then fill in the database settings
 ```
 
 Python 3.9 or 3.10 (PySide2 5.15 has no wheels for newer versions).
@@ -45,3 +45,19 @@ CI (`.github/workflows/ci.yml`) runs both on every pull request.
 - Voiding keeps history (`status="voided"`); hard deletes go through `dashboard_service` and leave a `DeletionLog` row.
 - All timestamps are local time (`datetime.now()`), matching the database's `NOW()` defaults.
 - The shared walk-in party id is `shared.config.constants.WALKIN_PARTY_ID`; never hardcode it.
+
+## Security model
+
+- **Roles** live on the logged-in session (`shared/auth/session.py`). Sensitive service
+  operations are guarded in the service layer with `@require_admin`
+  (`shared/auth/permissions.py`): voiding payments/sales/purchases/advances, hard deletes,
+  force-deleting a supplier, and creating/disabling/deleting users. The UI hiding a button is
+  not the control - the service refuses (`PermissionDenied`) even if called directly.
+  Code that legitimately runs without a login (first-run setup, maintenance scripts) uses
+  `with system_context():`.
+- **Passwords** are PBKDF2-HMAC-SHA256 (600k iterations). Older, weaker hashes keep working
+  and are upgraded transparently on the user's next login.
+- **Brute force**: after 5 wrong passwords a username is locked out with a growing delay
+  (30s up to 15 min); the login screen shows the wait.
+- Security events (login ok/failed, permission denials) go to the `rafawa.security` logger.
+- Keep `.env` readable only by the Windows user that runs the app.

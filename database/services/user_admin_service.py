@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy import select
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from database.models.user import User
 from database.models.role import Role
 from shared.utils.password_hash import hash_password
@@ -53,6 +54,7 @@ class UserAdminService:
         return out
 
     @staticmethod
+    @require_admin
     def create_user(*, username: str, password: str, role_name: str) -> int:
         username = (username or "").strip()
         password = (password or "").strip()
@@ -88,6 +90,7 @@ class UserAdminService:
             return int(u.id)
 
     @staticmethod
+    @require_admin
     def set_active(user_id: int, is_active: bool) -> None:
         user_id = int(user_id or 0)
         if user_id <= 0:
@@ -101,6 +104,7 @@ class UserAdminService:
             s.commit()
 
     @staticmethod
+    @require_admin
     def delete_user(user_id: int) -> None:
         """
         A TRUE delete - only allowed when the user has never created any

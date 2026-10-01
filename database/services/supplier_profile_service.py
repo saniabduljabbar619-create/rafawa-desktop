@@ -21,6 +21,7 @@ from datetime import datetime
 from sqlalchemy import select, desc, func
 
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from database.models.purchase import Purchase
 from database.models.payment import Payment
 from database.models.party import Party
@@ -726,6 +727,7 @@ class SupplierProfileService:
             s.commit()
 
     @staticmethod
+    @require_admin
     def force_delete_supplier(party_id: int) -> Dict[str, int]:
         """
         THE DESTRUCTIVE PATH - explicit client request, despite the warning

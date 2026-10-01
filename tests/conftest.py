@@ -36,6 +36,17 @@ CROP_ID, FERT_ID = 1, 2
 
 
 @pytest.fixture(autouse=True)
+def login_as_admin():
+    """Most tests exercise admin-capable code paths; security tests override this."""
+    from shared.auth import throttle
+    from shared.auth.session import UserSession, set_session
+    throttle.reset()
+    set_session(UserSession(user_id=ADMIN_ID, username="admin", role="admin"))
+    yield
+    set_session(None)
+
+
+@pytest.fixture(autouse=True)
 def db():
     """Fresh schema + a minimal world: 3 users, parties, 2 products with stock."""
     Base.metadata.drop_all(engine)

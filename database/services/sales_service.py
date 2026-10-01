@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, case
 
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
@@ -603,6 +604,7 @@ class SaleService:
     # exists against it - mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_sale(sale_id: int, voided_by_user_id: int, reason: str = "") -> Dict:
         """
         Voids a sale transaction that was entered wrong from the start

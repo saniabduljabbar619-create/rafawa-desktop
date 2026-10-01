@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from shared.config.constants import WALKIN_PARTY_ID
 from database.models.payment import Payment
 
@@ -378,6 +379,7 @@ class PaymentService:
     # VOID PAYMENT (mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_payment(payment_id: int, voided_by_user_id: int, reason: str = "") -> None:
         """
         Voids a payment - it stays in the table forever as the audit trail,

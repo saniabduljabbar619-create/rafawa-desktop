@@ -403,7 +403,11 @@ class LauncherView(QWidget):
             self._show_auth_error("Username and password are required.")
             return
 
-        sess = AuthService.authenticate(username=u, password=p)
+        try:
+            sess = AuthService.authenticate(username=u, password=p)
+        except ValueError as e:      # AccountLocked: too many failed attempts
+            self._show_auth_error(str(e))
+            return
         if not sess:
             self._show_auth_error("Invalid username or password.")
             return

@@ -8,6 +8,7 @@ from datetime import date
 from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 from database.session import get_session
+from shared.auth.permissions import require_admin
 
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
 from database.models.product import Product
@@ -844,6 +845,7 @@ def _ids(rows):
     return [int(r[0]) for r in rows]
 
 
+@require_admin
 def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -905,6 +907,7 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
             raise
 
 
+@require_admin
 def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -965,6 +968,7 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
             raise
 
 
+@require_admin
 def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 

@@ -5,6 +5,7 @@ from typing import Dict
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.payment import Payment
@@ -308,6 +309,7 @@ class AdvanceService:
         }
 
     @staticmethod
+    @require_admin
     def void_advance(advance_id: int, created_by_user_id: int, reason: str = "",
                      cascade: bool = False):
         """

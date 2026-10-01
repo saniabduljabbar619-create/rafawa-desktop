@@ -4,8 +4,10 @@ import hmac
 import os
 from typing import Tuple
 
-# PBKDF2 (no external deps). Good enough for internal admin auth.
-_ITER = 120_000
+# PBKDF2-HMAC-SHA256 (no external deps). The iteration count is stored inside
+# every hash, so it can be raised over time: old hashes keep verifying and are
+# upgraded on the user's next successful login (see needs_rehash).
+_ITER = 600_000
 
 def _pbkdf2(password: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _ITER)
@@ -27,3 +29,12 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except Exception:
         return False
+
+
+def needs_rehash(stored: str) -> bool:
+    """True when this hash uses fewer iterations than the current standard."""
+    try:
+        algo, iters_s, _salt, _dk = stored.split("$", 3)
+        return algo != "pbkdf2_sha256" or int(iters_s) < _ITER
+    except Exception:
+        return True

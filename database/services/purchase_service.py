@@ -5,6 +5,7 @@ from typing import Dict, List
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.auth.permissions import require_admin
 from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.purchase import Purchase
@@ -407,6 +408,7 @@ class PurchaseService:
     # payment exists against it - mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_purchase(purchase_id: int, voided_by_user_id: int, reason: str = "") -> Dict:
         """
         Voids a purchase transaction that was entered wrong from the start
