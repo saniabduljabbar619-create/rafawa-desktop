@@ -195,3 +195,18 @@ def test_awaiting_count_and_status_filters():
     assert [t["id"] for t in W.list_tickets(status="submitted")] == [tid]
     assert W.list_tickets(status=["open"]) == []
     assert W.list_tickets(status="submitted")[0]["total_amount"] == 0
+
+
+def test_weigher_can_correct_own_round_while_open_but_not_after_submitting():
+    tid, line = _ticket()
+    rnd = W.record_round(line, 2, 100)
+    W.update_round(rnd["id"], weight_kg=105)
+    assert W.get_ticket(tid)["total_kg"] == 105
+    with pytest.raises(ValueError):
+        W.update_round(rnd["id"], bags=4)                       # still the 3-bag limit
+    W.submit_ticket(tid)
+    with pytest.raises(PermissionDenied):
+        W.update_round(rnd["id"], weight_kg=1)
+    as_role("weigher", WEIGHER_2)
+    with pytest.raises(PermissionDenied):
+        W.update_round(rnd["id"], weight_kg=1)                  # and never another weigher's

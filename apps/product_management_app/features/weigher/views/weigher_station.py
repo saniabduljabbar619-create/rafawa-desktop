@@ -3,26 +3,29 @@
 Weighing Station - the weigher's whole job on one screen, in three steps:
 
     1  Party    register or select the customer / supplier
-    2  Weigh    pick product / area / grade, then record each round (1-3 or a partial bag + kg);
-                totals are automatic
+    2  Weigh    pick product / area / grade, then type each round straight into the
+                rounds table (Bags Round + Weight kg, a new row appears as you go - the same flow as
+                the purchase intake); totals are automatic
     3  Receipt  choose the slip type, submit to the cashier, print and sign
 
 Nothing here shows or asks for a price: that, payment and finalization belong to admin/cashier.
-Every round is saved the moment it is recorded, so a power cut loses nothing.
+Every round is saved the moment its row is complete, so a power cut loses nothing.
 """
 from __future__ import annotations
 
-from PySide2.QtCore import Qt
-from PySide2.QtGui import QDoubleValidator, QFont
+import re
+
+from PySide2.QtCore import QTimer, Qt
+from PySide2.QtGui import QColor, QFont
 from PySide2.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from database.services.weigh_service import MAX_BAGS_PER_ROUND, WeighService
+from database.services.weigh_service import WeighService
 from shared.uix.layout.scrollable import make_scrollable_page
-from shared.uix.widgets.cards import Segmented, avatar, chip, style_table
+from shared.uix.widgets.cards import Segmented, avatar, style_table
 from shared.uix.widgets.product_select import add_select_placeholder
 from apps.product_management_app.features.weigher.dialogs.register_party_dialog import RegisterPartyDialog
 
@@ -38,6 +41,27 @@ def _card() -> QFrame:
 def _fmt_bags(v) -> str:
     v = float(v or 0)
     return f"{int(v)}" if v == int(v) else f"{v:g}"
+
+
+def _bags_text(v) -> str:
+    v = float(v or 0)
+    return f"{_fmt_bags(v)} bag" + ("" if v == 1 else "s")
+
+
+_BAGS_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*(?:bags?|b)?\s*$", re.IGNORECASE)
+
+
+def parse_bags(text: str):
+    """'3', '3bags', '1 bag', '0.5' -> number of bags (None if it is not one)."""
+    m = _BAGS_RE.match(text or "")
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def parse_kg(text: str):
+    try:
+        return float((text or "").replace(",", "").lower().replace("kg", "").strip())
+    except ValueError:
+        return None
 
 
 class WeigherStationView(QWidget):
@@ -301,80 +325,30 @@ class WeigherStationView(QWidget):
         self.lbl_active.setStyleSheet("font-size:14px; font-weight:700; color:#0f766e;")
         ml.addWidget(self.lbl_active)
 
-        cap2 = QLabel("BAGS ON THE SCALE")
-        cap2.setObjectName("SectionLabel")
-        ml.addWidget(cap2)
-        brow = QHBoxLayout()
-        self.bag_group = QButtonGroup(self)
-        self.bag_group.setExclusive(True)
-        self.bag_buttons = {}
-        big = ("QPushButton { background:#ffffff; border:2px solid #d1d5db; border-radius:12px; font-size:18px;"
-               " font-weight:700; padding:14px 8px; color:#374151; } QPushButton:hover { background:#f3f4f6; }"
-               " QPushButton:checked { background:#0f766e; color:#ffffff; border-color:#0f766e; }")
-        for n in range(1, MAX_BAGS_PER_ROUND + 1):
-            b = QPushButton(f"{n} bag" + ("s" if n > 1 else ""))
-            b.setCheckable(True)
-            b.setProperty("role", "plain")
-            b.setStyleSheet(big)
-            b.setCursor(Qt.PointingHandCursor)
-            self.bag_group.addButton(b)
-            self.bag_buttons[n] = b
-            brow.addWidget(b)
-        self.btn_partial = QPushButton("Partial")
-        self.btn_partial.setCheckable(True)
-        self.btn_partial.setProperty("role", "plain")
-        self.btn_partial.setStyleSheet(big)
-        self.bag_group.addButton(self.btn_partial)
-        brow.addWidget(self.btn_partial)
-        ml.addLayout(brow)
-        self.bag_buttons[1].setChecked(True)
+        hint = QLabel("Type each round - bags (3, 3bags or 0.5 for a part-bag) and its weight in kg. "
+                      "Press Enter to move on; a new row appears as you go.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6b7280; font-size:11px;")
+        ml.addWidget(hint)
 
-        prow = QHBoxLayout()
-        self.partial_lbl = QLabel("Part of a bag:")
-        self.partial_spin = QDoubleSpinBox()
-        self.partial_spin.setDecimals(2)
-        self.partial_spin.setRange(0.05, MAX_BAGS_PER_ROUND)
-        self.partial_spin.setSingleStep(0.25)
-        self.partial_spin.setValue(0.5)
-        self.partial_spin.setSuffix(" bag")
-        prow.addWidget(self.partial_lbl)
-        prow.addWidget(self.partial_spin)
-        prow.addStretch(1)
-        ml.addLayout(prow)
-        self.partial_lbl.setVisible(False)
-        self.partial_spin.setVisible(False)
-
-        cap3 = QLabel("WEIGHT")
-        cap3.setObjectName("SectionLabel")
-        ml.addWidget(cap3)
-        wrow = QHBoxLayout()
-        self.weight_in = QLineEdit()
-        self.weight_in.setPlaceholderText("0.00")
-        self.weight_in.setValidator(QDoubleValidator(0.0, 100000.0, 2, self))
-        self.weight_in.setAlignment(Qt.AlignRight)
-        f = QFont()
-        f.setPointSize(22)
-        f.setBold(True)
-        self.weight_in.setFont(f)
-        self.weight_in.setMinimumHeight(56)
-        kg = QLabel("kg")
-        kg.setStyleSheet("font-size:20px; font-weight:700; color:#6b7280;")
-        wrow.addWidget(self.weight_in, 1)
-        wrow.addWidget(kg)
-        ml.addLayout(wrow)
-        self.btn_record = QPushButton("Record Round")
-        self.btn_record.setObjectName("PrimaryButton")
-        self.btn_record.setMinimumHeight(46)
-        ml.addWidget(self.btn_record)
-
-        self.rounds_table = QTableWidget(0, 4)
-        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags", "Weight (kg)", "Time"])
-        self.rounds_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.rounds_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._rounds_busy = False
+        self.rounds_table = QTableWidget(0, 3)
+        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags Round", "Weight (kg)"])
+        self.rounds_table.setEditTriggers(QTableWidget.AllEditTriggers)
+        self.rounds_table.setSelectionBehavior(QTableWidget.SelectItems)
         self.rounds_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.rounds_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        style_table(self.rounds_table, 34)
+        self.rounds_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.rounds_table.setColumnWidth(0, 70)
+        style_table(self.rounds_table, 48)
+        self.rounds_table.setStyleSheet(self.rounds_table.styleSheet() + " QTableWidget { font-size:16px; }")
+        self.rounds_table.setFocusPolicy(Qt.StrongFocus)
         ml.addWidget(self.rounds_table, 1)
+
+        self.lbl_round_totals = QLabel("Total: 0 bags  -  0.00 kg")
+        self.lbl_round_totals.setAlignment(Qt.AlignRight)
+        self.lbl_round_totals.setStyleSheet("font-size:15px; font-weight:700; color:#0f766e; padding:2px 6px;")
+        ml.addWidget(self.lbl_round_totals)
         self.btn_remove_round = QPushButton("Remove Selected Round")
         ml.addWidget(self.btn_remove_round)
         lay.addWidget(mid, 3)
@@ -418,9 +392,7 @@ class WeigherStationView(QWidget):
         self.btn_add_line.clicked.connect(self.add_line)
         self.btn_remove_line.clicked.connect(self.remove_line)
         self.lines_list.currentRowChanged.connect(self._on_line_selected)
-        self.btn_partial.toggled.connect(self._on_partial_toggled)
-        self.btn_record.clicked.connect(self.record_round)
-        self.weight_in.returnPressed.connect(self.record_round)
+        self.rounds_table.itemChanged.connect(self._on_round_cell)
         self.btn_remove_round.clicked.connect(self.remove_round)
         self.btn_finish.clicked.connect(self._to_receipt)
         self.btn_cancel_ticket.clicked.connect(self.cancel_ticket)
@@ -442,18 +414,6 @@ class WeigherStationView(QWidget):
         self.grade_cb.clear()
         self.grade_cb.addItems(ag["grades"])
         self.grade_cb.setCurrentIndex(-1)
-
-    def _on_partial_toggled(self, on: bool):
-        self.partial_lbl.setVisible(on)
-        self.partial_spin.setVisible(on)
-
-    def bags_value(self) -> float:
-        if self.btn_partial.isChecked():
-            return float(self.partial_spin.value())
-        for n, b in self.bag_buttons.items():
-            if b.isChecked():
-                return float(n)
-        return 1.0
 
     # ---- ticket rendering
     def _refresh_ticket(self):
@@ -506,23 +466,89 @@ class WeigherStationView(QWidget):
 
     def _render_rounds(self):
         ln = self._active_line()
-        self.rounds_table.setRowCount(0)
-        if ln is None:
-            self.lbl_active.setText("Add a product to start weighing")
+        self._rounds_busy = True
+        try:
+            self.rounds_table.setRowCount(0)
+            if ln is None:
+                self.lbl_active.setText("Add a product to start weighing")
+                self.lbl_round_totals.setText("Total: 0 bags  -  0.00 kg")
+                return
+            tag = " / ".join(x for x in (ln["area"], ln["grade"] and f"Grade {ln['grade']}") if x)
+            self.lbl_active.setText(f"Weighing: {ln['product_name']}" + (f"  ({tag})" if tag else ""))
+            for r in ln["rounds"]:
+                self._add_round_row(r["round_no"], r["id"], _bags_text(r["bags"]), f"{r['weight_kg']:.2f}")
+            self._add_round_row(len(ln["rounds"]) + 1, None, "", "")      # the next round, ready to type
+            self.lbl_round_totals.setText(f"Total: {_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg")
+        finally:
+            self._rounds_busy = False
+
+    def _add_round_row(self, number: int, round_id, bags_text: str, kg_text: str):
+        t = self.rounds_table
+        row = t.rowCount()
+        t.insertRow(row)
+        num = QTableWidgetItem(str(number))
+        num.setFlags(Qt.ItemIsEnabled)
+        num.setTextAlignment(Qt.AlignCenter)
+        num.setData(Qt.UserRole, round_id)
+        if round_id is None:
+            num.setForeground(QColor("#9ca3af"))
+        t.setItem(row, 0, num)
+        for col, text in ((1, bags_text), (2, kg_text)):
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            t.setItem(row, col, it)
+
+    def _focus_cell(self, row: int, col: int):
+        t = self.rounds_table
+        if 0 <= row < t.rowCount() and t.item(row, col) is not None:
+            t.setCurrentCell(row, col)
+            t.editItem(t.item(row, col))
+
+    def _on_round_cell(self, item):
+        """A cell was typed into: record the round when both bags and kg are there, or correct it."""
+        if self._rounds_busy or item.column() == 0 or not self.active_line_id:
             return
-        tag = " / ".join(x for x in (ln["area"], ln["grade"] and f"Grade {ln['grade']}") if x)
-        self.lbl_active.setText(f"Weighing: {ln['product_name']}" + (f"  ({tag})" if tag else ""))
-        for r in ln["rounds"]:
-            row = self.rounds_table.rowCount()
-            self.rounds_table.insertRow(row)
-            vals = [str(r["round_no"]), _fmt_bags(r["bags"]), f"{r['weight_kg']:,.2f}",
-                    r["created_at"].strftime("%H:%M:%S") if r.get("created_at") else ""]
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(v)
-                it.setTextAlignment(Qt.AlignCenter if c in (0, 1) else Qt.AlignRight | Qt.AlignVCenter)
-                it.setData(Qt.UserRole, int(r["id"]))
-                self.rounds_table.setItem(row, c, it)
-        self.rounds_table.scrollToBottom()
+        t = self.rounds_table
+        row = item.row()
+        rid = t.item(row, 0).data(Qt.UserRole)
+        bags_txt = (t.item(row, 1).text() if t.item(row, 1) else "").strip()
+        kg_txt = (t.item(row, 2).text() if t.item(row, 2) else "").strip()
+
+        if rid is None:                                           # the blank row at the bottom
+            if not bags_txt or not kg_txt:                        # half typed: go to the other cell
+                other = 2 if item.column() == 1 else 1
+                QTimer.singleShot(0, lambda: self._focus_cell(row, other))
+                return
+            bags, kg = parse_bags(bags_txt), parse_kg(kg_txt)
+            problem = ("Type the bags as a number, e.g. 3, 3bags or 0.5." if bags is None else
+                       "Type the weight in kg, e.g. 245.5." if kg is None else "")
+            if not problem:
+                try:
+                    WeighService.record_round(self.active_line_id, bags, kg)
+                except Exception as e:
+                    problem = str(e)
+            if problem:
+                self._msg(problem)
+                col = 1 if bags is None or (kg is not None and "bag" in problem.lower()) else 2
+                QTimer.singleShot(0, lambda: self._focus_cell(row, col))
+                return
+            QTimer.singleShot(0, lambda: self._after_round_saved(new_row=True))
+            return
+
+        # an already-saved round was changed
+        bags, kg = parse_bags(bags_txt), parse_kg(kg_txt)
+        try:
+            if bags is None or kg is None:
+                raise ValueError("Bags and weight must both be numbers.")
+            WeighService.update_round(int(rid), bags=bags, weight_kg=kg)
+        except Exception as e:
+            self._msg(str(e))
+        QTimer.singleShot(0, lambda: self._after_round_saved(new_row=False))
+
+    def _after_round_saved(self, new_row: bool):
+        self._refresh_ticket()
+        if new_row:
+            self._focus_cell(self.rounds_table.rowCount() - 1, 1)
 
     def _on_line_selected(self, row: int):
         it = self.lines_list.item(row) if row >= 0 else None
@@ -543,7 +569,7 @@ class WeigherStationView(QWidget):
             return
         self.product_cb.setCurrentIndex(0)
         self._refresh_ticket()
-        self.weight_in.setFocus()
+        QTimer.singleShot(0, lambda: self._focus_cell(self.rounds_table.rowCount() - 1, 1))
 
     def remove_line(self):
         if not self.active_line_id:
@@ -563,28 +589,11 @@ class WeigherStationView(QWidget):
         self.active_line_id = 0
         self._refresh_ticket()
 
-    def record_round(self):
-        if not self.active_line_id:
-            self._msg("Add a product first, then record its rounds.")
-            return
-        try:
-            kg = float((self.weight_in.text() or "0").replace(",", ""))
-        except ValueError:
-            kg = 0.0
-        try:
-            WeighService.record_round(self.active_line_id, self.bags_value(), kg)
-        except Exception as e:
-            self._msg(str(e))
-            return
-        self.weight_in.clear()
-        self._refresh_ticket()
-        self.weight_in.setFocus()
-
     def remove_round(self):
         row = self.rounds_table.currentRow()
         it = self.rounds_table.item(row, 0) if row >= 0 else None
-        if it is None:
-            self._msg("Select the round to remove first.")
+        if it is None or it.data(Qt.UserRole) is None:
+            self._msg("Select a recorded round to remove first.")
             return
         try:
             WeighService.remove_round(int(it.data(Qt.UserRole)))
@@ -727,7 +736,6 @@ class WeigherStationView(QWidget):
         self.party_search.clear()
         self.party_list.clearSelection()
         self.btn_start.setEnabled(False)
-        self.weight_in.clear()
         self._load_party_list()
         self._load_open_tickets()
         self._load_catalog()

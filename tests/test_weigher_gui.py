@@ -34,6 +34,17 @@ def _station():
     return WeigherStationView()
 
 
+def _type_round(v, bags, kg):
+    """Type one round into the blank row at the bottom of the rounds table (like the purchase intake)."""
+    from PySide2.QtWidgets import QApplication
+    t = v.rounds_table
+    r = t.rowCount() - 1
+    t.item(r, 1).setText(str(bags))
+    t.item(r, 2).setText(str(kg))
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+
 def _pick(v, name):
     for i in range(v.party_list.count()):
         if name in v.party_list.item(i).text():
@@ -60,19 +71,18 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     v.add_line()
     assert v.lines_list.count() == 1
 
-    v.bag_buttons[3].setChecked(True)
-    v.weight_in.setText("245.5"); v.record_round()
-    v.bag_buttons[2].setChecked(True)
-    v.weight_in.setText("160"); v.record_round()
-    v.btn_partial.setChecked(True); v.partial_spin.setValue(0.5)
-    v.weight_in.setText("21.25"); v.record_round()
+    _type_round(v, "3bags", "245.5")
+    _type_round(v, "2", "160")
+    _type_round(v, "0.5", "21.25")                                # a part-bag
     assert v.lbl_total_bags.text() == "5.5" and v.lbl_total_kg.text() == "426.75 kg"
-    assert v.rounds_table.rowCount() == 3 and v.weight_in.text() == ""
+    assert v.rounds_table.rowCount() == 4                          # 3 rounds + the next blank row
+    assert v.lbl_round_totals.text() == "Total: 5.5 bags  -  426.75 kg"
 
-    v.weight_in.setText("0"); v.record_round()                  # zero weight is refused
+    _type_round(v, "1", "0")                                      # zero weight is refused
     assert any("Weight must be more than zero" in m for _k, m in boxes)
+    assert W.get_ticket(v.ticket_id)["total_kg"] == 426.75
 
-    v.rounds_table.selectRow(2)                                  # a slip of the finger: remove round 3
+    v.rounds_table.setCurrentCell(2, 1)                          # a slip of the finger: remove round 3
     v.remove_round()
     assert v.lbl_total_kg.text() == "405.50 kg"
 
@@ -96,12 +106,12 @@ def test_station_resume_and_cancel(qapp, boxes):
     _pick(v, "Supplier One"); v.start_ticket()
     tid = v.ticket_id
     v.product_cb.setCurrentIndex(1); v.add_line()
-    v.weight_in.setText("50"); v.record_round()
+    _type_round(v, "1", "50")
     v.new_weighing()
     assert v.open_list.count() == 1
     v.open_list.setCurrentRow(0)
     v.btn_resume.click()
-    assert v.ticket_id == tid and v.rounds_table.rowCount() == 1 and v.stack.currentIndex() == 1
+    assert v.ticket_id == tid and v.rounds_table.rowCount() == 2 and v.stack.currentIndex() == 1
     v.btn_cancel_ticket.click()
     assert W.get_ticket(tid)["status"] == "cancelled" and v.stack.currentIndex() == 0
 
@@ -112,8 +122,9 @@ def test_finish_needs_a_round_and_oversized_rounds_are_refused(qapp, boxes):
     v.product_cb.setCurrentIndex(1); v.add_line()
     v.btn_finish.click()
     assert v.stack.currentIndex() == 1 and any("at least one round" in m for _k, m in boxes)
-    v.btn_partial.setChecked(True)
-    assert v.partial_spin.maximum() == 3                          # a partial can never reach a 4th bag
+    _type_round(v, "4", "300")                                    # more than 3 bags in one round
+    assert any("at most 3 bags" in m for _k, m in boxes)
+    assert W.get_ticket(v.ticket_id)["total_kg"] == 0
 
 
 def test_register_new_supplier_from_the_station(qapp, boxes):
@@ -255,3 +266,44 @@ def test_main_window_refuses_a_workspace_the_role_may_not_open(qapp, boxes):
     assert win.active_workspace_key == "weigher"                   # unchanged: refused
     win.open_workspace("cashier")
     assert win.active_workspace_key == "cashier"
+
+
+# ---------------------------------------------------------------- the typed rounds table
+def test_parse_bags_and_kg():
+    from apps.product_management_app.features.weigher.views.weigher_station import parse_bags, parse_kg
+    assert [parse_bags(x) for x in ("3", "3bags", "1 bag", " 2 Bags ", "0.5", "0,5")] == [3, 3, 1, 2, 0.5, 0.5]
+    assert parse_bags("abc") is None and parse_bags("") is None and parse_bags("3 sacks") is None
+    assert parse_kg("245.5") == 245.5 and parse_kg("1,250.5kg") == 1250.5 and parse_kg("x") is None
+
+
+def test_a_half_typed_row_records_nothing_until_both_cells_are_filled(qapp, boxes):
+    from PySide2.QtWidgets import QApplication
+    v = _station()
+    _pick(v, "Supplier One"); v.start_ticket()
+    v.product_cb.setCurrentIndex(1); v.add_line()
+    t = v.rounds_table
+    t.item(0, 1).setText("3")
+    QApplication.processEvents()
+    assert W.get_ticket(v.ticket_id)["total_kg"] == 0 and t.rowCount() == 1
+    t.item(0, 2).setText("245.5")
+    QApplication.processEvents(); QApplication.processEvents()
+    assert W.get_ticket(v.ticket_id)["total_kg"] == 245.5 and t.rowCount() == 2
+    t.item(1, 1).setText("two"); t.item(1, 2).setText("10")      # not a number of bags
+    QApplication.processEvents()
+    assert any("number" in m for _k, m in boxes) and W.get_ticket(v.ticket_id)["total_kg"] == 245.5
+
+
+def test_a_recorded_round_can_be_corrected_in_the_table(qapp, boxes):
+    from PySide2.QtWidgets import QApplication
+    v = _station()
+    _pick(v, "Supplier One"); v.start_ticket()
+    v.product_cb.setCurrentIndex(1); v.add_line()
+    _type_round(v, "3", "245")
+    v.rounds_table.item(0, 2).setText("250")                      # misread the scale
+    QApplication.processEvents(); QApplication.processEvents()
+    t = W.get_ticket(v.ticket_id)
+    assert t["total_kg"] == 250 and v.lbl_total_kg.text() == "250.00 kg"
+    v.rounds_table.item(0, 1).setText("4")                        # too many bags: refused, value restored
+    QApplication.processEvents(); QApplication.processEvents()
+    assert W.get_ticket(v.ticket_id)["total_bags"] == 3
+    assert v.rounds_table.item(0, 1).text() == "3 bags"

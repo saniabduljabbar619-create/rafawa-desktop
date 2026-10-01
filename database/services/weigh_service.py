@@ -285,9 +285,9 @@ class WeighService:
             s.commit()
 
     @staticmethod
-    @require_role(*INTAKE_ROLES)
+    @require_role(*ANY_STAFF)
     def update_round(round_id: int, bags: Optional[float] = None, weight_kg: Optional[float] = None) -> None:
-        """Admin/cashier correction while verifying a ticket."""
+        """Correct a round: the weigher on their own still-open ticket, admin/cashier while verifying."""
         with get_session() as s:
             r = s.get(WeighRound, int(round_id))
             if r is None:
