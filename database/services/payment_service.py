@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 from shared.config.constants import WALKIN_PARTY_ID
 from database.models.payment import Payment
@@ -429,6 +430,12 @@ class PaymentService:
             payment.voided_at = datetime.now()
             payment.voided_by_user_id = voided_by_user_id
             payment.void_reason = (reason or "").strip()[:255] or None
+            AuditService.record(
+                "payment.void", "payment", payment_id,
+                f"Voided {payment.entity_type} #{payment.entity_id} payment of {float(payment.amount or 0):,.2f}",
+                {"reason": reason, "amount": float(payment.amount or 0), "direction": payment.direction,
+                 "entity_type": payment.entity_type, "entity_id": payment.entity_id,
+                 "method": payment.method}, session=s)
 
             if settlement:
                 s.delete(settlement)

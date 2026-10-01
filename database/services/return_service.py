@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, cast
 from sqlalchemy import func
 from database.session import get_session
+from database.services.audit_service import AuditService
 
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -162,7 +163,7 @@ class ReturnService:
                     raise ValueError("Return kg exceed remaining quantity.")
 
                 rate = float(item.unit_cost_rate or 0.0)
-                amount = -(rate * (qty_bags if is_fert else qty_kg))
+                amount = -round(rate * (qty_bags if is_fert else qty_kg), 2)
 
                 r = PurchaseReturn(
                     purchase_id=purchase.id,
@@ -276,7 +277,7 @@ class ReturnService:
             # and/or a header discount not attributed to any line. Refunding
             # at the undiscounted rate handed back more than was ever paid.
             rate = ReturnService._net_sale_rate(s, sale, item)
-            amount = -(rate * (qty_bags if is_fert else qty_kg))
+            amount = -round(rate * (qty_bags if is_fert else qty_kg), 2)
 
             r = SaleReturn(
                 sale_id=sale.id,
@@ -390,6 +391,8 @@ class ReturnService:
                 created_by_user_id=created_by_user_id
             )
             s.add(pay)
+            AuditService.record("return.reclaim", "purchase_return", int(r.id),
+                                f"Cash reclaimed {reclaim:,.2f} for purchase return", {"amount": reclaim}, session=s)
             s.commit()
 
     @staticmethod
@@ -436,4 +439,6 @@ class ReturnService:
                 created_by_user_id=created_by_user_id
             )
             s.add(pay)
+            AuditService.record("return.refund", "sale_return", int(r.id),
+                                f"Cash refunded {refund:,.2f} for sale return", {"amount": refund}, session=s)
             s.commit()

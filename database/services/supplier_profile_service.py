@@ -21,6 +21,7 @@ from datetime import datetime
 from sqlalchemy import select, desc, func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 from database.models.purchase import Purchase
 from database.models.payment import Payment
@@ -920,6 +921,10 @@ class SupplierProfileService:
             ).delete(synchronize_session=False)
 
             # ---- Finally, the party itself ----
+            AuditService.record(
+                "supplier.force_delete", "party", party_id,
+                f"FORCE DELETE of party {p.display_name!r} and all its records", {"removed": removed},
+                session=s)
             s.delete(p)
             s.commit()
 

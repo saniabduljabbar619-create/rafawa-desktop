@@ -8,6 +8,7 @@ from datetime import date
 from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 from database.session import get_session
+from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
@@ -892,6 +893,9 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
                 PurchasePriceAdjustment.purchase_id == purchase_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "purchase.delete", "purchase", purchase_id,
+                f"HARD DELETE of purchase #{purchase_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="purchase",
                 entity_id=purchase_id,
@@ -953,6 +957,9 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
                 SaleDiscount.sale_id == sale_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "sale.delete", "sale", sale_id,
+                f"HARD DELETE of sale #{sale_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="sale",
                 entity_id=sale_id,
@@ -1002,6 +1009,9 @@ def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None 
                 AdvanceAllocation.advance_id == advance_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "advance.delete", "advance", advance_id,
+                f"HARD DELETE of advance #{advance_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="advance",
                 entity_id=advance_id,

@@ -5,6 +5,7 @@ from typing import Dict
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
@@ -392,5 +393,10 @@ class AdvanceService:
             adv.status = "voided"
             if reason:
                 adv.notes = (adv.notes or "") + f" | [Voided: {reason}]"
+            AuditService.record(
+                "advance.void", "advance", advance_id,
+                f"Voided {adv.direction} advance of {float(adv.amount or 0):,.2f}",
+                {"reason": reason, "cascade": bool(cascade), "amount": float(adv.amount or 0),
+                 "settled": settled, "party_id": adv.party_id}, session=s)
             s.commit()
             return adv.id

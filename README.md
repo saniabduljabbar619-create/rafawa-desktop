@@ -61,3 +61,20 @@ CI (`.github/workflows/ci.yml`) runs both on every pull request.
   (30s up to 15 min); the login screen shows the wait.
 - Security events (login ok/failed, permission denials) go to the `rafawa.security` logger.
 - Keep `.env` readable only by the Windows user that runs the app.
+
+## Database migrations (Alembic)
+
+Schema changes go through Alembic (`migrations/`), never by hand-editing production.
+
+```bash
+alembic upgrade head                        # bring a database up to date (safe to re-run)
+alembic revision -m "describe the change"   # new migration; edit it, then upgrade
+alembic current                             # which revision a database is on
+```
+
+- A **brand-new** database gets the whole schema from revision `0001`.
+- An **existing** installation (tables already created by `init_db.py`) is adopted
+  automatically: `0001` is a no-op there, later revisions apply normally.
+- **Take a database backup before running migrations in production.**
+- Revision `0002` adds `audit_logs` (who voided/deleted/settled what); `0003` converts the
+  return tables from FLOAT to exact DECIMAL columns.

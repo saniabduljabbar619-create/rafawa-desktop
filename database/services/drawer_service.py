@@ -26,6 +26,7 @@ from sqlalchemy import select, func, or_, and_, false, String
 from sqlalchemy.exc import IntegrityError
 
 from database.session import get_session
+from database.services.audit_service import AuditService
 from database.models.payment import Payment
 from database.models.advance import Advance
 from database.models.sale import Sale
@@ -1279,6 +1280,11 @@ class DrawerService:
             row.settled_at = datetime.now()
             if note:
                 row.note = str(note)[:255]
+            AuditService.record(
+                "drawer.settle", "cashier_settlement", int(settlement_id),
+                f"Settled {float(row.amount or 0):,.2f} (user {row.debtor_user_id} -> {row.creditor_user_id})",
+                {"debtor": row.debtor_user_id, "creditor": row.creditor_user_id,
+                 "amount": float(row.amount or 0), "note": note}, session=s)
             return {"ok": True, "already": False, "settled": 1}
 
     @staticmethod
@@ -1315,6 +1321,11 @@ class DrawerService:
                 if note:
                     r.note = str(note)[:255]
                 n += 1
+            if n:
+                AuditService.record(
+                    "drawer.settle_with", "user", b,
+                    f"Settled {n} line(s) between users {a} and {b}",
+                    {"user_a": a, "user_b": b, "lines": n, "note": note}, session=s)
             return {"ok": True, "settled": n}
 
     # ======================================================================

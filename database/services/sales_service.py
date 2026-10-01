@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, case
 
 from database.session import get_session
+from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
 from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
@@ -692,6 +693,12 @@ class SaleService:
             sale.status = "voided"
             if reason:
                 sale.notes = ((sale.notes or "") + f" | [Voided: {reason}]").strip()
+            AuditService.record(
+                "sale.void", "sale", sale_id,
+                f"Voided sale of {float(sale.total_amount or 0):,.2f}",
+                {"reason": reason, "total": float(sale.total_amount or 0),
+                 "buyer_party_id": sale.buyer_party_id, "stock_movements_reversed": reversed_movements},
+                session=s)
 
         return {"ok": True, "sale_id": sale_id, "stock_movements_reversed": reversed_movements}
 

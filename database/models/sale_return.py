@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, Float, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, Numeric, String, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
 from database.base import Base
@@ -22,12 +22,12 @@ class SaleReturn(Base):
     # Snapshots: MUST match sale_item snapshot at time of sale
     product_type_snapshot = Column(String(32), nullable=False)   # "crops" | "fertilizers"
     unit = Column(String(16), nullable=True)                     # e.g. "kg"
-    unit_price_snapshot = Column(Float, nullable=False, default=0.0)
+    unit_price_snapshot = Column(Numeric(12, 4), nullable=False, default=0)
 
-    qty_kg = Column(Float, nullable=False, default=0.0)
+    qty_kg = Column(Numeric(10, 2), nullable=False, default=0)
     qty_bags = Column(Integer, nullable=False, default=0)
 
-    amount = Column(Float, nullable=False, default=0.0)          # NEGATIVE number
+    amount = Column(Numeric(14, 2), nullable=False, default=0)          # NEGATIVE number
 
     reason = Column(String(255), nullable=True)
 
