@@ -239,12 +239,28 @@ class AdvanceService:
                 .limit(limit)
                 .all()
             )
+            # how much of each advance has been used up (applied to a purchase/sale, or settled by payment)
+            ids = [int(r.id) for r in rows]
+            applied: Dict[int, float] = {}
+            if ids:
+                for aid, tot in (s.query(AdvanceAllocation.advance_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                                 .filter(AdvanceAllocation.advance_id.in_(ids))
+                                 .group_by(AdvanceAllocation.advance_id)):
+                    applied[int(aid)] = applied.get(int(aid), 0.0) + float(tot or 0)
+                for aid, tot in (s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
+                                 .filter(Payment.entity_type == "advance", Payment.entity_id.in_(ids),
+                                         Payment.status != "voided")
+                                 .group_by(Payment.entity_id)):
+                    applied[int(aid)] = applied.get(int(aid), 0.0) + float(tot or 0)
             for r in rows:
                 operator = ""
                 if r.created_by_user_id:
                     u = s.query(User).get(r.created_by_user_id)
                     operator = u.username if u else ""
+                used = applied.get(int(r.id), 0.0)
                 out.append({
+                    "applied": used,
+                    "remaining": max(float(r.amount or 0) - used, 0.0),
                     "id": r.id,
                     "created_at": r.created_at,
                     "direction": r.direction,

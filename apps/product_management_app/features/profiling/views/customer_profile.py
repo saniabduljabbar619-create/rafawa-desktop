@@ -439,9 +439,9 @@ class CustomerProfileView(QWidget):
         return t
 
     def _make_advances_table(self) -> QTableWidget:
-        t = QTableWidget(0, 8)
+        t = QTableWidget(0, 9)
         t.setHorizontalHeaderLabels([
-            "Date", "Direction", "Type", "Amount", "Quantity", "Status", "Operator", "Notes"
+            "Date", "Direction", "Type", "Amount", "Applied", "Remaining", "Status", "Operator", "Notes"
         ])
         t.setSelectionBehavior(QTableWidget.SelectRows)
         t.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -854,13 +854,16 @@ class CustomerProfileView(QWidget):
             direction = a.get("direction", "")
             qty = self._format_qty(a.get("qty_bags"), a.get("total_weight_kg")) \
                 if atype in ("crops", "fertilizer") else ""
+            applied_val = float(a.get("applied") or 0)
+            remaining_val = float(a.get("remaining") or 0)
 
             cols = [
                 str(a.get("created_at") or "")[:19],
                 direction,
-                atype,
+                f"{atype} ({qty})" if qty else atype,
                 f"{amount_val:,.2f}",
-                qty,
+                f"{applied_val:,.2f}" if applied_val > 0.005 else "-",
+                f"{remaining_val:,.2f}" if remaining_val > 0.005 else "Used up",
                 a.get("status", ""),
                 a.get("operator", ""),
                 a.get("notes", "") or "",
@@ -871,8 +874,9 @@ class CustomerProfileView(QWidget):
 
             for c, val in enumerate(cols):
                 it = QTableWidgetItem(str(val))
-                if c == 3:
+                if c in (3, 4, 5):
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if c == 3:
                     f = QFont()
                     f.setBold(True)
                     it.setFont(f)
@@ -934,7 +938,7 @@ class CustomerProfileView(QWidget):
         if adv_id <= 0:
             return
 
-        status_item = self.advances_table.item(row, 5)
+        status_item = self.advances_table.item(row, 6)
         if status_item and status_item.text().strip().lower() == "voided":
             QMessageBox.information(self, "Void Advance", "This advance is already voided.")
             return

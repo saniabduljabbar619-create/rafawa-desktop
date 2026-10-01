@@ -120,113 +120,64 @@ class PaymentCenter:
 
     @staticmethod
     def handle_supplier_advance_settlement(party_id: int, created_by_user_id: int, skip_purchase_id: int = 0):
+        """
+        Apply the party's open "given" advances to what they still owe on purchases, oldest first.
 
+        What is still owed comes from the ONE shared definition (document_balances): returns,
+        price adjustments and earlier cash/advance settlements are all accounted for exactly once,
+        and voided purchases are skipped. (This used to subtract each earlier advance settlement
+        twice - once as its allocation and once as its "advance" payment row - so a second advance
+        was only partly applied and the rest stayed behind as Advance OUT.)
+        """
         from database.models.purchase import Purchase
-        from database.models.payment import Payment
-        from database.models.advance_allocations import AdvanceAllocation
+        from database.services.document_balance import document_balances
         from database.session import get_session
-        from sqlalchemy import func
 
         with get_session() as s:
-
-            purchases = (
-                s.query(Purchase)
+            rows = (
+                s.query(Purchase.id)
                 .filter(Purchase.supplier_party_id == party_id)
+                .order_by(Purchase.completed_at.asc(), Purchase.id.asc())
                 .all()
             )
+            ids = [int(r[0]) for r in rows if not (skip_purchase_id and int(r[0]) == skip_purchase_id)]
+            balances = document_balances(s, "purchase", ids)
 
-            for purchase in purchases:
-
-                # Don't re-apply the freed advance to a purchase being returned.
-                if skip_purchase_id and purchase.id == skip_purchase_id:
-                    continue
-
-                paid = (
-                    s.query(func.coalesce(func.sum(Payment.amount), 0))
-                    .filter(Payment.entity_type == "purchase")
-                    .filter(Payment.entity_id == purchase.id)
-                    .filter(Payment.status != "voided")
-                    .scalar()
-                ) or 0.0
-
-                allocated = (
-                    s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                    .filter(AdvanceAllocation.entity_type == "purchase")
-                    .filter(AdvanceAllocation.entity_id == purchase.id)
-                    .scalar()
-                ) or 0.0
-
-                from database.models.purchase_price_adjustment import PurchasePriceAdjustment
-                adjustment_total = (
-                    s.query(func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-                    .filter(PurchasePriceAdjustment.purchase_id == purchase.id)
-                    .scalar()
-                ) or 0.0
-
-                # A price adjustment is a real, additional amount now
-                # genuinely owed - without this, a purchase already fully
-                # paid before an adjustment would be silently skipped
-                # below (balance <= 0), even though it genuinely owes
-                # again and an available advance should be tried against it.
-                balance = float(purchase.total_amount or 0) + float(adjustment_total or 0) - float(paid or 0) - float(allocated or 0)
-
-                if balance <= 0:
-                    continue
-
-                PaymentCenter.handle_purchase_creation(
-                    party_id=party_id,
-                    purchase_id=purchase.id,
-                    purchase_total=balance,
-                    created_by_user_id=created_by_user_id
-                )
+        for pid in ids:
+            b = balances.get(pid)
+            if b is None or b.balance <= 0.005:
+                continue
+            PaymentCenter.handle_purchase_creation(
+                party_id=party_id,
+                purchase_id=pid,
+                purchase_total=b.balance,
+                created_by_user_id=created_by_user_id
+            )
 
     @staticmethod
     def handle_customer_advance_settlement(party_id: int, created_by_user_id: int, skip_sale_id: int = 0):
-
+        """Same as handle_supplier_advance_settlement, for a customer's deposits against their sales."""
         from database.models.sale import Sale
-        from database.models.payment import Payment
-        from database.models.advance_allocations import AdvanceAllocation
+        from database.services.document_balance import document_balances
         from database.session import get_session
-        from sqlalchemy import func
 
         with get_session() as s:
-
-            sales = (
-                s.query(Sale)
+            rows = (
+                s.query(Sale.id)
                 .filter(Sale.buyer_party_id == party_id)
+                .order_by(Sale.completed_at.asc(), Sale.id.asc())
                 .all()
             )
+            ids = [int(r[0]) for r in rows if not (skip_sale_id and int(r[0]) == skip_sale_id)]
+            balances = document_balances(s, "sale", ids)
 
-            for sale in sales:
-
-                # Don't re-apply the freed advance to a sale that's being
-                # returned - the release should leave the advance free.
-                if skip_sale_id and sale.id == skip_sale_id:
-                    continue
-
-                paid = (
-                    s.query(func.coalesce(func.sum(Payment.amount), 0))
-                    .filter(Payment.entity_type == "sale")
-                    .filter(Payment.entity_id == sale.id)
-                    .filter(Payment.status != "voided")
-                    .scalar()
-                ) or 0.0
-
-                allocated = (
-                    s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                    .filter(AdvanceAllocation.entity_type == "sale")
-                    .filter(AdvanceAllocation.entity_id == sale.id)
-                    .scalar()
-                ) or 0.0
-
-                balance = float(sale.total_amount or 0) - float(paid or 0) - float(allocated or 0)
-                if balance <= 0:
-                    continue
-
-
-                PaymentCenter.handle_sale_creation(
-                    party_id=party_id,
-                    sale_id=sale.id,
-                    sale_total=balance,
-                    created_by_user_id=created_by_user_id
-                )
+        for sid in ids:
+            b = balances.get(sid)
+            if b is None or b.balance <= 0.005:
+                continue
+            PaymentCenter.handle_sale_creation(
+                party_id=party_id,
+                sale_id=sid,
+                sale_total=b.balance,
+                created_by_user_id=created_by_user_id
+            )
