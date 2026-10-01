@@ -120,8 +120,10 @@ class PartyLedgerService:
     def _net_totals_for_sales(s, sale_ids: List[int]) -> Dict[int, float]:
         if not sale_ids:
             return {}
-        totals = {int(sid): float(t or 0) for sid, t in
-                   s.query(Sale.id, Sale.total_amount).filter(Sale.id.in_(sale_ids)).all()}
+        # A voided sale owes nothing - it stays visible in history but must
+        # drop out of every balance (see SaleService.void_sale).
+        totals = {int(sid): (0.0 if status == "voided" else float(t or 0)) for sid, t, status in
+                   s.query(Sale.id, Sale.total_amount, Sale.status).filter(Sale.id.in_(sale_ids)).all()}
         returns: Dict[int, float] = {}
         for sid, amt in (
             s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0))
@@ -143,8 +145,9 @@ class PartyLedgerService:
     def _net_totals_for_purchases(s, purchase_ids: List[int]) -> Dict[int, float]:
         if not purchase_ids:
             return {}
-        totals = {int(pid): float(t or 0) for pid, t in
-                   s.query(Purchase.id, Purchase.total_amount).filter(Purchase.id.in_(purchase_ids)).all()}
+        # Same as sales: a voided purchase is owed nothing.
+        totals = {int(pid): (0.0 if status == "voided" else float(t or 0)) for pid, t, status in
+                   s.query(Purchase.id, Purchase.total_amount, Purchase.status).filter(Purchase.id.in_(purchase_ids)).all()}
         returns: Dict[int, float] = {}
         for pid, amt in (
             s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
@@ -313,7 +316,8 @@ class PartyLedgerService:
             pur_creation_dt: Dict[int, object] = {}
             for p in purchases:
                 pid = int(p.id)
-                raw_total = float(p.total_amount or 0)
+                is_void = (p.status == "voided")
+                raw_total = 0.0 if is_void else float(p.total_amount or 0)
                 returned = pur_returns.get(pid, 0.0)
                 adjustment_total = pur_adjustments.get(pid, 0.0)
                 net_total = max(raw_total - returned + adjustment_total, 0.0)
@@ -335,7 +339,7 @@ class PartyLedgerService:
                     "total": net_total,
                     "paid": min(settled, net_total),
                     "balance": balance,
-                    "status": _doc_payment_status(net_total, settled, balance),
+                    "status": "voided" if is_void else _doc_payment_status(net_total, settled, balance),
                     "items": pur_items_detail.get(pid, ""),
                 })
 
@@ -416,7 +420,8 @@ class PartyLedgerService:
             sale_creation_dt: Dict[int, object] = {}
             for s1 in sales:
                 sid = int(s1.id)
-                raw_total = float(s1.total_amount or 0)
+                is_void = (s1.status == "voided")
+                raw_total = 0.0 if is_void else float(s1.total_amount or 0)
                 returned = sale_returns.get(sid, 0.0)
                 discount = sale_discounts.get(sid, 0.0)
                 net_total = max(raw_total - returned - discount, 0.0)
@@ -438,7 +443,7 @@ class PartyLedgerService:
                     "total": net_total,
                     "paid": min(settled, net_total),
                     "balance": balance,
-                    "status": _doc_payment_status(net_total, settled, balance),
+                    "status": "voided" if is_void else _doc_payment_status(net_total, settled, balance),
                     "items": sale_items_detail.get(sid, ""),
                 })
 
@@ -628,7 +633,7 @@ class PartyLedgerService:
                     "balance_before": None, "balance_after": None, "status": "payables",
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -792,7 +797,7 @@ class PartyLedgerService:
                     "status": "posted"
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
 
@@ -936,7 +941,7 @@ class PartyLedgerService:
                     "status": "posted"
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -1074,7 +1079,7 @@ class PartyLedgerService:
                     "status": status
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -1234,9 +1239,9 @@ class PartyLedgerService:
 
                 SELECT
                     pr.created_at AS dt,
-                    'crops' AS ledger,
+                    pr.product_type_snapshot AS ledger,
                     'purchase_return' AS type,
-                    CONCAT('PUR-RET-', pr.id) AS reference,
+                    CONCAT('PRET-', pr.id) AS reference,
                     pr.qty_bags AS bags,
                     pr.qty_kg AS kg,
                     pr.amount,
@@ -1251,9 +1256,9 @@ class PartyLedgerService:
 
                 SELECT
                     sr.created_at,
-                    'crops',
+                    sr.product_type_snapshot,
                     'sale_return',
-                    CONCAT('SAL-RET-', sr.id),
+                    CONCAT('SRET-', sr.id),
                     sr.qty_bags,
                     sr.qty_kg,
                     sr.amount,

@@ -1180,7 +1180,7 @@ class CustomerProfileView(QWidget):
         prefix, num = ref.split("-", 1)
         try:
             entity_id = int(num)
-        except:
+        except ValueError:
             return None, 0
 
         mapping = {
