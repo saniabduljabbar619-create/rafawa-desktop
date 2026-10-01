@@ -91,3 +91,17 @@ alembic current                             # which revision a database is on
 | Restore | `gunzip -c backup.sql.gz \| mysql -u USER -p DBNAME` (stop all clients first) |
 
 Set `RAFAWA_DATA_DIR` to relocate the data folder (portable installs).
+
+## Building and releasing
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1      # tests -> RafawaApp.exe -> installer
+```
+
+The version lives in `shared/version.py` (shown in the window title, logs and installer).
+Pushing a tag such as `v3.5.0` runs `.github/workflows/release.yml`, which builds the exe and
+installer on a Windows runner and attaches them as a build artifact.
+
+**Update notifications:** publish a small `latest.json` (`{"version": "3.6.0", "url": "...", "notes": "..."}`)
+somewhere clients can read (web, or a shared folder) and set `UPDATE_MANIFEST_URL` in `.env`.
+Clients tell the user when a newer version exists; they never download or run anything automatically.

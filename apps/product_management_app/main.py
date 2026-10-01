@@ -197,6 +197,20 @@ def _warn_if_schema_outdated(parent):
         logging.getLogger("rafawa").exception("Schema check failed")
 
 
+def _notify_if_update_available(parent):
+    try:
+        from shared.updater import check_for_update
+        info = check_for_update()
+        if info:
+            from PySide2.QtWidgets import QMessageBox
+            QMessageBox.information(
+                parent, "Update available",
+                f"Version {info.version} is available.\n\n{info.notes}\n\nDownload: {info.url}")
+    except Exception:
+        import logging
+        logging.getLogger("rafawa").exception("Update check failed")
+
+
 def run():
     from shared.logging_setup import setup_logging
     from shared.crash import install_excepthooks
@@ -226,6 +240,7 @@ def run():
     win.setWindowTitle(f"Rafawa Desktop {__version__}")
     win.show()
     _warn_if_schema_outdated(win)
+    _notify_if_update_available(win)
     _auto_backup_in_background()
     sys.exit(app.exec_())
 

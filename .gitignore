@@ -27,3 +27,9 @@ dist_installer/
 *.spec
 # Runtime logs
 *.log
+
+# Build output
+build/
+dist/
+*.spec.bak
+RafawaAppSetup.exe

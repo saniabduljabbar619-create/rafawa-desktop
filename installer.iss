@@ -1,6 +1,12 @@
+; Pass the version on the command line (build.ps1 does this from shared/version.py):
+;   ISCC.exe /DAppVersion=3.5.0 installer.iss
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
+
 [Setup]
 AppName=RafawaApp
-AppVersion=3.4.7
+AppVersion={#AppVersion}
 DefaultDirName={autopf}\RafawaDesktop
 DefaultGroupName=Rafawa Desktop
 ; {#SourcePath} is Inno Setup's PREPROCESSOR constant (compile-time,
