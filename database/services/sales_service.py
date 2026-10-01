@@ -516,21 +516,38 @@ class SaleService:
 
                 need_kg[pid] = need_kg.get(pid, 0) + tw
 
+        stock_kg, stock_bags = SaleService._stock_expr()
+
         for pid, req_bags in need_bags.items():
 
-            avail = session.query(
-                func.coalesce(func.sum(
-                    case(
-                        (StockMovement.movement_type.in_(STOCK_IN_TYPES), StockMovement.qty_bags),
-                        (StockMovement.movement_type.in_(STOCK_OUT_TYPES), -StockMovement.qty_bags),
-                        else_=0
-                    )
-                ), 0)
-            ).filter(StockMovement.product_id == pid).scalar()
+            avail_kg, avail_bags = (
+                session.query(stock_kg, stock_bags)
+                .select_from(StockMovement)
+                .filter(StockMovement.product_id == pid)
+                .one()
+            )
+            avail_kg = float(avail_kg or 0)
+            avail_bags = float(avail_bags or 0)
 
-            if avail < req_bags:
-                raise ValueError("Insufficient stock")
-    
+            if avail_bags < req_bags:
+                name = session.query(Product.name).filter(Product.id == pid).scalar() or f"Product#{pid}"
+                raise ValueError(
+                    f"Insufficient stock for {name}: need {req_bags} bag(s), "
+                    f"only {avail_bags:,.0f} on hand."
+                )
+
+            # Crops are dual-tracked: the weight sold must also be covered by
+            # the kg actually on hand. (need_kg was computed above but never
+            # checked, so a sale could take more kg than the shop held as
+            # long as enough bags were left.) Small tolerance for float noise.
+            req_kg = need_kg.get(pid, 0.0)
+            if req_kg > 0 and avail_kg + 1e-6 < req_kg:
+                name = session.query(Product.name).filter(Product.id == pid).scalar() or f"Product#{pid}"
+                raise ValueError(
+                    f"Insufficient stock for {name}: need {req_kg:,.2f} kg, "
+                    f"only {avail_kg:,.2f} kg on hand."
+                )
+
     @staticmethod
     def _stock_expr():
 
