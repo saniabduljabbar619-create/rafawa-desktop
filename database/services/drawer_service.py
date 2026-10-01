@@ -93,13 +93,59 @@ def _purchase_adjustments(s, ids) -> Dict[int, float]:
     }
 
 
+class _LazyMap(dict):
+    """
+    A dict that fills itself from the database on demand, in batches.
+
+    compute() used to load EVERY sale, purchase, advance and party into
+    memory on each call just to look up a handful of ids. This loads only the
+    ids actually touched: prefetch() fetches a whole batch in a few IN()
+    queries, and .get() falls back to a single lookup for anything that was
+    not prefetched (misses are remembered so they are never re-queried).
+    """
+    _CHUNK = 500
+
+    def __init__(self, loader):
+        super().__init__()
+        self._loader = loader
+        self._missing = set()
+
+    def prefetch(self, ids) -> None:
+        need = sorted({int(i) for i in ids if i is not None} - self.keys() - self._missing)
+        for i in range(0, len(need), self._CHUNK):
+            chunk = need[i:i + self._CHUNK]
+            got = self._loader(chunk)
+            self.update(got)
+            self._missing |= set(chunk) - set(got)
+
+    def get(self, key, default=None):
+        try:
+            k = int(key)
+        except (TypeError, ValueError):
+            return default
+        if k not in self and k not in self._missing:
+            self.prefetch([k])
+        return super().get(k, default)
+
+
+class _FieldView:
+    """Read-only view onto one element of the tuples in a _LazyMap."""
+
+    def __init__(self, source: "_LazyMap", index: int):
+        self._source, self._index = source, index
+
+    def get(self, key, default=None):
+        row = self._source.get(key)
+        return row[self._index] if row is not None else default
+
+
 class DrawerService:
 
     # ------------------------------------------------------------------
     # Phase 2: persistent ledger sync (idempotent on source_payment_id)
     # ------------------------------------------------------------------
     @staticmethod
-    def _sync_ledger(s, resolve) -> None:
+    def _sync_ledger(s, resolve, prefetch=None) -> None:
         """
         Mirror every cross-cashier obligation into cashier_settlements.
 
@@ -139,6 +185,8 @@ class DrawerService:
         new_rows = s.execute(stmt).scalars().all()
         if not new_rows:
             return
+        if prefetch is not None:
+            prefetch(new_rows)
 
         added = 0
         for p in new_rows:
@@ -216,38 +264,65 @@ class DrawerService:
         with get_session() as s:
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
-            parties = {int(p.id): (p.display_name or f"Party#{p.id}")
-                       for p in s.query(Party).all()}
+            parties = _LazyMap(lambda ids: {
+                int(p.id): (p.display_name or f"Party#{p.id}")
+                for p in s.query(Party.id, Party.display_name)
+                .filter(Party.id.in_(ids)).all()})
 
-            # -------- creator maps for documents (id -> creator, party, no)
-            sale_meta = {int(r.id): (int(r.created_by_user_id or 0),
-                                     int(r.buyer_party_id or 0),
-                                     r.sale_no or f"SAL-{r.id}",
-                                     r.walkin_name or "",
-                                     r.created_at)
-                         for r in s.query(Sale).all()}
-            pur_meta = {int(r.id): (int(r.created_by_user_id or 0),
-                                    int(r.supplier_party_id or 0),
-                                    r.purchase_no or f"PUR-{r.id}",
-                                    r.walkin_name or "",
-                                    r.created_at)
-                        for r in s.query(Purchase).all()}
-            all_advances = s.query(Advance).all()   # loaded once, used twice below
-            adv_meta = {int(r.id): (int(r.created_by_user_id or 0),
-                                    int(r.party_id or 0),
-                                    f"ADV-{r.id}", "",
-                                    r.created_at)
-                        for r in all_advances}
+            # -------- creator maps for documents (id -> creator, party, no),
+            # loaded lazily for just the ids this call actually touches.
+            sale_meta = _LazyMap(lambda ids: {
+                int(r.id): (int(r.created_by_user_id or 0),
+                            int(r.buyer_party_id or 0),
+                            r.sale_no or f"SAL-{r.id}",
+                            r.walkin_name or "",
+                            r.created_at)
+                for r in s.query(Sale.id, Sale.created_by_user_id, Sale.buyer_party_id,
+                                 Sale.sale_no, Sale.walkin_name, Sale.created_at)
+                .filter(Sale.id.in_(ids)).all()})
+            pur_meta = _LazyMap(lambda ids: {
+                int(r.id): (int(r.created_by_user_id or 0),
+                            int(r.supplier_party_id or 0),
+                            r.purchase_no or f"PUR-{r.id}",
+                            r.walkin_name or "",
+                            r.created_at)
+                for r in s.query(Purchase.id, Purchase.created_by_user_id, Purchase.supplier_party_id,
+                                 Purchase.purchase_no, Purchase.walkin_name, Purchase.created_at)
+                .filter(Purchase.id.in_(ids)).all()})
+            # 6th element = the advance's OWN direction (received/given) - NOT
+            # the settling Payment's direction, which follows an inverted
+            # bookkeeping convention for advances (settle_advance_payment
+            # deliberately writes direction="out" for settling a RECEIVED
+            # advance). Using payment.direction to classify an advance bucket
+            # silently swaps advance_in and advance_out the moment a real
+            # settlement happens - this is what needs to drive the bucket
+            # everywhere below. The 5-tuple slice shape used by the helpers
+            # below is unchanged.
+            adv_meta = _LazyMap(lambda ids: {
+                int(r.id): (int(r.created_by_user_id or 0),
+                            int(r.party_id or 0),
+                            f"ADV-{r.id}", "",
+                            r.created_at,
+                            str(r.direction or ""))
+                for r in s.query(Advance.id, Advance.created_by_user_id, Advance.party_id,
+                                 Advance.created_at, Advance.direction)
+                .filter(Advance.id.in_(ids)).all()})
+            adv_direction = _FieldView(adv_meta, 5)
 
-            # An advance's OWN direction (received/given) - NOT the settling
-            # Payment's direction, which follows an inverted bookkeeping
-            # convention for advances (settle_advance_payment deliberately
-            # writes direction="out" for settling a RECEIVED advance). Using
-            # payment.direction to classify an advance bucket silently swaps
-            # advance_in and advance_out the moment a real settlement happens
-            # - this is what needs to drive the bucket everywhere below.
-            adv_direction = {int(r.id): str(r.direction or "")
-                             for r in all_advances}
+            def _prefetch_payment_docs(payments) -> None:
+                by_type = {"sale": set(), "purchase": set(), "advance": set()}
+                for p in payments:
+                    et = str(p.entity_type or "")
+                    if et in by_type:
+                        by_type[et].add(int(p.entity_id or 0))
+                sale_meta.prefetch(by_type["sale"])
+                pur_meta.prefetch(by_type["purchase"])
+                adv_meta.prefetch(by_type["advance"])
+                party_ids = set()
+                for m in (sale_meta, pur_meta, adv_meta):
+                    for row in m.values():
+                        party_ids.add(row[1])
+                parties.prefetch(party_ids)
 
             def _creator_party_no(etype: str, eid: int):
                 m = {"sale": sale_meta, "purchase": pur_meta, "advance": adv_meta}.get(etype, {})
@@ -276,7 +351,7 @@ class DrawerService:
                 return doc_at.date() != payment_created_at.date()
 
             # Phase 2: keep the persistent ledger in step before we read it.
-            DrawerService._sync_ledger(s, _creator_party_no)
+            DrawerService._sync_ledger(s, _creator_party_no, _prefetch_payment_docs)
 
             # ==========================================================
             # A. CASH EVENTS handled by this user (real cash only)
@@ -391,6 +466,8 @@ class DrawerService:
                 key=lambda p: p.created_at or datetime.min, reverse=True,
             )
 
+            _prefetch_payment_docs(my_payments)
+
             # ==========================================================
             # "Old settlements collected within this range" - the OPPOSITE
             # attribution from above: payments whose OWN timestamp falls in
@@ -450,6 +527,8 @@ class DrawerService:
                 + [("sale", row) for row in s.execute(old_sale_stmt).all()]
                 + [("advance", row) for row in s.execute(old_adv_stmt).all()]
             )
+
+            _prefetch_payment_docs([row[0] for _et, row in old_settlement_rows])
 
             old_settlements: List[Dict[str, Any]] = []
             for et, row in old_settlement_rows:
@@ -723,6 +802,7 @@ class DrawerService:
             my_advances = s.execute(
                 adv_created_stmt.order_by(Advance.created_at.desc())).scalars().all()
 
+            parties.prefetch([int(a.party_id or 0) for a in my_advances])
             for a in my_advances:
                 raw_amt = _f(a.amount)
                 roundtripped = adv_roundtrip_by_advance_id.get(int(a.id), 0.0)
@@ -816,12 +896,20 @@ class DrawerService:
             adv_stmt = _range_filter(adv_stmt, Advance.created_at, start_date, end_date)
             my_advs = s.execute(adv_stmt).scalars().all()
             adv_in_net = adv_out_net = 0.0
+            settled_by_adv: Dict[int, float] = {}
+            if my_advs:
+                settled_by_adv = {
+                    int(eid): _f(total)
+                    for eid, total in s.query(Payment.entity_id,
+                                              func.coalesce(func.sum(Payment.amount), 0))
+                    .filter(Payment.entity_type == "advance",
+                            Payment.entity_id.in_([int(a.id) for a in my_advs]),
+                            Payment.status != "voided")
+                    .group_by(Payment.entity_id).all()
+                }
             for a in my_advs:
                 amt = _f(a.amount)
-                settled = _f(s.query(func.coalesce(func.sum(Payment.amount), 0))
-                             .filter(Payment.entity_type == "advance",
-                                     Payment.entity_id == int(a.id),
-                                     Payment.status != "voided").scalar())
+                settled = settled_by_adv.get(int(a.id), 0.0)
                 net = max(amt - settled, 0.0)
                 if a.direction == "received":
                     adv_in_net += net
@@ -835,16 +923,44 @@ class DrawerService:
             # C. CROSS-CASHIER SETTLEMENT LINES (both directions, global)
             #    One law: out -> creator owes settler; in -> settler owes creator
             # ==========================================================
+            # A line only matters here when this user is its debtor or its
+            # creditor, i.e. when they either SETTLED the payment or CREATED
+            # the document it settles - so only those payments are loaded,
+            # instead of every payment in the system.
+            _uid = int(user_id)
+            _i_created_the_doc = or_(
+                and_(Payment.entity_type == "sale",
+                     select(Sale.id).where(Sale.id == Payment.entity_id,
+                                           Sale.created_by_user_id == _uid).exists()),
+                and_(Payment.entity_type == "purchase",
+                     select(Purchase.id).where(Purchase.id == Payment.entity_id,
+                                               Purchase.created_by_user_id == _uid).exists()),
+                and_(Payment.entity_type == "advance",
+                     select(Advance.id).where(Advance.id == Payment.entity_id,
+                                              Advance.created_by_user_id == _uid).exists()),
+            )
             all_pay_stmt = select(Payment).where(
                 func.lower(func.coalesce(Payment.method, "")) != "advance"
-            ).where(Payment.status != "voided")
+            ).where(Payment.status != "voided").where(
+                # settler == creator is never a cross-cashier line, so skip
+                # payments where I did both.
+                or_(
+                    and_(Payment.created_by_user_id == _uid, ~_i_created_the_doc),
+                    and_(Payment.created_by_user_id != _uid, _i_created_the_doc),
+                )
+            )
             # Deliberately NOT date-filtered, despite start_date/end_date being
             # available here - an open cross-cashier debt does not expire or
             # become invisible just because the activity cards above are
             # scoped to today. Reconciliation must reflect the TRUE, current
             # open/settled state regardless of what date range the rest of
             # the screen happens to be showing.
-            all_payments = s.execute(all_pay_stmt).scalars().all()
+            # Only the scalar columns this section reads - not whole ORM rows.
+            all_payments = s.execute(all_pay_stmt.with_only_columns(
+                Payment.id, Payment.entity_type, Payment.entity_id,
+                Payment.direction, Payment.amount, Payment.notes,
+                Payment.created_at, Payment.created_by_user_id)).all()
+            _prefetch_payment_docs(all_payments)
 
             # adv_direction already built earlier (shared with section A's
             # cash_events classification) - reused here for _bucket_for.
