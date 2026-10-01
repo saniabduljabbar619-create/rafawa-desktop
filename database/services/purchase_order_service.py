@@ -311,6 +311,8 @@ class PurchaseOrderService:
         """
         purchase_order_id = int(purchase_order_id or 0)
         confirmed_by_user_id = int(confirmed_by_user_id or 0)
+        if confirmed_by_user_id <= 0:
+            raise ValueError("confirmed_by_user_id is required.")
 
         with get_session() as s:
             order = s.get(PurchaseOrder, purchase_order_id)
@@ -361,6 +363,11 @@ class PurchaseOrderService:
 
                 if received_qty <= 0:
                     raise ValueError(f"Line #{item_id}: received quantity must be > 0.")
+                # A negative accepted/rejected/price would still satisfy the
+                # sum check below (e.g. 150 + -50 = 100) and inflate the total.
+                if accepted < 0 or rejected < 0 or received_price < 0:
+                    raise ValueError(
+                        f"Line #{item_id}: accepted, rejected and price cannot be negative.")
                 # Never just trusted from the caller - accepted + rejected
                 # must genuinely account for the whole received quantity.
                 if abs((accepted + rejected) - received_qty) > 0.01:
@@ -391,10 +398,21 @@ class PurchaseOrderService:
                 # Order's rejected, which reverses a real dispatch that
                 # already happened).
                 if accepted > 0:
+                    if is_fert:
+                        bags_in = accepted
+                    else:
+                        # Crops are dual-tracked (kg + bags). Only kg is
+                        # verified at confirmation, so the bags that come in
+                        # are the ordered bags in proportion to the accepted
+                        # share of the ordered weight - writing 0 here made
+                        # stock_bags lag stock_kg more with every order.
+                        ord_kg = float(item.ordered_weight_kg or 0)
+                        ord_bags = float(item.ordered_qty_bags or 0)
+                        bags_in = round(ord_bags * accepted / ord_kg) if ord_kg > 0 else 0
                     s.add(StockMovement(
                         product_id=item.product_id,
                         movement_type="purchase_in",
-                        qty_bags=accepted if is_fert else 0,
+                        qty_bags=bags_in,
                         total_weight_kg=0 if is_fert else accepted,
                         unit_rate=received_price,
                         reference_type="purchase_order_item",
