@@ -106,3 +106,13 @@ def pay(entity_type, entity_id, party_id, direction, amount, user=CASHIER_A, met
 @pytest.fixture
 def now():
     return datetime.now()
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """One themed QApplication shared by every GUI test."""
+    from PySide2.QtWidgets import QApplication
+    from shared.uix.theme import apply_theme
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    return app

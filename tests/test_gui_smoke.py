@@ -18,14 +18,6 @@ from database.services.purchase_service import PurchaseService  # noqa: E402
 from tests.conftest import (ADMIN_ID, CASHIER_A, CUSTOMER_ID, SUPPLIER_ID, make_sale, pay)  # noqa: E402
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    from shared.uix.theme import apply_theme
-    apply_theme(app)
-    return app
-
-
 @pytest.fixture
 def world(qapp):
     """Some real activity so tables/summary cards have something to render."""
