@@ -29,7 +29,7 @@ Name: "desktopicon"; Description: "Create a Desktop icon"; GroupDescription: "Ad
 
 [Files]
 Source: "{#SourcePath}\dist\RafawaApp.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}\.env.template"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist; Permissions: users-modify
+Source: "{#SourcePath}\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist; Permissions: users-modify
 
 [Icons]
 Name: "{group}\RafawaApp"; Filename: "{app}\RafawaApp.exe"

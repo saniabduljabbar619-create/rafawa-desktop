@@ -78,3 +78,16 @@ alembic current                             # which revision a database is on
 - **Take a database backup before running migrations in production.**
 - Revision `0002` adds `audit_logs` (who voided/deleted/settled what); `0003` converts the
   return tables from FLOAT to exact DECIMAL columns.
+
+## Operations
+
+| What | Where / how |
+|---|---|
+| Logs | `%LOCALAPPDATA%\RafawaDesktop\logs\` (`app.log`, `security.log` - rotating) |
+| Crash reports | `%LOCALAPPDATA%\RafawaDesktop\crashes\crash-*.txt` - the app shows the path; send it to support |
+| Schema check | At start-up the app compares the database to the newest migration and warns if `alembic upgrade head` is needed |
+| Backup now | `python -m database.backup --dir D:\Backups --keep 30` (needs `mysqldump` on PATH) |
+| Automatic backup | Set `AUTO_BACKUP=1` in `.env` (one per day when the app opens), or schedule the command above with Windows Task Scheduler |
+| Restore | `gunzip -c backup.sql.gz \| mysql -u USER -p DBNAME` (stop all clients first) |
+
+Set `RAFAWA_DATA_DIR` to relocate the data folder (portable installs).

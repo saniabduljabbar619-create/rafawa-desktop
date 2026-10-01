@@ -166,8 +166,52 @@ class ProductManagementMainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _auto_backup_in_background():
+    """Once-a-day automatic backup when AUTO_BACKUP=1 (never blocks or crashes startup)."""
+    import os
+    import threading
+    if os.getenv("AUTO_BACKUP", "0").lower() not in ("1", "true", "yes"):
+        return
+
+    def _job():
+        import logging
+        try:
+            from database.backup import backup_database, backup_due
+            if backup_due():
+                backup_database(keep=int(os.getenv("BACKUP_KEEP", "14")))
+        except Exception:
+            logging.getLogger("rafawa.backup").exception("Automatic backup failed")
+
+    threading.Thread(target=_job, name="auto-backup", daemon=True).start()
+
+
+def _warn_if_schema_outdated(parent):
+    try:
+        from database.schema_check import check_schema
+        status = check_schema()
+        if not status.up_to_date:
+            from PySide2.QtWidgets import QMessageBox
+            QMessageBox.warning(parent, "Database update needed", status.message)
+    except Exception:
+        import logging
+        logging.getLogger("rafawa").exception("Schema check failed")
+
+
 def run():
+    from shared.logging_setup import setup_logging
+    from shared.crash import install_excepthooks
+    from shared.version import __version__
+    setup_logging()
+
     app = QApplication(sys.argv)
+
+    def _notify_crash(message, report_path):
+        from PySide2.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "Something went wrong",
+            f"The application hit an unexpected error:\n\n{message}\n\n"
+            f"A report was saved to:\n{report_path}\n\nPlease send it to support.")
+    install_excepthooks(_notify_crash)
     # Fusion is the one Qt style that fully, reliably respects QSS - the
     # native Windows style ("windowsvista") only partially honors
     # stylesheet rules for certain things (combobox popup rendering,
@@ -179,7 +223,10 @@ def run():
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLESHEET)
     win = ProductManagementMainWindow()
+    win.setWindowTitle(f"Rafawa Desktop {__version__}")
     win.show()
+    _warn_if_schema_outdated(win)
+    _auto_backup_in_background()
     sys.exit(app.exec_())
 
 
