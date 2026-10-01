@@ -236,3 +236,45 @@ def test_capture_full_window_screenshots(qapp, world):
             qapp.processEvents()
             win.grab().save(str(out / f"window_{workspace}_{route}.png"))
     win.close()
+
+
+# ---------------------------------------------------------------- redesigned screens
+def test_customers_directory_shows_balances_and_filters(qapp, world):
+    from apps.product_management_app.features.profiling.views.customers_list import CustomersListView
+    v = CustomersListView()
+    assert v.table.rowCount() == 1
+    assert v.kpi_owing.value.text() == "15,000.00" and v.kpi_deposit.value.text() == "3,000.00"
+    v.filter_seg.set_key("owing"); v.refresh()
+    assert v.table.rowCount() == 1
+    v.filter_seg.set_key("inactive"); v.refresh()
+    assert v.table.rowCount() == 0 and not v.empty_lbl.isHidden()
+    v.filter_seg.set_key("all"); v.search_in.setText("zzz")
+    assert v.table.rowCount() == 0
+    v.search_in.setText("one")
+    v.table.selectRow(0)
+    assert v.selected_customer_id() == 1
+
+
+def test_customers_cashier_mode_hides_edit_delete(qapp, world):
+    from apps.product_management_app.features.profiling.views.customers_list import CustomersListView
+    v = CustomersListView(mode="cashier")
+    assert v.btn_edit.isHidden() and v.btn_delete.isHidden() and not v.btn_add.isHidden()
+
+
+def test_profile_banner_shows_balance(qapp, world):
+    from apps.product_management_app.app_state import state
+    from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
+    v = CustomerProfileView(state.customers[0], mode="admin")
+    assert v.banner_balance.text() == "15,000.00" == v.sum_receivable.text()
+
+
+def test_sales_console_segment_drives_category_and_totals(qapp, world, no_modals):
+    from apps.product_management_app.features.cashier.views.cashier_sales import CashierSalesView, CartItem
+    v = CashierSalesView()
+    assert v.cart_hint.isHidden() is False and v.total_lbl.text() == "₦0.00"
+    v.category_seg._buttons[0].click()
+    assert v.category_cb.currentText() == "Crops" and v.prod_table.rowCount() > 0
+    v.cart.append(CartItem(1, "crops", "Maize", 100.0, 80.0, 2, 200.0)); v._refresh_cart()
+    assert v.total_lbl.text() == "₦20,000.00" and v.cart_hint.isHidden()
+    v.category_seg._buttons[1].click()                     # locked: cart holds crops
+    assert v.category_cb.currentText() == "Crops" and v.category_seg.key() == "Crops"
