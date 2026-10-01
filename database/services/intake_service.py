@@ -43,26 +43,18 @@ def record_intake_db(p: dict) -> dict:
       - Always write stock_movements using (qty_bags, total_weight_kg).
       - Must have valid created_by_user_id (FK-safe).
     """
-    import time
+    import logging
     import traceback
-    from datetime import datetime
-
-    from sqlalchemy import text
 
     from database.session import get_session
-    from database.models.product import Product as DBProduct
     from database.models.purchase import Purchase
     from database.models.purchase_item import PurchaseItem
-    from database.models.stock_movement import StockMovement
+
+    _logger = logging.getLogger("rafawa.record_intake")
 
     def _log(msg: str) -> None:
-        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {msg}"
-        print(line)
-        try:
-            with open("record_intake_db.log", "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
+        # Errors surface on stderr even with no logging configured.
+        (_logger.error if msg.startswith("[ERR]") else _logger.info)(msg)
 
     p = dict(p or {})
     _log(f"[HIT] record_intake_db payload={p}")
@@ -183,7 +175,7 @@ def record_intake_db(p: dict) -> dict:
                 discount=0,
                 total_amount=line_total,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
             )
             s.add(purchase)
             s.flush()

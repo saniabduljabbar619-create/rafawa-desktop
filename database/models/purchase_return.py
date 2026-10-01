@@ -7,7 +7,7 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
     String,
-    Float,
+    Numeric,
 )
 from sqlalchemy.orm import relationship
 
@@ -28,17 +28,17 @@ class PurchaseReturn(Base):
 
     product_type_snapshot = Column(String(32), nullable=False)   # crops | fertilizer
     unit = Column(String(16), nullable=True)                     # kg
-    unit_cost_snapshot = Column(Float, nullable=False, default=0.0)
+    unit_cost_snapshot = Column(Numeric(12, 4), nullable=False, default=0)
 
-    qty_kg = Column(Float, nullable=False, default=0.0)
+    qty_kg = Column(Numeric(10, 2), nullable=False, default=0)
     qty_bags = Column(Integer, nullable=False, default=0)
 
-    amount = Column(Float, nullable=False, default=0.0)          # NEGATIVE
+    amount = Column(Numeric(14, 2), nullable=False, default=0)          # NEGATIVE
 
     reason = Column(String(255), nullable=True)
 
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
 
     purchase = relationship("Purchase", lazy="joined", foreign_keys=[purchase_id])
     purchase_item = relationship("PurchaseItem", lazy="joined", foreign_keys=[purchase_item_id])

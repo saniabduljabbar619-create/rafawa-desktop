@@ -8,6 +8,9 @@ from datetime import date
 from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 from database.session import get_session
+from database.services.document_balance import document_balances
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
 
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
 from database.models.product import Product
@@ -235,6 +238,8 @@ def get_purchase_payment_snapshot(
 
     with get_session() as s:
         query = s.query(Purchase).options(joinedload(Purchase.supplier))
+        # A voided purchase owes nothing - keep it out of the paid/unpaid tallies.
+        query = query.filter(Purchase.status != "voided")
 
         if role != "admin":
             query = query.filter(Purchase.created_by_user_id == user_id)
@@ -254,99 +259,30 @@ def get_purchase_payment_snapshot(
 
         rows = []
 
-        purchase_ids = [p.id for p in purchases]
-
-        # Batch-aggregate payments/allocations/returns for every purchase in
-        # this page in one round trip each, instead of 3 queries per
-        # purchase - the previous per-row loop turned a dashboard refresh
-        # into 3N+1 sequential DB round trips, which is what made the
-        # screen hang once there were a few hundred purchases.
-        paid_map: dict = {}
-        alloc_map: dict = {}
-        return_map: dict = {}
-
-        if purchase_ids:
-            paid_map = dict(
-                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
-                .filter(Payment.entity_type == "purchase")
-                .filter(Payment.entity_id.in_(purchase_ids))
-                .filter(Payment.direction == "out")
-                .filter(Payment.method != "advance")
-                .filter(~Payment.notes.like("%Advance settlement%"))
-                .filter(Payment.status != "voided")
-                .group_by(Payment.entity_id)
-                .all()
-            )
-
-            alloc_map = dict(
-                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "purchase")
-                .filter(AdvanceAllocation.entity_id.in_(purchase_ids))
-                .group_by(AdvanceAllocation.entity_id)
-                .all()
-            )
-
-            return_map = dict(
-                s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
-                .filter(PurchaseReturn.purchase_id.in_(purchase_ids))
-                .group_by(PurchaseReturn.purchase_id)
-                .all()
-            )
-
-            adjustment_map = dict(
-                s.query(PurchasePriceAdjustment.purchase_id, func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-                .filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids))
-                .group_by(PurchasePriceAdjustment.purchase_id)
-                .all()
-            )
+        # Paid/balance/status come from the one shared definition (grouped
+        # queries for the whole page, not 3 per purchase).
+        balances = document_balances(s, "purchase", [p.id for p in purchases])
 
         for purchase in purchases:
-            raw_total = float(purchase.total_amount or 0)
+            bal = balances[purchase.id]
+            status = bal.status.upper()                 # PAID | PARTIAL | UNPAID
 
-            # 1. Outbound cash payments (Exclude non-cash advance settle rows)
-            paid_total = float(paid_map.get(purchase.id, 0) or 0)
-
-            # 2. Advance wallet amounts allocated
-            alloc_total = float(alloc_map.get(purchase.id, 0) or 0)
-
-            # 3. Returns
-            return_total = abs(float(return_map.get(purchase.id, 0) or 0))
-
-            # 3b. Price adjustments - a real, additional amount now
-            # genuinely owed (e.g. a supplier renegotiating after
-            # delivery), not an assumption - adds to the total the same
-            # way a return subtracts from it.
-            adjustment_total = float(adjustment_map.get(purchase.id, 0) or 0)
-
-            # 4. CLEAN FINANCIAL MATHEMATICS
-            net_total = max(raw_total - return_total + adjustment_total, 0.0)
-            settled = paid_total + alloc_total
-            balance = max(net_total - settled, 0.0)
-
-            # 5. STATUS DETERMINATION LOGIC
-            if net_total <= 0:
-                status = "PAID"
+            if bal.status == "paid":
                 summary["paid"]["count"] += 1
-                summary["paid"]["total"] += 0.0
-            elif settled <= 0:
-                status = "UNPAID"
-                summary["unpaid"]["count"] += 1
-                summary["unpaid"]["total_balance"] += balance
-            elif balance > 0:
-                status = "PARTIAL"
+                summary["paid"]["total"] += bal.net_total
+            elif bal.status == "partial":
                 summary["partial"]["count"] += 1
-                summary["partial"]["total_balance"] += balance
+                summary["partial"]["total_balance"] += bal.balance
             else:
-                status = "PAID"
-                summary["paid"]["count"] += 1
-                summary["paid"]["total"] += net_total
+                summary["unpaid"]["count"] += 1
+                summary["unpaid"]["total_balance"] += bal.balance
 
             rows.append({
                 "purchase_id": purchase.id,
                 "supplier": purchase.supplier.display_name,
-                "total": net_total,                
-                "paid": min(settled, net_total),   
-                "balance": balance,                
+                "total": bal.net_total,
+                "paid": min(bal.settled, bal.net_total),
+                "balance": bal.balance,
                 "status": status,
             })
 
@@ -374,6 +310,8 @@ def get_sale_payment_snapshot(
 
     with get_session() as s:
         sales_query = s.query(Sale).options(joinedload(Sale.buyer))
+        # A voided sale is owed nothing - keep it out of the paid/unpaid tallies.
+        sales_query = sales_query.filter(Sale.status != "voided")
         sales_query = apply_isolation(sales_query, Sale)
 
         if start_date:
@@ -391,99 +329,31 @@ def get_sale_payment_snapshot(
         unpaid_count = 0
         unpaid_balance_total = 0.0
 
-        sale_ids = [sale.id for sale in sales]
-
-        # Batch-aggregate payments/allocations/returns/discounts for every
-        # sale on this page in one round trip each, instead of 4 queries
-        # per sale - see the matching note in get_purchase_payment_snapshot.
-        pay_map: dict = {}
-        alloc_map: dict = {}
-        return_map: dict = {}
-        discount_map: dict = {}
-
-        if sale_ids:
-            pay_query = (
-                s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0.0))
-                .filter(Payment.entity_type == "sale")
-                .filter(Payment.entity_id.in_(sale_ids))
-                .filter(Payment.direction == "in")
-                .filter(Payment.method != "advance")
-                .filter(~Payment.notes.like("%Advance settlement%"))
-                .filter(Payment.status != "voided")
-            )
-            pay_query = apply_isolation(pay_query, Payment)
-            pay_map = dict(pay_query.group_by(Payment.entity_id).all())
-
-            alloc_map = dict(
-                s.query(AdvanceAllocation.entity_id, func.coalesce(func.sum(AdvanceAllocation.amount), 0))
-                .filter(AdvanceAllocation.entity_type == "sale")
-                .filter(AdvanceAllocation.entity_id.in_(sale_ids))
-                .group_by(AdvanceAllocation.entity_id)
-                .all()
-            )
-
-            return_map = dict(
-                s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0.0))
-                .filter(SaleReturn.sale_id.in_(sale_ids))
-                .group_by(SaleReturn.sale_id)
-                .all()
-            )
-
-            discount_map = dict(
-                s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-                .filter(SaleDiscount.sale_id.in_(sale_ids))
-                .group_by(SaleDiscount.sale_id)
-                .all()
-            )
+        # Paid/balance/status come from the one shared definition. Cashiers
+        # only ever see the payments THEY recorded (apply_isolation's rule).
+        balances = document_balances(
+            s, "sale", [sale.id for sale in sales],
+            payments_by_user_id=(user_id if role == "cashier" and user_id else None))
 
         for sale in sales:
-            raw_total = float(sale.total_amount or 0.0)
-
-            # 1. Inbound cash payments (Exclude non-cash advance settlement rows)
-            paid = float(pay_map.get(sale.id, 0) or 0.0)
-
-            # 2. Advance wallet amounts allocated
-            alloc_total = float(alloc_map.get(sale.id, 0) or 0)
-
-            # 3. Sales returns
-            return_total = abs(float(return_map.get(sale.id, 0) or 0.0))
-
-            # 3b. Manually-applied discounts (the Payments section's "lazy
-            # calculator") - same treatment as a return: reduces what's
-            # genuinely still owed, without any cash actually moving.
-            discount_total = float(discount_map.get(sale.id, 0) or 0.0)
-
-            # 4. CLEAN FINANCIAL MATHEMATICS
-            net_total = max(raw_total - return_total - discount_total, 0.0)
-            settled = paid + alloc_total
-            balance = max(net_total - settled, 0.0)
-
-            # 5. STATUS DETERMINATION LOGIC
-            if net_total <= 0:
-                status = "PAID"
+            bal = balances[sale.id]
+            if bal.status == "paid":
                 paid_count += 1
-                paid_total += 0.0
-            elif settled <= 0:
-                status = "UNPAID"
-                unpaid_count += 1
-                unpaid_balance_total += balance
-            elif balance > 0:
-                status = "PARTIAL"
+                paid_total += bal.net_total
+            elif bal.status == "partial":
                 partial_count += 1
-                partial_balance_total += balance
+                partial_balance_total += bal.balance
             else:
-                status = "PAID"
-                paid_count += 1
-                paid_total += net_total
+                unpaid_count += 1
+                unpaid_balance_total += bal.balance
 
-            # 6. CAPPED VIEW PAYLOAD FOR THE SALES UI TABLES
             rows.append({
                 "sale_id": sale.id,
                 "customer": sale.buyer.display_name if sale.buyer else "Walk-in Customer",
-                "total": net_total,                
-                "paid": min(settled, net_total),   
-                "balance": balance,                
-                "status": status,
+                "total": bal.net_total,
+                "paid": min(bal.settled, bal.net_total),
+                "balance": bal.balance,
+                "status": bal.status.upper(),
             })
 
         return {
@@ -807,6 +677,40 @@ def _require_actor(deleted_by_user_id: Optional[int]) -> int:
     return int(deleted_by_user_id)
 
 
+def _purge_stock_and_settlements(s, *, item_ref: str, item_ids, return_ref: str,
+                                 return_ids, payment_ids) -> None:
+    """
+    Hard-deleting a document must also remove what hangs off it indirectly,
+    or the books silently drift:
+      - the StockMovement rows its lines (and returns) created - otherwise the
+        stock those lines added/removed stays counted forever, pointing at a
+        reference_id that no longer exists;
+      - any cross-cashier CashierSettlement mirrored from its payments -
+        otherwise an open debt for a deleted payment lingers on the drawer.
+    """
+    from database.models.cashier_settlement import CashierSettlement
+
+    if item_ids:
+        s.query(StockMovement).filter(
+            StockMovement.reference_type == item_ref,
+            StockMovement.reference_id.in_(item_ids),
+        ).delete(synchronize_session=False)
+    if return_ids:
+        s.query(StockMovement).filter(
+            StockMovement.reference_type == return_ref,
+            StockMovement.reference_id.in_(return_ids),
+        ).delete(synchronize_session=False)
+    if payment_ids:
+        s.query(CashierSettlement).filter(
+            CashierSettlement.source_payment_id.in_(payment_ids)
+        ).delete(synchronize_session=False)
+
+
+def _ids(rows):
+    return [int(r[0]) for r in rows]
+
+
+@require_admin
 def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -817,7 +721,7 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
 
         snapshot = {
             "id": purchase.id,
-            "supplier_id": getattr(purchase, "supplier_id", None),
+            "supplier_party_id": getattr(purchase, "supplier_party_id", None),
             "supplier": purchase.supplier.display_name if getattr(purchase, "supplier", None) else None,
             "total_amount": float(purchase.total_amount or 0),
             "created_by_user_id": getattr(purchase, "created_by_user_id", None),
@@ -825,6 +729,17 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
         }
 
         try:
+            from database.models.purchase_item import PurchaseItem
+            _purge_stock_and_settlements(
+                s,
+                item_ref="purchase_item",
+                item_ids=_ids(s.query(PurchaseItem.id).filter(PurchaseItem.purchase_id == purchase_id).all()),
+                return_ref="purchase_return",
+                return_ids=_ids(s.query(PurchaseReturn.id).filter(PurchaseReturn.purchase_id == purchase_id).all()),
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "purchase", Payment.entity_id == purchase_id).all()),
+            )
+
             # Dependents first, in case FKs aren't set up to cascade.
             s.query(Payment).filter(
                 Payment.entity_type == "purchase", Payment.entity_id == purchase_id
@@ -842,6 +757,9 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
                 PurchasePriceAdjustment.purchase_id == purchase_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "purchase.delete", "purchase", purchase_id,
+                f"HARD DELETE of purchase #{purchase_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="purchase",
                 entity_id=purchase_id,
@@ -857,6 +775,7 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
             raise
 
 
+@require_admin
 def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -867,7 +786,7 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
 
         snapshot = {
             "id": sale.id,
-            "buyer_id": getattr(sale, "buyer_id", None),
+            "buyer_party_id": getattr(sale, "buyer_party_id", None),
             "customer": sale.buyer.display_name if getattr(sale, "buyer", None) else None,
             "total_amount": float(sale.total_amount or 0),
             "created_by_user_id": getattr(sale, "created_by_user_id", None),
@@ -875,6 +794,17 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
         }
 
         try:
+            from database.models.sale_item import SaleItem
+            _purge_stock_and_settlements(
+                s,
+                item_ref="sale_item",
+                item_ids=_ids(s.query(SaleItem.id).filter(SaleItem.sale_id == sale_id).all()),
+                return_ref="sale_return",
+                return_ids=_ids(s.query(SaleReturn.id).filter(SaleReturn.sale_id == sale_id).all()),
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "sale", Payment.entity_id == sale_id).all()),
+            )
+
             s.query(Payment).filter(
                 Payment.entity_type == "sale", Payment.entity_id == sale_id
             ).delete(synchronize_session=False)
@@ -891,6 +821,9 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
                 SaleDiscount.sale_id == sale_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "sale.delete", "sale", sale_id,
+                f"HARD DELETE of sale #{sale_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="sale",
                 entity_id=sale_id,
@@ -906,6 +839,7 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
             raise
 
 
+@require_admin
 def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -925,6 +859,12 @@ def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None 
         }
 
         try:
+            _purge_stock_and_settlements(
+                s, item_ref="", item_ids=[], return_ref="", return_ids=[],
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "advance", Payment.entity_id == advance_id).all()),
+            )
+
             s.query(Payment).filter(
                 Payment.entity_type == "advance", Payment.entity_id == advance_id
             ).delete(synchronize_session=False)
@@ -933,6 +873,9 @@ def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None 
                 AdvanceAllocation.advance_id == advance_id
             ).delete(synchronize_session=False)
 
+            AuditService.record(
+                "advance.delete", "advance", advance_id,
+                f"HARD DELETE of advance #{advance_id}", {"reason": reason, "snapshot": snapshot}, session=s)
             s.add(DeletionLog(
                 entity_type="advance",
                 entity_id=advance_id,

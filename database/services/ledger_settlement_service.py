@@ -76,7 +76,7 @@ class LedgerSettlementService:
                 marker = LedgerSettlementMarker(
                     party_id=party_id, category=category,
                     created_by_user_id=created_by_user_id,
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(),
                 )
                 s.add(marker)
                 s.flush()

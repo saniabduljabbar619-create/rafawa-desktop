@@ -5,6 +5,8 @@ from typing import Dict
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.payment import Payment
@@ -49,7 +51,7 @@ class AdvanceService:
                 notes=str(notes or "Counter-advance deposit collection"),
                 status="completed",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(adv)
             s.flush()
@@ -89,7 +91,7 @@ class AdvanceService:
                 notes=str(notes or "Counter-advance payout collection"),
                 status="completed",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(adv)
             s.flush()
@@ -136,7 +138,7 @@ class AdvanceService:
                 method=str(method),
                 notes="Advance settlement",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(pay)
             s.commit()
@@ -308,6 +310,7 @@ class AdvanceService:
         }
 
     @staticmethod
+    @require_admin
     def void_advance(advance_id: int, created_by_user_id: int, reason: str = "",
                      cascade: bool = False):
         """
@@ -390,5 +393,10 @@ class AdvanceService:
             adv.status = "voided"
             if reason:
                 adv.notes = (adv.notes or "") + f" | [Voided: {reason}]"
+            AuditService.record(
+                "advance.void", "advance", advance_id,
+                f"Voided {adv.direction} advance of {float(adv.amount or 0):,.2f}",
+                {"reason": reason, "cascade": bool(cascade), "amount": float(adv.amount or 0),
+                 "settled": settled, "party_id": adv.party_id}, session=s)
             s.commit()
             return adv.id

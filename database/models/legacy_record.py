@@ -39,7 +39,7 @@ class LegacyRecord(Base):
     # No created_by_user_id, just a name
     recorded_by_name = Column(String(80), nullable=True)
 
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
 
     cleared_at = Column(DateTime, nullable=True)
     cleared_by_name = Column(String(80), nullable=True)

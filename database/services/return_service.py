@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, cast
 from sqlalchemy import func
 from database.session import get_session
+from database.services.audit_service import AuditService
 
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -16,6 +17,12 @@ from database.models.sale_return import SaleReturn
 
 from database.models.stock_movement import StockMovement
 from database.models.advance_allocations import AdvanceAllocation
+
+
+# Tolerance for float kg comparisons: the UI clamps to a 2-decimal spin box,
+# so the "remaining" figure (sold - returned) can differ from what the user
+# can type by float noise (e.g. 100.1 - 33.7 = 66.39999999999999).
+_KG_EPS = 1e-6
 
 
 class ReturnService:
@@ -47,6 +54,39 @@ class ReturnService:
         
         return float(qty_kg), int(qty_bags)
 
+    @staticmethod
+    def _net_sale_rate(s, sale, item) -> float:
+        """
+        Effective per-unit (per bag for fertilizer, per kg for crops) price the
+        customer paid for this sale line: the list rate scaled by
+        (line_total - its share of discounts) / line_total.
+
+        Discount share = the line's own line_discount, plus any part of the
+        sale's header discount not already covered by line discounts, spread
+        across lines in proportion to their line_total. (The checkout screen
+        sets the header discount to the sum of the line discounts, so that
+        remainder is normally zero.) Post-sale manual discounts (SaleDiscount)
+        are deliberately NOT applied here - they are a separate settlement
+        step, not a change to what the goods sold for.
+        """
+        list_rate = float(item.unit_sale_rate or 0.0)
+        line_total = float(item.line_total or 0.0)
+        if list_rate <= 0 or line_total <= 0:
+            return list_rate
+
+        lines = s.query(SaleItem.line_total, SaleItem.line_discount).filter(
+            SaleItem.sale_id == sale.id).all()
+        sum_totals = sum(float(t or 0.0) for t, _ in lines)
+        sum_line_disc = sum(float(d or 0.0) for _, d in lines)
+
+        discount = float(item.line_discount or 0.0)
+        header_rest = max(float(sale.discount or 0.0) - sum_line_disc, 0.0)
+        if header_rest > 0 and sum_totals > 0:
+            discount += header_rest * (line_total / sum_totals)
+
+        net = max(line_total - discount, 0.0)
+        return round(list_rate * (net / line_total), 4)
+
     # ---------------------------------------------------------
     # CREATE RETURN
     # ---------------------------------------------------------
@@ -69,6 +109,9 @@ class ReturnService:
 
         qty_bags = int(qty_bags or 0)
         qty_kg = float(qty_kg or 0.0)
+
+        if qty_bags < 0 or qty_kg < 0:
+            raise ValueError("Return quantity cannot be negative.")
 
         if qty_bags <= 0 and qty_kg <= 0:
             raise ValueError("Return quantity must be provided.")
@@ -116,11 +159,11 @@ class ReturnService:
                 if qty_bags > (sold_bags - returned_bags):
                     raise ValueError("Return bags exceed remaining quantity.")
 
-                if not is_fert and qty_kg > (sold_kg - returned_kg):
+                if not is_fert and qty_kg > (sold_kg - returned_kg) + _KG_EPS:
                     raise ValueError("Return kg exceed remaining quantity.")
 
                 rate = float(item.unit_cost_rate or 0.0)
-                amount = -(rate * (qty_bags if is_fert else qty_kg))
+                amount = -round(rate * (qty_bags if is_fert else qty_kg), 2)
 
                 r = PurchaseReturn(
                     purchase_id=purchase.id,
@@ -166,7 +209,7 @@ class ReturnService:
                         )
                         .order_by(AdvanceAllocation.id.desc())
                         .all()
-                )
+                    )
                     for alloc in allocations:
                         alloc_amt = float(alloc.amount or 0.0)
                         if return_val_to_release >= alloc_amt:
@@ -226,11 +269,15 @@ class ReturnService:
             if qty_bags > (sold_bags - returned_bags):
                 raise ValueError("Return bags exceed remaining quantity.")
 
-            if not is_fert and qty_kg > (sold_kg - returned_kg):
+            if not is_fert and qty_kg > (sold_kg - returned_kg) + _KG_EPS:
                 raise ValueError("Return kg exceed remaining quantity.")
 
-            rate = float(item.unit_sale_rate or 0.0)
-            amount = -(rate * (qty_bags if is_fert else qty_kg))
+            # Refund at the price the customer actually PAID, not the list
+            # rate: a sale line can carry its own discount (line_discount)
+            # and/or a header discount not attributed to any line. Refunding
+            # at the undiscounted rate handed back more than was ever paid.
+            rate = ReturnService._net_sale_rate(s, sale, item)
+            amount = -round(rate * (qty_bags if is_fert else qty_kg), 2)
 
             r = SaleReturn(
                 sale_id=sale.id,
@@ -344,6 +391,8 @@ class ReturnService:
                 created_by_user_id=created_by_user_id
             )
             s.add(pay)
+            AuditService.record("return.reclaim", "purchase_return", int(r.id),
+                                f"Cash reclaimed {reclaim:,.2f} for purchase return", {"amount": reclaim}, session=s)
             s.commit()
 
     @staticmethod
@@ -390,4 +439,6 @@ class ReturnService:
                 created_by_user_id=created_by_user_id
             )
             s.add(pay)
+            AuditService.record("return.refund", "sale_return", int(r.id),
+                                f"Cash refunded {refund:,.2f} for sale return", {"amount": refund}, session=s)
             s.commit()

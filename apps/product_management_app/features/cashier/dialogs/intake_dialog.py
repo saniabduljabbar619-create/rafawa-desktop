@@ -8,7 +8,6 @@ from PySide2.QtWidgets import (
 
 from shared.config.constants import LEDGER_CROPS
 from apps.product_management_app.app_state import state
-from PySide2.QtWidgets import QComboBox
 from apps.product_management_app.app_state import Customer
 
 

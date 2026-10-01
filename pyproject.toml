@@ -1,13 +1,28 @@
 [project]
 name = "rafawa-desktop"
 version = "0.1.0"
-description = "Rafawa Core Desktop Apps (PySide6) - Product Management App"
-requires-python = ">=3.9"
+description = "Rafawa Core Desktop Apps (PySide2) - Product Management App"
+requires-python = ">=3.9,<3.11"
 dependencies = [
-  "PySide6>=6.6",
-  "httpx>=0.27",
+  "PySide2>=5.15,<6",
+  "SQLAlchemy>=2.0,<3",
+  "PyMySQL>=1.1,<2",
+  "alembic>=1.13,<2",
+  "httpx>=0.27,<1",
+  "pywin32>=306; platform_system == 'Windows'",
+  "openpyxl>=3.1,<4",
 ]
 
 [tool.pyright]
 reportMissingImports = false
 pythonVersion = "3.9"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["python -m PyInstaller RafawaApp.spec --c.spec --c.spec --c"]
+
+[tool.ruff.lint]
+# Start with correctness errors only (syntax, undefined names, bad imports,
+# redefinitions); style rules can be added as the codebase is tidied.
+select = ["E9", "F63", "F7", "F82", "F811"]

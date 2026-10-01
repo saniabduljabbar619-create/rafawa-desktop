@@ -173,7 +173,7 @@ class CloudSyncEngine:
 
     @classmethod
     def sync_table(cls, model_class: Type, table_name: str) -> Dict:
-        started_at = datetime.utcnow()
+        started_at = datetime.now()
         try:
             cursor, cursor_row_id = cls._get_cursor(table_name)
             rows = cls._fetch_dirty_rows(model_class, cursor, cursor_row_id)
@@ -263,7 +263,7 @@ class CloudSyncEngine:
                 s.add(state)
             state.last_synced_cursor = new_cursor
             state.last_synced_row_id = new_row_id
-            state.last_run_at = datetime.utcnow()
+            state.last_run_at = datetime.now()
             state.last_success = True
             state.last_error = None
 
@@ -274,7 +274,7 @@ class CloudSyncEngine:
             if state is None:
                 state = SyncState(table_name=table_name)
                 s.add(state)
-            state.last_run_at = datetime.utcnow()
+            state.last_run_at = datetime.now()
             state.last_success = False
             state.last_error = error[:1000]
 
@@ -283,7 +283,7 @@ class CloudSyncEngine:
                    success: bool, error: Optional[str]) -> None:
         with get_session() as s:
             s.add(SyncLog(
-                table_name=table_name, started_at=started_at, finished_at=datetime.utcnow(),
+                table_name=table_name, started_at=started_at, finished_at=datetime.now(),
                 rows_pushed=rows_pushed, success=success,
                 error_message=(error[:1000] if error else None),
             ))

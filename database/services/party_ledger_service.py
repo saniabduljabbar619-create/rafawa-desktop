@@ -8,6 +8,8 @@ from datetime import date, datetime as _dt
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.document_balance import document_balances
+from shared.config.constants import WALKIN_PARTY_ID
 
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -118,49 +120,14 @@ class PartyLedgerService:
 
     @staticmethod
     def _net_totals_for_sales(s, sale_ids: List[int]) -> Dict[int, float]:
-        if not sale_ids:
-            return {}
-        totals = {int(sid): float(t or 0) for sid, t in
-                   s.query(Sale.id, Sale.total_amount).filter(Sale.id.in_(sale_ids)).all()}
-        returns: Dict[int, float] = {}
-        for sid, amt in (
-            s.query(SaleReturn.sale_id, func.coalesce(func.sum(SaleReturn.amount), 0))
-            .filter(SaleReturn.sale_id.in_(sale_ids)).group_by(SaleReturn.sale_id).all()
-        ):
-            returns[int(sid)] = abs(float(amt or 0))
-        discounts: Dict[int, float] = {}
-        for sid, amt in (
-            s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0))
-            .filter(SaleDiscount.sale_id.in_(sale_ids)).group_by(SaleDiscount.sale_id).all()
-        ):
-            discounts[int(sid)] = float(amt or 0)
-        return {
-            sid: max(totals.get(sid, 0.0) - returns.get(sid, 0.0) - discounts.get(sid, 0.0), 0.0)
-            for sid in sale_ids
-        }
+        # A voided sale owes nothing; discounts/returns netted - see document_balance.
+        bals = document_balances(s, "sale", sale_ids)
+        return {int(sid): (bals[int(sid)].net_total if int(sid) in bals else 0.0) for sid in sale_ids}
 
     @staticmethod
     def _net_totals_for_purchases(s, purchase_ids: List[int]) -> Dict[int, float]:
-        if not purchase_ids:
-            return {}
-        totals = {int(pid): float(t or 0) for pid, t in
-                   s.query(Purchase.id, Purchase.total_amount).filter(Purchase.id.in_(purchase_ids)).all()}
-        returns: Dict[int, float] = {}
-        for pid, amt in (
-            s.query(PurchaseReturn.purchase_id, func.coalesce(func.sum(PurchaseReturn.amount), 0))
-            .filter(PurchaseReturn.purchase_id.in_(purchase_ids)).group_by(PurchaseReturn.purchase_id).all()
-        ):
-            returns[int(pid)] = abs(float(amt or 0))
-        adjustments: Dict[int, float] = {}
-        for pid, amt in (
-            s.query(PurchasePriceAdjustment.purchase_id, func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-            .filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids)).group_by(PurchasePriceAdjustment.purchase_id).all()
-        ):
-            adjustments[int(pid)] = float(amt or 0)
-        return {
-            pid: max(totals.get(pid, 0.0) - returns.get(pid, 0.0) + adjustments.get(pid, 0.0), 0.0)
-            for pid in purchase_ids
-        }
+        bals = document_balances(s, "purchase", purchase_ids)
+        return {int(pid): (bals[int(pid)].net_total if int(pid) in bals else 0.0) for pid in purchase_ids}
 
     @staticmethod
     def payment_document_balances(party_id: int) -> Dict[int, Dict[str, float]]:
@@ -313,7 +280,8 @@ class PartyLedgerService:
             pur_creation_dt: Dict[int, object] = {}
             for p in purchases:
                 pid = int(p.id)
-                raw_total = float(p.total_amount or 0)
+                is_void = (p.status == "voided")
+                raw_total = 0.0 if is_void else float(p.total_amount or 0)
                 returned = pur_returns.get(pid, 0.0)
                 adjustment_total = pur_adjustments.get(pid, 0.0)
                 net_total = max(raw_total - returned + adjustment_total, 0.0)
@@ -335,7 +303,7 @@ class PartyLedgerService:
                     "total": net_total,
                     "paid": min(settled, net_total),
                     "balance": balance,
-                    "status": _doc_payment_status(net_total, settled, balance),
+                    "status": "voided" if is_void else _doc_payment_status(net_total, settled, balance),
                     "items": pur_items_detail.get(pid, ""),
                 })
 
@@ -416,7 +384,8 @@ class PartyLedgerService:
             sale_creation_dt: Dict[int, object] = {}
             for s1 in sales:
                 sid = int(s1.id)
-                raw_total = float(s1.total_amount or 0)
+                is_void = (s1.status == "voided")
+                raw_total = 0.0 if is_void else float(s1.total_amount or 0)
                 returned = sale_returns.get(sid, 0.0)
                 discount = sale_discounts.get(sid, 0.0)
                 net_total = max(raw_total - returned - discount, 0.0)
@@ -438,7 +407,7 @@ class PartyLedgerService:
                     "total": net_total,
                     "paid": min(settled, net_total),
                     "balance": balance,
-                    "status": _doc_payment_status(net_total, settled, balance),
+                    "status": "voided" if is_void else _doc_payment_status(net_total, settled, balance),
                     "items": sale_items_detail.get(sid, ""),
                 })
 
@@ -628,7 +597,7 @@ class PartyLedgerService:
                     "balance_before": None, "balance_after": None, "status": "payables",
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -792,7 +761,7 @@ class PartyLedgerService:
                     "status": "posted"
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
 
@@ -936,7 +905,7 @@ class PartyLedgerService:
                     "status": "posted"
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -1074,7 +1043,7 @@ class PartyLedgerService:
                     "status": status
                 })
 
-        rows.sort(key=lambda x: x["dt"] or "", reverse=True)
+        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
 
         return rows[:limit]
     
@@ -1098,7 +1067,7 @@ class PartyLedgerService:
                     total_amount AS amount,
                     status
                 FROM sales
-                WHERE buyer_party_id = 11
+                WHERE buyer_party_id = :wid
                 AND walkin_name = :name
 
                 UNION ALL
@@ -1112,11 +1081,11 @@ class PartyLedgerService:
                     total_amount,
                     status
                 FROM purchases
-                WHERE supplier_party_id = 11
+                WHERE supplier_party_id = :wid
                 AND walkin_name = :name
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1142,7 +1111,7 @@ class PartyLedgerService:
                 FROM sale_items si
                 JOIN sales s ON s.id = si.sale_id
                 JOIN products p ON p.id = si.product_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
                 AND si.product_type_snapshot = 'crops'
 
@@ -1161,12 +1130,12 @@ class PartyLedgerService:
                 FROM purchase_items pi
                 JOIN purchases pch ON pch.id = pi.purchase_id
                 JOIN products p ON p.id = pi.product_id
-                WHERE pch.supplier_party_id = 11
+                WHERE pch.supplier_party_id = :wid
                 AND pch.walkin_name = :name
                 AND pi.product_type_snapshot = 'crops'
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1193,7 +1162,7 @@ class PartyLedgerService:
                 FROM sale_items si
                 JOIN sales s ON s.id = si.sale_id
                 JOIN products p ON p.id = si.product_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
                 AND si.product_type_snapshot = 'fertilizer'
 
@@ -1212,12 +1181,12 @@ class PartyLedgerService:
                 FROM purchase_items pi
                 JOIN purchases pch ON pch.id = pi.purchase_id
                 JOIN products p ON p.id = pi.product_id
-                WHERE pch.supplier_party_id = 11
+                WHERE pch.supplier_party_id = :wid
                 AND pch.walkin_name = :name
                 AND pi.product_type_snapshot = 'fertilizer'
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1234,9 +1203,9 @@ class PartyLedgerService:
 
                 SELECT
                     pr.created_at AS dt,
-                    'crops' AS ledger,
+                    pr.product_type_snapshot AS ledger,
                     'purchase_return' AS type,
-                    CONCAT('PUR-RET-', pr.id) AS reference,
+                    CONCAT('PRET-', pr.id) AS reference,
                     pr.qty_bags AS bags,
                     pr.qty_kg AS kg,
                     pr.amount,
@@ -1244,16 +1213,16 @@ class PartyLedgerService:
                     'completed' AS status
                 FROM purchase_returns pr
                 JOIN purchases p ON p.id = pr.purchase_id
-                WHERE p.supplier_party_id = 11
+                WHERE p.supplier_party_id = :wid
                 AND p.walkin_name = :name
 
                 UNION ALL
 
                 SELECT
                     sr.created_at,
-                    'crops',
+                    sr.product_type_snapshot,
                     'sale_return',
-                    CONCAT('SAL-RET-', sr.id),
+                    CONCAT('SRET-', sr.id),
                     sr.qty_bags,
                     sr.qty_kg,
                     sr.amount,
@@ -1261,11 +1230,11 @@ class PartyLedgerService:
                     'completed'
                 FROM sale_returns sr
                 JOIN sales s ON s.id = sr.sale_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
 
                 ORDER BY dt DESC
 
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]

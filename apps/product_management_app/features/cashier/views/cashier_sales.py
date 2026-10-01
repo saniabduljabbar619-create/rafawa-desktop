@@ -611,26 +611,6 @@ class CashierSalesView(QWidget):
         walkin = self.walkin_name.text().strip()
         buyer_party_id = int(cid) if cid is not None else 0
 
-        # ✅ CRITICAL ARCHITECTURAL EXTENSION: Handle Multi-Lane Point-Of-Sale Registrations
-        if buyer_party_id <= 0:
-            target_name = walkin if walkin else "Walk-in Customer"
-
-            # Read selection string index state from dropdown choice layout
-            if self.walkin_type_cb.currentIndex() == 1:
-                # 👑 STRATEGY PATH A: Instantiate a permanent registered customer configuration on the fly!
-                new_cust = state.create_customer(full_name=target_name, phone="")
-                buyer_party_id = int(new_cust.id) if new_cust else 0
-            else:
-                # 👑 STRATEGY PATH B: File under the casual temporary walkin lane database entity structure
-                buyer_party_id = state.get_or_lazy_create_walkin(target_name, "")
-
-            # Sync runtime cache pools concurrently to make new profiles immediately active
-            state._load_customers_from_db()
-            state._load_walkins_from_db()
-
-            # Instantly re-hydrate self combobox component so the account option updates for future operations
-            self._refresh_customer_combobox()
-
         total_revenue = sum(x.subtotal for x in self.cart)
 
         # ---------------------------------------------------------------
@@ -671,6 +651,29 @@ class CashierSalesView(QWidget):
             # committed too early, before the operator had even seen this
             # dialog.
             return
+
+        # ✅ CRITICAL ARCHITECTURAL EXTENSION: Handle Multi-Lane Point-Of-Sale Registrations
+        # Deliberately done only AFTER the operator confirms checkout - creating
+        # the party earlier left an orphan walk-in/permanent customer behind
+        # every time the checkout (or the shortfall dialog) was cancelled.
+        if buyer_party_id <= 0:
+            target_name = walkin if walkin else "Walk-in Customer"
+
+            # Read selection string index state from dropdown choice layout
+            if self.walkin_type_cb.currentIndex() == 1:
+                # 👑 STRATEGY PATH A: Instantiate a permanent registered customer configuration on the fly!
+                new_cust = state.create_customer(full_name=target_name, phone="")
+                buyer_party_id = int(new_cust.id) if new_cust else 0
+            else:
+                # 👑 STRATEGY PATH B: File under the casual temporary walkin lane database entity structure
+                buyer_party_id = state.get_or_lazy_create_walkin(target_name, "")
+
+            # Sync runtime cache pools concurrently to make new profiles immediately active
+            state._load_customers_from_db()
+            state._load_walkins_from_db()
+
+            # Instantly re-hydrate self combobox component so the account option updates for future operations
+            self._refresh_customer_combobox()
 
         checkout = dlg.payload()
         discount = float(checkout.get("discount") or 0.0)
@@ -752,11 +755,20 @@ class CashierSalesView(QWidget):
                 # Reverse whatever already committed in THIS batch before
                 # this failure - never leave a partial batch silently in
                 # stock for a sale that hasn't happened yet.
+                failed_reversals = []
                 for already_id in committed_qp_ids:
                     try:
                         QuickPurchaseService.cancel_pending_quick_purchase(int(already_id))
-                    except Exception:
-                        pass
+                    except Exception as reversal_error:
+                        failed_reversals.append((already_id, reversal_error))
+                if failed_reversals:
+                    details = "\n".join(f"#{cid}: {err}" for cid, err in failed_reversals)
+                    QMessageBox.warning(
+                        self, "Quick Purchase Not Reversed",
+                        f"These earlier Quick Purchase(s) could not be "
+                        f"automatically reversed:\n{details}\n\nPlease review "
+                        f"them manually."
+                    )
                 QMessageBox.critical(self, "Quick Purchase",
                                      f"Could not buy the missing items:\n{pur.get('error')}")
                 return

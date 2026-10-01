@@ -42,7 +42,9 @@ from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_
 from database.services.purchase_service import PurchaseService
 from database.services.sales_service import SaleService
 
-WALKIN_SUPPLIER_ID = 11  # mirrors PurchaseService's walk-in convention
+from shared.config.constants import WALKIN_PARTY_ID
+
+WALKIN_SUPPLIER_ID = WALKIN_PARTY_ID  # mirrors PurchaseService's walk-in convention
 
 
 def _f(v) -> float:

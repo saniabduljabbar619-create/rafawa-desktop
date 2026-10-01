@@ -8,12 +8,16 @@ from datetime import datetime
 from sqlalchemy import func, case
 
 from database.session import get_session
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
 from database.models.sale import Sale
 from database.models.sale_item import SaleItem
 from database.models.party import Party
 from database.models.payment import Payment
+from database.models.sale_return import SaleReturn
 
 
 class SaleService:
@@ -87,11 +91,16 @@ class SaleService:
                     stock_bags,
                 )
                 .outerjoin(StockMovement, StockMovement.product_id == Product.id)
+                .filter(Product.is_active.is_(True))
                 .group_by(Product.id)
                 .order_by(Product.id.desc())
-                .limit(limit)
-                .all()
             )
+
+            # Search / zero-stock filtering happens below in Python (it
+            # needs the per-type stock figure), so the LIMIT must come AFTER
+            # it - applying it in SQL first silently dropped matches that
+            # fell outside the newest `limit` products.
+            rows = rows.all()
 
         out = []
 
@@ -135,6 +144,9 @@ class SaleService:
                 "cost_rate": cost_rate,
                 "sale_rate": sale_rate,
             })
+
+            if len(out) >= limit:
+                break
 
         return out
 
@@ -328,13 +340,13 @@ class SaleService:
 
             # Global walk-in party
             if buyer_party_id <= 0:
-                buyer_party_id = 11
+                buyer_party_id = WALKIN_PARTY_ID
 
             # A real sale to this party is proof they ARE a customer, whoever
             # they were before - a supplier bought from for months can be sold
             # to today, and this is the moment that becomes true. id 11 is the
             # shared anonymous bucket, not a real counterparty, so it's exempt.
-            if buyer_party_id != 11:
+            if buyer_party_id != WALKIN_PARTY_ID:
                 SaleService._ensure_role(buyer_party_id, "is_customer")
 
             product_ids = [int(it["product_id"]) for it in items]
@@ -364,14 +376,14 @@ class SaleService:
 
             sale = Sale(
                 buyer_party_id=buyer_party_id,
-                walkin_name=walkin_name if buyer_party_id == 11 else None,
+                walkin_name=walkin_name if buyer_party_id == WALKIN_PARTY_ID else None,
                 status="completed",
                 notes=note,
                 subtotal=subtotal,
                 discount=discount,
                 total_amount=total_amount,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
             )
 
             s.add(sale)
@@ -506,21 +518,38 @@ class SaleService:
 
                 need_kg[pid] = need_kg.get(pid, 0) + tw
 
+        stock_kg, stock_bags = SaleService._stock_expr()
+
         for pid, req_bags in need_bags.items():
 
-            avail = session.query(
-                func.coalesce(func.sum(
-                    case(
-                        (StockMovement.movement_type.in_(STOCK_IN_TYPES), StockMovement.qty_bags),
-                        (StockMovement.movement_type.in_(STOCK_OUT_TYPES), -StockMovement.qty_bags),
-                        else_=0
-                    )
-                ), 0)
-            ).filter(StockMovement.product_id == pid).scalar()
+            avail_kg, avail_bags = (
+                session.query(stock_kg, stock_bags)
+                .select_from(StockMovement)
+                .filter(StockMovement.product_id == pid)
+                .one()
+            )
+            avail_kg = float(avail_kg or 0)
+            avail_bags = float(avail_bags or 0)
 
-            if avail < req_bags:
-                raise ValueError("Insufficient stock")
-    
+            if avail_bags < req_bags:
+                name = session.query(Product.name).filter(Product.id == pid).scalar() or f"Product#{pid}"
+                raise ValueError(
+                    f"Insufficient stock for {name}: need {req_bags} bag(s), "
+                    f"only {avail_bags:,.0f} on hand."
+                )
+
+            # Crops are dual-tracked: the weight sold must also be covered by
+            # the kg actually on hand. (need_kg was computed above but never
+            # checked, so a sale could take more kg than the shop held as
+            # long as enough bags were left.) Small tolerance for float noise.
+            req_kg = need_kg.get(pid, 0.0)
+            if req_kg > 0 and avail_kg + 1e-6 < req_kg:
+                name = session.query(Product.name).filter(Product.id == pid).scalar() or f"Product#{pid}"
+                raise ValueError(
+                    f"Insufficient stock for {name}: need {req_kg:,.2f} kg, "
+                    f"only {avail_kg:,.2f} kg on hand."
+                )
+
     @staticmethod
     def _stock_expr():
 
@@ -576,6 +605,7 @@ class SaleService:
     # exists against it - mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_sale(sale_id: int, voided_by_user_id: int, reason: str = "") -> Dict:
         """
         Voids a sale transaction that was entered wrong from the start
@@ -621,6 +651,18 @@ class SaleService:
                     "never paid against at all."
                 )
 
+            has_return = (
+                s.query(SaleReturn.id)
+                .filter(SaleReturn.sale_id == sale_id)
+                .first()
+            )
+            if has_return is not None:
+                raise ValueError(
+                    "Cannot void this sale - goods have already been returned "
+                    "against it. Voiding would put the returned stock back a "
+                    "second time."
+                )
+
             items = s.query(SaleItem).filter(SaleItem.sale_id == sale_id).all()
             reversed_movements = 0
             for item in items:
@@ -651,6 +693,12 @@ class SaleService:
             sale.status = "voided"
             if reason:
                 sale.notes = ((sale.notes or "") + f" | [Voided: {reason}]").strip()
+            AuditService.record(
+                "sale.void", "sale", sale_id,
+                f"Voided sale of {float(sale.total_amount or 0):,.2f}",
+                {"reason": reason, "total": float(sale.total_amount or 0),
+                 "buyer_party_id": sale.buyer_party_id, "stock_movements_reversed": reversed_movements},
+                session=s)
 
         return {"ok": True, "sale_id": sale_id, "stock_movements_reversed": reversed_movements}
 

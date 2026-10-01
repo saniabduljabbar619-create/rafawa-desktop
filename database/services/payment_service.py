@@ -6,6 +6,9 @@ from typing import List, Dict, Optional
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.payment import Payment
 
 
@@ -50,7 +53,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)
@@ -90,7 +93,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)
@@ -130,7 +133,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)
@@ -299,7 +302,7 @@ class PaymentService:
 
             rows = s.execute(text("""
                 SELECT
-                    p.created_at,
+                    p.created_at AS created_at,
                     p.entity_type,
                     p.entity_id,
                     p.direction,
@@ -310,13 +313,13 @@ class PaymentService:
                 JOIN sales s
                     ON p.entity_type = 'sale'
                     AND p.entity_id = s.id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
 
                 UNION ALL
 
                 SELECT
-                    p.created_at,
+                    p.created_at AS created_at,
                     p.entity_type,
                     p.entity_id,
                     p.direction,
@@ -327,11 +330,11 @@ class PaymentService:
                 JOIN purchases pu
                     ON p.entity_type = 'purchase'
                     AND p.entity_id = pu.id
-                WHERE pu.supplier_party_id = 11
+                WHERE pu.supplier_party_id = :wid
                 AND pu.walkin_name = :name
 
                 ORDER BY created_at DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
 
@@ -377,6 +380,7 @@ class PaymentService:
     # VOID PAYMENT (mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_payment(payment_id: int, voided_by_user_id: int, reason: str = "") -> None:
         """
         Voids a payment - it stays in the table forever as the audit trail,
@@ -426,6 +430,12 @@ class PaymentService:
             payment.voided_at = datetime.now()
             payment.voided_by_user_id = voided_by_user_id
             payment.void_reason = (reason or "").strip()[:255] or None
+            AuditService.record(
+                "payment.void", "payment", payment_id,
+                f"Voided {payment.entity_type} #{payment.entity_id} payment of {float(payment.amount or 0):,.2f}",
+                {"reason": reason, "amount": float(payment.amount or 0), "direction": payment.direction,
+                 "entity_type": payment.entity_type, "entity_id": payment.entity_id,
+                 "method": payment.method}, session=s)
 
             if settlement:
                 s.delete(settlement)

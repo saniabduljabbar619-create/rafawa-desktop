@@ -5,12 +5,16 @@ from typing import Dict, List
 from sqlalchemy import func
 
 from database.session import get_session
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
 from database.models.stock_movement import StockMovement
 from database.models.party import Party
 from database.models.payment import Payment
+from database.models.purchase_return import PurchaseReturn
 
 
 class PurchaseService:
@@ -122,7 +126,7 @@ class PurchaseService:
 
             walkin_name = (payload.get("walkin_name") or "").strip()
 
-            if supplier_party_id == 11:
+            if supplier_party_id == WALKIN_PARTY_ID:
                 walkin_name = walkin_name or "Unknown"
             else:
                 walkin_name = None
@@ -130,8 +134,8 @@ class PurchaseService:
             # A real purchase FROM this party is proof they ARE a supplier,
             # whoever they were before - a longtime customer bought fertilizer
             # from us once, and this is the moment that becomes true too.
-            # id 11 is the shared anonymous bucket, not a real counterparty.
-            if supplier_party_id != 11 and auto_flag_supplier:
+            # the walk-in id is the shared anonymous bucket, not a real counterparty.
+            if supplier_party_id != WALKIN_PARTY_ID and auto_flag_supplier:
                 PurchaseService._ensure_role(supplier_party_id, "is_supplier")
 
             purchase = Purchase(
@@ -143,7 +147,7 @@ class PurchaseService:
                 discount=0,
                 total_amount=0,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
                 # Quick Purchase stamps these; a normal intake passes neither.
                 is_quick=1 if payload.get("is_quick") else 0,
                 linked_sale_id=payload.get("linked_sale_id"),
@@ -213,6 +217,13 @@ class PurchaseService:
 
         if "supplier_party_id" not in payload:
             raise ValueError("supplier_party_id required")
+
+        try:
+            supplier_ok = int(payload.get("supplier_party_id") or 0) > 0
+        except (TypeError, ValueError):
+            supplier_ok = False
+        if not supplier_ok:
+            raise ValueError("supplier_party_id must be a valid party id")
 
         if "created_by_user_id" not in payload:
             raise ValueError("created_by_user_id required")
@@ -299,13 +310,26 @@ class PurchaseService:
         sku = row["sku"]
         name = row["product_name"]
 
-        product = session.query(Product).filter(Product.sku == sku).first()
+        if sku:
+            product = session.query(Product).filter(Product.sku == sku).first()
+        else:
+            # A blank SKU must never match "the first product with a blank
+            # SKU" - that silently overwrote an unrelated product's name,
+            # type and cost. Fall back to an exact name + type match among
+            # SKU-less products instead.
+            product = (
+                session.query(Product)
+                .filter(func.lower(Product.name) == name.lower())
+                .filter(Product.product_type == row["product_type"])
+                .filter((Product.sku.is_(None)) | (Product.sku == ""))
+                .first()
+            )
 
         if not product:
 
             product = Product(
                 name=name,
-                sku=sku,
+                sku=sku or None,
                 product_type=row["product_type"],
                 unit_label="bag" if row["product_type"] == "fertilizer" else "kg",
                 default_cost_rate=row["unit_cost"],
@@ -385,6 +409,7 @@ class PurchaseService:
     # payment exists against it - mistake correction, keeps history)
     # -------------------------------------------------
     @staticmethod
+    @require_admin
     def void_purchase(purchase_id: int, voided_by_user_id: int, reason: str = "") -> Dict:
         """
         Voids a purchase transaction that was entered wrong from the start
@@ -430,6 +455,18 @@ class PurchaseService:
                     "never paid against at all."
                 )
 
+            has_return = (
+                s.query(PurchaseReturn.id)
+                .filter(PurchaseReturn.purchase_id == purchase_id)
+                .first()
+            )
+            if has_return is not None:
+                raise ValueError(
+                    "Cannot void this purchase - goods have already been "
+                    "returned against it. Voiding would take the returned "
+                    "stock out a second time."
+                )
+
             items = s.query(PurchaseItem).filter(PurchaseItem.purchase_id == purchase_id).all()
             reversed_movements = 0
             for item in items:
@@ -460,6 +497,12 @@ class PurchaseService:
             purchase.status = "voided"
             if reason:
                 purchase.notes = ((purchase.notes or "") + f" | [Voided: {reason}]").strip()
+            AuditService.record(
+                "purchase.void", "purchase", purchase_id,
+                f"Voided purchase of {float(purchase.total_amount or 0):,.2f}",
+                {"reason": reason, "total": float(purchase.total_amount or 0),
+                 "supplier_party_id": purchase.supplier_party_id,
+                 "stock_movements_reversed": reversed_movements}, session=s)
 
         return {"ok": True, "purchase_id": purchase_id, "stock_movements_reversed": reversed_movements}
 

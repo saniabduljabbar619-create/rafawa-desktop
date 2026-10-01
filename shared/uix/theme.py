@@ -261,6 +261,7 @@ QTableCornerButton::section {
 }
 QTableWidget {
     background-color: #ffffff;
+    alternate-background-color: #f8fafc;
 }
 QAbstractScrollArea {
     background: #ffffff;
@@ -268,23 +269,39 @@ QAbstractScrollArea {
 
 QTabBar::tab {
     background: #f3f4f6;
-    color: #111827;
+    color: #374151;
     border: 1px solid #e5e7eb;
     border-bottom: none;
-    padding: 6px 14px;
+    padding: 7px 16px;
+    min-width: 64px;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
+    /* Normal weight, selected or not: Qt sizes a tab from its plain text, so a
+       bold label overflows and is clipped ("Payment s"). The selected tab is
+       marked by its accent bar and white background instead. */
+    font-weight: 400;
 }
 QTabBar::tab:selected {
     background: #ffffff;
     color: #0b2a24;
-    font-weight: 700;
-    border-bottom: 1px solid #ffffff; /* blends into the pane below */
+    font-weight: 400;
+    border-top: 2px solid #1f8f6b;               /* accent marks the active tab */
+    border-bottom: 1px solid #ffffff;            /* blends into the pane below */
 }
 QTabBar::tab:hover:!selected {
     background: #e5e7eb;
 }
 
+
+/* Keyboard users: a visible focus ring on every input (the primary action
+   for a cashier working without a mouse). */
+QCheckBox:focus, QRadioButton:focus { color: #065f46; }
+QToolTip {
+    background: #111827;
+    color: #ffffff;
+    border: none;
+    padding: 5px 8px;
+}
 
 QPushButton {
     outline: none;

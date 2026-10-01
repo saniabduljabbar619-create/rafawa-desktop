@@ -1,9 +1,10 @@
 from database.session import get_session
 from sqlalchemy import text
+from shared.config.constants import WALKIN_PARTY_ID
 
 class WalkinService:
 
-    WALKIN_PARTY_ID = 11
+    WALKIN_PARTY_ID = WALKIN_PARTY_ID
 
     @staticmethod
     def list_traders():

@@ -747,49 +747,6 @@ class AppState:
             limit=int(limit or 500),
         )
 
-    def record_payment_db(self, p: dict) -> int:
-        from database.services.payment_service import PaymentService
-
-        entity_type = str(p.get("entity_type") or "").strip().lower()
-        user_id = self.require_user_id()
-
-        if entity_type == "sale":
-            return PaymentService.record_payment_db(
-                party_id=int(p.get("party_id") or 0),
-                amount=float(p.get("amount") or 0.0),
-                ledger=str(p.get("ledger") or ""),
-                method=str(p.get("method") or "cash"),
-                created_by_user_id=user_id,
-                note=str(p.get("note") or ""),
-                sale_id=int(p.get("sale_id") or 0),
-            )
-
-        elif entity_type == "purchase":
-            purchase_id = int(p.get("purchase_id") or 0)
-            if purchase_id <= 0:
-                raise ValueError("purchase_id is required for purchase payments.")
-
-            return PaymentService.record_purchase_payment_db(
-                purchase_id=purchase_id,
-                amount=float(p.get("amount") or 0.0),
-                method=str(p.get("method") or "cash"),
-                created_by_user_id=user_id,
-                note=str(p.get("note") or ""),
-            )
-
-        elif entity_type == "advance":
-            return PaymentService.record_advance_db(
-                party_id=int(p.get("party_id") or 0),
-                amount=float(p.get("amount") or 0.0),
-                ledger=str(p.get("ledger") or ""),
-                method=str(p.get("method") or "cash"),
-                created_by_user_id=user_id,
-                note=str(p.get("note") or ""),
-            )
-
-        else:
-            raise ValueError(f"Invalid payment entity_type: {entity_type}")
-
     def get_internal_supplier_party_id(self) -> int:
         with get_session() as s:
             row = (
@@ -880,130 +837,6 @@ class AppState:
                 except Exception: pass
                 raise
 
-    def record_advance_db(self, p: dict) -> int:
-        party_id = int(p.get("party_id") or 0)
-        if party_id <= 0:
-            raise ValueError("party_id is required")
-
-        direction = (p.get("direction") or "").strip().lower()
-        if direction not in ("given", "received"):
-            raise ValueError("direction must be 'given' or 'received'")
-
-        adv_type = (p.get("advance_type") or "").strip().lower()
-        if adv_type not in ("money", "crops", "fertilizer"):
-            raise ValueError("advance_type must be money|crops|fertilizer")
-
-        product_id = p.get("product_id")
-        if adv_type in ("crops", "fertilizer"):
-            product_id = int(product_id or 0)
-            if product_id <= 0:
-                raise ValueError("product_id is required for crops/fertilizer advances")
-        else:
-            product_id = None
-
-        qty_bags = int(float(p.get("qty_bags") or 0))
-        total_kg = float(p.get("total_weight_kg") or 0.0)
-        unit_rate = float(p.get("unit_rate") or 0.0)
-        amount = float(p.get("amount") or 0.0)
-        
-        if adv_type in ("crops", "fertilizer") and amount <= 0 and unit_rate > 0 and total_kg > 0:
-            amount = total_kg * unit_rate
-
-        notes = (p.get("notes") or "").strip()
-        status = (p.get("status") or "draft").strip()
-        created_by_user_id = int(p.get("created_by_user_id") or self.require_user_id())
-
-        now = datetime.now()
-
-        with get_session() as s:
-            # 1) advances insert
-            res = s.connection().exec_driver_sql(
-                """
-                INSERT INTO advances
-                    (party_id, direction, advance_type, product_id, amount,
-                     qty_bags, total_weight_kg, unit_rate, notes, status,
-                     created_by_user_id, created_at)
-                VALUES
-                    (%s, %s, %s, %s, %s,
-                     %s, %s, %s, %s, %s,
-                     %s, %s)
-                """,
-                (
-                    party_id, direction, adv_type, product_id, amount,
-                    qty_bags, total_kg, unit_rate, notes, status,
-                    created_by_user_id, now,
-                )
-            )
-            advance_id = int(res.lastrowid or 0)
-
-            # 2) in-kind stock movement
-            if adv_type in ("crops", "fertilizer"):
-                if total_kg <= 0:
-                    raise ValueError("total_weight_kg must be > 0 for crops/fertilizer advances")
-
-                if direction == "given":
-                    movement_type = "advance_out"
-                else:
-                    movement_type = "adjustment_in"
-
-                s.connection().exec_driver_sql(
-                    """
-                    INSERT INTO stock_movements
-                        (product_id, movement_type, qty_bags, total_weight_kg,
-                         unit_rate, reference_type, reference_id, party_id,
-                         created_by_user_id, created_at)
-                    VALUES
-                        (%s, %s, %s, %s,
-                         %s, %s, %s, %s,
-                         %s, %s)
-                    """,
-                    (
-                        product_id, movement_type, qty_bags, total_kg,
-                        unit_rate, "advance", advance_id, party_id,
-                        created_by_user_id, now,
-                    )
-                )
-
-            # 3) optional money mirror into payments
-            if adv_type == "money":
-                if amount <= 0:
-                    raise ValueError("amount must be > 0 for money advance")
-
-                ledger = (p.get("ledger") or "").strip().lower()
-                if ledger == "fertilizer": ledger = "fertilizers"
-                if ledger == "crop": ledger = "crops"
-                if ledger not in ("crops", "fertilizers"):
-                    raise ValueError("ledger is required for money advance (crops or fertilizers)")
-
-                pay_direction = "out" if direction == "given" else "in"
-                method = (p.get("method") or "").strip().lower() or None
-                pay_notes = f"ledger={ledger}; note=[ADV:{advance_id}] {(notes or '').strip()}".strip()
-
-                s.connection().exec_driver_sql(
-                    """
-                    INSERT INTO payments
-                        (entity_type, entity_id, party_id, direction, amount,
-                         method, notes, created_by_user_id, created_at)
-                    VALUES
-                        (%s, %s, %s, %s, %s,
-                         %s, %s, %s, %s)
-                    """,
-                    (
-                        "advance", 
-                        advance_id,  # 🚀 SYSTEM PATCH SECURED: Tracks explicit parent row to eliminate double counting
-                        party_id, 
-                        pay_direction, 
-                        amount,
-                        method,
-                        pay_notes,
-                        created_by_user_id, 
-                        now,
-                    )
-                )
-
-            s.commit()
-        return advance_id
-    
     def list_party_advances_db(self, party_id: int, session_user_id: int, limit: int = 500):
         party_id = int(party_id or 0)
         if party_id <= 0:
@@ -1053,7 +886,7 @@ class AppState:
                 (t,)
             ).fetchall()
 
-        return [{"id": int(r), "name": r} for r in rows]
+        return [{"id": int(r[0]), "name": r[1]} for r in rows]
 
     def list_products_with_stock_db(self, q: str = "", category: str = "All", product_type: str = None, include_inactive: bool = False):
         from database.services.product_service import list_products_with_stock_db
@@ -1157,28 +990,12 @@ class AppState:
             if not row:
                 raise ValueError("No users in DB. Create a user before using cashier actions.")
 
-            self.session_user["id"] = int(row)
-            self.session_user["name"] = str(row or "").strip() or "User"
-            self.session_user["role"] = str(row or "cashier").strip().lower()
+            self.session_user["id"] = int(row[0])
+            self.session_user["name"] = str(row[1] or "").strip() or "User"
+            self.session_user["role"] = str(row[2] or "cashier").strip().lower()
         except Exception as e:
             raise ValueError(f"Cannot bootstrap session from DB: {e}")
         
-    def set_session_user(self, *args, **kwargs) -> None:
-        if args and isinstance(args, int):
-            user_id = int(args or 0)
-            name = str(args if len(args) > 1 else "")
-            role = str(args if len(args) > 2 else kwargs.get("role", "cashier"))
-            if user_id <= 0:
-                raise ValueError("Invalid user_id for session.")
-            self.session_user["id"] = user_id
-            self.session_user["name"] = (name or "").strip()
-            self.session_user["role"] = (role or "cashier").strip().lower()
-            return
-
-        name = str(args if args else kwargs.get("name", ""))
-        role = str(args if len(args) > 1 else kwargs.get("role", "cashier"))
-        raise ValueError(f"set_session_user(name, role) is forbidden. Call set_session_user(user_id, name, role).")
-
     def get_or_lazy_create_walkin(self, name: str, phone: str = "") -> int:
         """
         Looks up an existing casual walk-in by PHONE ONLY. If they do not

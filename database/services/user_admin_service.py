@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy import select
 from database.session import get_session
+from database.services.audit_service import AuditService
+from shared.auth.permissions import require_admin
 from database.models.user import User
 from database.models.role import Role
 from shared.utils.password_hash import hash_password
@@ -53,6 +55,7 @@ class UserAdminService:
         return out
 
     @staticmethod
+    @require_admin
     def create_user(*, username: str, password: str, role_name: str) -> int:
         username = (username or "").strip()
         password = (password or "").strip()
@@ -84,10 +87,14 @@ class UserAdminService:
                 is_active=True,
             )
             s.add(u)
+            s.flush()
+            AuditService.record("user.create", "user", int(u.id),
+                                f"Created {role_name} user {username!r}", {"role": role_name}, session=s)
             s.commit()
             return int(u.id)
 
     @staticmethod
+    @require_admin
     def set_active(user_id: int, is_active: bool) -> None:
         user_id = int(user_id or 0)
         if user_id <= 0:
@@ -98,9 +105,12 @@ class UserAdminService:
             if not u:
                 raise ValueError("User not found.")
             u.is_active = bool(is_active)
+            AuditService.record("user.enable" if is_active else "user.disable", "user", user_id,
+                                f"{'Enabled' if is_active else 'Disabled'} user {u.username!r}", session=s)
             s.commit()
 
     @staticmethod
+    @require_admin
     def delete_user(user_id: int) -> None:
         """
         A TRUE delete - only allowed when the user has never created any
@@ -155,10 +165,13 @@ class UserAdminService:
                         f"the history intact."
                     )
 
+            AuditService.record("user.delete", "user", user_id,
+                                f"Deleted user {u.username!r}", session=s)
             s.delete(u)
             s.commit()
 
     @staticmethod
+    @require_admin
     def reset_password(user_id: int, new_password: str) -> None:
         user_id = int(user_id or 0)
         new_password = (new_password or "").strip()
@@ -172,6 +185,8 @@ class UserAdminService:
             if not u:
                 raise ValueError("User not found.")
             u.password_hash = hash_password(new_password)
+            AuditService.record("user.password_reset", "user", user_id,
+                                f"Password reset for {u.username!r}", session=s)
             s.commit()
 
     @staticmethod

@@ -50,7 +50,7 @@ class CloudSyncWorker(QThread):
                 total_pushed = 0
 
                 def _on_table_done(table_name, index, total, result):
-                    nonlocal total_pushed, failed_tables
+                    nonlocal total_pushed
                     ok = bool(result.get("ok"))
                     pushed = int(result.get("pushed") or 0)
                     if ok:

@@ -1,6 +1,12 @@
+; Pass the version on the command line (build.ps1 does this from shared/version.py):
+;   ISCC.exe /DAppVersion=3.5.0 installer.iss
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
+
 [Setup]
 AppName=RafawaApp
-AppVersion=3.4.7
+AppVersion={#AppVersion}
 DefaultDirName={autopf}\RafawaDesktop
 DefaultGroupName=Rafawa Desktop
 ; {#SourcePath} is Inno Setup's PREPROCESSOR constant (compile-time,
@@ -29,7 +35,7 @@ Name: "desktopicon"; Description: "Create a Desktop icon"; GroupDescription: "Ad
 
 [Files]
 Source: "{#SourcePath}\dist\RafawaApp.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourcePath}\.env.template"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist; Permissions: users-modify
+Source: "{#SourcePath}\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist; Permissions: users-modify
 
 [Icons]
 Name: "{group}\RafawaApp"; Filename: "{app}\RafawaApp.exe"
