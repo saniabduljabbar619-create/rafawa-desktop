@@ -47,7 +47,7 @@ def list_customer_activities_db(
     with get_session() as s:
         # 🛡️ SYSTEM SECURITY GATE: Compile a direct look-up cache map of all system operators
         user_rows = s.connection().exec_driver_sql("SELECT id, username FROM users").fetchall()
-        user_map = {int(r): str(r or "").strip() for r in user_rows}
+        user_map = {int(r[0]): str(r[1] or "").strip() for r in user_rows}
 
         # -------------------
         # Purchases (Intakes)

@@ -1053,7 +1053,7 @@ class AppState:
                 (t,)
             ).fetchall()
 
-        return [{"id": int(r), "name": r} for r in rows]
+        return [{"id": int(r[0]), "name": r[1]} for r in rows]
 
     def list_products_with_stock_db(self, q: str = "", category: str = "All", product_type: str = None, include_inactive: bool = False):
         from database.services.product_service import list_products_with_stock_db
@@ -1157,28 +1157,12 @@ class AppState:
             if not row:
                 raise ValueError("No users in DB. Create a user before using cashier actions.")
 
-            self.session_user["id"] = int(row)
-            self.session_user["name"] = str(row or "").strip() or "User"
-            self.session_user["role"] = str(row or "cashier").strip().lower()
+            self.session_user["id"] = int(row[0])
+            self.session_user["name"] = str(row[1] or "").strip() or "User"
+            self.session_user["role"] = str(row[2] or "cashier").strip().lower()
         except Exception as e:
             raise ValueError(f"Cannot bootstrap session from DB: {e}")
         
-    def set_session_user(self, *args, **kwargs) -> None:
-        if args and isinstance(args, int):
-            user_id = int(args or 0)
-            name = str(args if len(args) > 1 else "")
-            role = str(args if len(args) > 2 else kwargs.get("role", "cashier"))
-            if user_id <= 0:
-                raise ValueError("Invalid user_id for session.")
-            self.session_user["id"] = user_id
-            self.session_user["name"] = (name or "").strip()
-            self.session_user["role"] = (role or "cashier").strip().lower()
-            return
-
-        name = str(args if args else kwargs.get("name", ""))
-        role = str(args if len(args) > 1 else kwargs.get("role", "cashier"))
-        raise ValueError(f"set_session_user(name, role) is forbidden. Call set_session_user(user_id, name, role).")
-
     def get_or_lazy_create_walkin(self, name: str, phone: str = "") -> int:
         """
         Looks up an existing casual walk-in by PHONE ONLY. If they do not

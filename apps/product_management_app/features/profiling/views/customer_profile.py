@@ -264,11 +264,7 @@ class CustomerProfileView(QWidget):
                 if not row:
                     return "System"
 
-                # 🚀 THE ULTIMATE CLEANSER: Extracts index 0 and strips out brackets/quotes defensively
-                raw_str = str(row if isinstance(row, (tuple, list)) else row).strip()
-                for char in ["(", ")", "'", "\"", ","]:
-                    raw_str = raw_str.replace(char, "")
-                creator_name = raw_str.strip() or "System"
+                creator_name = str(row[0] or "").strip() or "System"
 
                 # Only sales/purchases can genuinely have more than one
                 # cashier's money against them (an advance/return doesn't
