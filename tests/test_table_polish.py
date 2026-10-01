@@ -57,3 +57,20 @@ def test_polish_runs_once_on_show(app):
         assert t.horizontalHeader().sectionResizeMode(0) == QHeaderView.Fixed
     finally:
         app.removeEventFilter(f)
+
+
+def test_button_roles_follow_the_label_and_respect_custom_styling(app):
+    from PySide2.QtWidgets import QPushButton
+    from shared.uix.table_polish import polish_button
+
+    assert polish_button(QPushButton("Add Customer")) is True
+    assert polish_button(QPushButton("Delete Selected")) is True
+    b = QPushButton("Void Payment"); polish_button(b); assert b.property("role") == "danger"
+    b = QPushButton("Save"); polish_button(b); assert b.property("role") == "primary"
+    b = QPushButton("← Back"); assert polish_button(b) is False and b.property("role") is None
+    assert polish_button(QPushButton("Refresh")) is False and polish_button(QPushButton("Edit")) is False
+
+    styled = QPushButton("Delete"); styled.setStyleSheet("background: red;")
+    assert polish_button(styled) is False                       # the screen styled it on purpose
+    named = QPushButton("Add"); named.setObjectName("PrimaryButton")
+    assert polish_button(named) is False

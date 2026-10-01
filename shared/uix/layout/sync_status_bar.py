@@ -12,7 +12,7 @@ from PySide2.QtWidgets import QWidget, QHBoxLayout, QLabel, QProgressBar
 from PySide2.QtCore import Qt
 from datetime import datetime
 
-_DARK_GREEN = "#0b2a24"
+_BAR_BG = "#ffffff"
 _PRIMARY_GREEN = "#1f8f6b"
 _AMBER = "#b45309"
 _MUTED = "#6b7280"
@@ -22,7 +22,10 @@ class SyncStatusBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(26)
-        self.setStyleSheet(f"background: {_DARK_GREEN};")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setObjectName("SyncStatusBar")
+        # A quiet footer, not a banner: light, with a hairline above it.
+        self.setStyleSheet(f"QWidget#SyncStatusBar {{ background: {_BAR_BG}; border-top: 1px solid #e5e7eb; }}")
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 3, 12, 3)
@@ -42,10 +45,10 @@ class SyncStatusBar(QWidget):
         self.bar.setTextVisible(True)
         self.bar.setStyleSheet(f"""
             QProgressBar {{
-                background: #12382f;
+                background: #e5e7eb;
                 border: none;
                 border-radius: 7px;
-                color: #ffffff;
+                color: #064e3b;
                 font-size: 9px;
                 text-align: center;
             }}

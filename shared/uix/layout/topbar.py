@@ -29,6 +29,12 @@ class TopBar(QWidget):
 
         layout.addStretch(1)
 
+        # Who is signed in (updated on every navigation)
+        self.user_chip = QLabel("")
+        self.user_chip.setObjectName("UserChip")
+        self.user_chip.setVisible(False)
+        layout.addWidget(self.user_chip)
+
         # Logout button
         self.btn_logout = QPushButton("Logout")
         self.btn_logout.setFixedHeight(28)
@@ -40,3 +46,14 @@ class TopBar(QWidget):
 
     def set_title(self, title: str):
         self.title_lbl.setText(title)
+        self.refresh_user()
+
+    def refresh_user(self):
+        from shared.auth.session import get_session
+        sess = get_session()
+        if sess and getattr(sess, "username", ""):
+            role = (getattr(sess, "role", "") or "").strip().title()
+            self.user_chip.setText(f"{sess.username}  \u00b7  {role}" if role else sess.username)
+            self.user_chip.setVisible(True)
+        else:
+            self.user_chip.setVisible(False)
