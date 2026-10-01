@@ -235,6 +235,8 @@ def get_purchase_payment_snapshot(
 
     with get_session() as s:
         query = s.query(Purchase).options(joinedload(Purchase.supplier))
+        # A voided purchase owes nothing - keep it out of the paid/unpaid tallies.
+        query = query.filter(Purchase.status != "voided")
 
         if role != "admin":
             query = query.filter(Purchase.created_by_user_id == user_id)
@@ -374,6 +376,8 @@ def get_sale_payment_snapshot(
 
     with get_session() as s:
         sales_query = s.query(Sale).options(joinedload(Sale.buyer))
+        # A voided sale is owed nothing - keep it out of the paid/unpaid tallies.
+        sales_query = sales_query.filter(Sale.status != "voided")
         sales_query = apply_isolation(sales_query, Sale)
 
         if start_date:
@@ -807,6 +811,39 @@ def _require_actor(deleted_by_user_id: Optional[int]) -> int:
     return int(deleted_by_user_id)
 
 
+def _purge_stock_and_settlements(s, *, item_ref: str, item_ids, return_ref: str,
+                                 return_ids, payment_ids) -> None:
+    """
+    Hard-deleting a document must also remove what hangs off it indirectly,
+    or the books silently drift:
+      - the StockMovement rows its lines (and returns) created - otherwise the
+        stock those lines added/removed stays counted forever, pointing at a
+        reference_id that no longer exists;
+      - any cross-cashier CashierSettlement mirrored from its payments -
+        otherwise an open debt for a deleted payment lingers on the drawer.
+    """
+    from database.models.cashier_settlement import CashierSettlement
+
+    if item_ids:
+        s.query(StockMovement).filter(
+            StockMovement.reference_type == item_ref,
+            StockMovement.reference_id.in_(item_ids),
+        ).delete(synchronize_session=False)
+    if return_ids:
+        s.query(StockMovement).filter(
+            StockMovement.reference_type == return_ref,
+            StockMovement.reference_id.in_(return_ids),
+        ).delete(synchronize_session=False)
+    if payment_ids:
+        s.query(CashierSettlement).filter(
+            CashierSettlement.source_payment_id.in_(payment_ids)
+        ).delete(synchronize_session=False)
+
+
+def _ids(rows):
+    return [int(r[0]) for r in rows]
+
+
 def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | None = None) -> None:
     deleted_by_user_id = _require_actor(deleted_by_user_id)
 
@@ -817,7 +854,7 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
 
         snapshot = {
             "id": purchase.id,
-            "supplier_id": getattr(purchase, "supplier_id", None),
+            "supplier_party_id": getattr(purchase, "supplier_party_id", None),
             "supplier": purchase.supplier.display_name if getattr(purchase, "supplier", None) else None,
             "total_amount": float(purchase.total_amount or 0),
             "created_by_user_id": getattr(purchase, "created_by_user_id", None),
@@ -825,6 +862,17 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
         }
 
         try:
+            from database.models.purchase_item import PurchaseItem
+            _purge_stock_and_settlements(
+                s,
+                item_ref="purchase_item",
+                item_ids=_ids(s.query(PurchaseItem.id).filter(PurchaseItem.purchase_id == purchase_id).all()),
+                return_ref="purchase_return",
+                return_ids=_ids(s.query(PurchaseReturn.id).filter(PurchaseReturn.purchase_id == purchase_id).all()),
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "purchase", Payment.entity_id == purchase_id).all()),
+            )
+
             # Dependents first, in case FKs aren't set up to cascade.
             s.query(Payment).filter(
                 Payment.entity_type == "purchase", Payment.entity_id == purchase_id
@@ -867,7 +915,7 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
 
         snapshot = {
             "id": sale.id,
-            "buyer_id": getattr(sale, "buyer_id", None),
+            "buyer_party_id": getattr(sale, "buyer_party_id", None),
             "customer": sale.buyer.display_name if getattr(sale, "buyer", None) else None,
             "total_amount": float(sale.total_amount or 0),
             "created_by_user_id": getattr(sale, "created_by_user_id", None),
@@ -875,6 +923,17 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
         }
 
         try:
+            from database.models.sale_item import SaleItem
+            _purge_stock_and_settlements(
+                s,
+                item_ref="sale_item",
+                item_ids=_ids(s.query(SaleItem.id).filter(SaleItem.sale_id == sale_id).all()),
+                return_ref="sale_return",
+                return_ids=_ids(s.query(SaleReturn.id).filter(SaleReturn.sale_id == sale_id).all()),
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "sale", Payment.entity_id == sale_id).all()),
+            )
+
             s.query(Payment).filter(
                 Payment.entity_type == "sale", Payment.entity_id == sale_id
             ).delete(synchronize_session=False)
@@ -925,6 +984,12 @@ def delete_advance(advance_id: int, deleted_by_user_id: int, reason: str | None 
         }
 
         try:
+            _purge_stock_and_settlements(
+                s, item_ref="", item_ids=[], return_ref="", return_ids=[],
+                payment_ids=_ids(s.query(Payment.id).filter(
+                    Payment.entity_type == "advance", Payment.entity_id == advance_id).all()),
+            )
+
             s.query(Payment).filter(
                 Payment.entity_type == "advance", Payment.entity_id == advance_id
             ).delete(synchronize_session=False)
