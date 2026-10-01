@@ -53,6 +53,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.sales_orders.views.companies_view import CompaniesView
     from apps.product_management_app.features.purchase_orders.views.suppliers_view import SuppliersView
     from apps.product_management_app.features.business_history.views.cashier_list_view import CashierHistoryListView
+    from apps.product_management_app.features.reports.views.reports_view import ReportsView
 
     # 👑 THE ANCHOR BLUEPRINTS: Import the completed executive analytics and valuation dashboards
     from apps.product_management_app.features.catalog.views.product_profit_view import ProductProfitView
@@ -86,6 +87,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
                 SidebarItem(label="Purchase Orders", route="admin.purchase_orders"),
             ]),
             SidebarItem(label="Business History", route="admin.business_history"),
+            SidebarItem(label="Reports", route="admin.reports"),
             SidebarItem(label="Users", route="admin.users"),
         ],
         routes={
@@ -104,6 +106,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "admin.sales_orders": lambda: CompaniesView(mode="admin"),
             "admin.purchase_orders": lambda: SuppliersView(mode="admin"),
             "admin.business_history": lambda: CashierHistoryListView(),
+            "admin.reports": lambda: ReportsView(),
             "admin.users": lambda: UsersListView(),
         },
         default_route="admin.dashboard",
@@ -119,6 +122,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "admin.sales_orders": "Sales Orders",
             "admin.purchase_orders": "Purchase Orders",
             "admin.business_history": "Aggregated Business History",
+            "admin.reports": "Reports",
             "admin.users": "Admin • Users",
         },
     )

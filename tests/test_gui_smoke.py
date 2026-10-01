@@ -202,3 +202,20 @@ def test_capture_screenshots(qapp, world):
     launcher.show()
     qapp.processEvents()
     launcher.grab().save(str(out / "launcher_login.png"))
+
+
+def test_reports_screen_shows_figures_and_exports(qapp, world, no_modals, monkeypatch, tmp_path):
+    from PySide2.QtWidgets import QFileDialog
+    from apps.product_management_app.features.reports.views.reports_view import ReportsView
+    view = ReportsView()
+    _show(qapp, view)
+    summary = {view.summary.item(r, 0).text(): view.summary.item(r, 1).text() for r in range(view.summary.rowCount())}
+    assert summary["Sales - gross"] == "20,000.00" and summary["Cash received"] == "5,000.00"
+    assert summary["Sales (documents)"] == "1"
+    assert view.receivables.item(0, 0).text() == "Customer One"
+    assert view.receivables.item(view.receivables.rowCount() - 1, 0).text() == "TOTAL"
+    assert view.stock.rowCount() >= 2
+    out = tmp_path / "x.xlsx"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
+    view.btn_export.click()
+    assert out.exists() and any(k == "information" for k, _ in no_modals)

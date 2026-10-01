@@ -105,3 +105,10 @@ installer on a Windows runner and attaches them as a build artifact.
 **Update notifications:** publish a small `latest.json` (`{"version": "3.6.0", "url": "...", "notes": "..."}`)
 somewhere clients can read (web, or a shared folder) and set `UPDATE_MANIFEST_URL` in `.env`.
 Clients tell the user when a newer version exists; they never download or run anything automatically.
+
+## Reports
+
+Admin ▸ **Reports** shows the period summary (sales / purchases / returns / cash by method and by
+cashier), receivables and payables aging (0-30 / 31-60 / 61-90 / 90+ days) and stock valuation at
+cost, and exports everything to a formatted Excel workbook. The numbers come from
+`database/services/report_service.py` (admin-only) and `document_balance.py`.
