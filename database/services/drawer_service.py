@@ -128,6 +128,27 @@ class _LazyMap(dict):
         return super().get(k, default)
 
 
+def _party_map(s) -> "_LazyMap":
+    return _LazyMap(lambda ids: {
+        int(i): (n or f"Party#{i}")
+        for i, n in s.query(Party.id, Party.display_name).filter(Party.id.in_(ids)).all()})
+
+
+def _product_map(s) -> "_LazyMap":
+    """id -> (name, product_type)."""
+    return _LazyMap(lambda ids: {
+        int(i): (n or f"Product#{i}", t or "")
+        for i, n, t in s.query(Product.id, Product.name, Product.product_type)
+        .filter(Product.id.in_(ids)).all()})
+
+
+def _product_name_map(s) -> "_LazyMap":
+    """id -> name."""
+    return _LazyMap(lambda ids: {
+        int(i): (n or f"Product#{i}")
+        for i, n in s.query(Product.id, Product.name).filter(Product.id.in_(ids)).all()})
+
+
 class _FieldView:
     """Read-only view onto one element of the tuples in a _LazyMap."""
 
@@ -1319,11 +1340,15 @@ class DrawerService:
             sale_stmt = _range_filter(sale_stmt, Sale.created_at, start_date, end_date)
             pur_stmt = _range_filter(pur_stmt, Purchase.created_at, start_date, end_date)
 
-            sales = s.execute(sale_stmt).scalars().all()
-            purchases = s.execute(pur_stmt).scalars().all()
+            # Only the columns the totals need - not whole ORM rows.
+            sales = s.execute(sale_stmt.with_only_columns(
+                Sale.buyer_party_id, Sale.total_amount, Sale.walkin_name)).all()
+            purchases = s.execute(pur_stmt.with_only_columns(
+                Purchase.supplier_party_id, Purchase.total_amount, Purchase.walkin_name)).all()
 
-            parties = {int(p.id): (p.display_name or f"Party#{p.id}")
-                       for p in s.query(Party).all()}
+            parties = _party_map(s)
+            parties.prefetch([int(r.buyer_party_id or 0) for r in sales]
+                             + [int(r.supplier_party_id or 0) for r in purchases])
             by_party: Dict[int, Dict[str, Any]] = {}
 
             def _bucket(party_id: int, name: str):
@@ -1404,21 +1429,23 @@ class DrawerService:
 
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
-            products = {int(p.id): (p.name or f"Product#{p.id}", p.product_type or "")
-                        for p in s.query(Product).all()}
+            products = _product_map(s)
 
             # ---- product summaries, one batch query per document type ----
             sale_lines: Dict[int, List[int]] = {}
             if sale_ids:
-                for si in (s.query(SaleItem)
-                          .filter(SaleItem.sale_id.in_(sale_ids)).all()):
-                    sale_lines.setdefault(int(si.sale_id), []).append(int(si.product_id))
+                for sid_, pid_ in (s.query(SaleItem.sale_id, SaleItem.product_id)
+                                   .filter(SaleItem.sale_id.in_(sale_ids)).all()):
+                    sale_lines.setdefault(int(sid_), []).append(int(pid_))
 
             pur_lines: Dict[int, List[int]] = {}
             if pur_ids:
-                for pi in (s.query(PurchaseItem)
-                          .filter(PurchaseItem.purchase_id.in_(pur_ids)).all()):
-                    pur_lines.setdefault(int(pi.purchase_id), []).append(int(pi.product_id))
+                for pid_, prod_ in (s.query(PurchaseItem.purchase_id, PurchaseItem.product_id)
+                                    .filter(PurchaseItem.purchase_id.in_(pur_ids)).all()):
+                    pur_lines.setdefault(int(pid_), []).append(int(prod_))
+
+            products.prefetch([pid for ids_ in list(sale_lines.values()) + list(pur_lines.values())
+                               for pid in ids_])
 
             def _product_summary(product_ids: List[int]) -> str:
                 if not product_ids:
@@ -1546,34 +1573,40 @@ class DrawerService:
 
         with get_session() as s:
             if kind == "sale":
-                stmt = select(Sale).where(Sale.created_by_user_id == user_id)
+                stmt = select(Sale.id, Sale.buyer_party_id, Sale.sale_no, Sale.walkin_name,
+                              Sale.total_amount, Sale.created_by_user_id, Sale.created_at,
+                              Sale.status).where(Sale.created_by_user_id == user_id)
                 stmt = _range_filter(stmt, Sale.created_at, start_date, end_date)
-                docs = s.execute(stmt).scalars().all()
+                docs = s.execute(stmt).all()
             else:
-                stmt = select(Purchase).where(Purchase.created_by_user_id == user_id)
+                stmt = select(Purchase.id, Purchase.supplier_party_id, Purchase.purchase_no,
+                              Purchase.walkin_name, Purchase.total_amount,
+                              Purchase.created_by_user_id, Purchase.created_at,
+                              Purchase.status).where(Purchase.created_by_user_id == user_id)
                 stmt = _range_filter(stmt, Purchase.created_at, start_date, end_date)
-                docs = s.execute(stmt).scalars().all()
+                docs = s.execute(stmt).all()
 
             doc_ids = [int(d.id) for d in docs]
 
-            parties = {int(p.id): (p.display_name or f"Party#{p.id}")
-                       for p in s.query(Party).all()}
+            parties = _party_map(s)
+            parties.prefetch([int((d.buyer_party_id if kind == "sale" else d.supplier_party_id) or 0)
+                              for d in docs])
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
-            products = {int(p.id): (p.name or f"Product#{p.id}", p.product_type or "")
-                        for p in s.query(Product).all()}
+            products = _product_map(s)
 
             # ---- product summaries, one batch query for the whole set ----
             item_lines: Dict[int, List[int]] = {}
             if doc_ids:
                 if kind == "sale":
-                    for si in (s.query(SaleItem)
-                              .filter(SaleItem.sale_id.in_(doc_ids)).all()):
-                        item_lines.setdefault(int(si.sale_id), []).append(int(si.product_id))
+                    for sid_, pid_ in (s.query(SaleItem.sale_id, SaleItem.product_id)
+                                       .filter(SaleItem.sale_id.in_(doc_ids)).all()):
+                        item_lines.setdefault(int(sid_), []).append(int(pid_))
                 else:
-                    for pi in (s.query(PurchaseItem)
-                              .filter(PurchaseItem.purchase_id.in_(doc_ids)).all()):
-                        item_lines.setdefault(int(pi.purchase_id), []).append(int(pi.product_id))
+                    for pid_, prod_ in (s.query(PurchaseItem.purchase_id, PurchaseItem.product_id)
+                                        .filter(PurchaseItem.purchase_id.in_(doc_ids)).all()):
+                        item_lines.setdefault(int(pid_), []).append(int(prod_))
+            products.prefetch([pid for ids_ in item_lines.values() for pid in ids_])
 
             def _product_summary(product_ids: List[int]) -> str:
                 if not product_ids:
@@ -1707,12 +1740,14 @@ class DrawerService:
             if not sale_returns and not purchase_returns:
                 return []
 
-            parties = {int(p.id): (p.display_name or f"Party#{p.id}")
-                       for p in s.query(Party).all()}
+            parties = _party_map(s)
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
-            products = {int(p.id): (p.name or f"Product#{p.id}")
-                        for p in s.query(Product).all()}
+            products = _product_name_map(s)
+            parties.prefetch([int(r.party_id or 0) for r in sale_returns]
+                             + [int(r.party_id or 0) for r in purchase_returns])
+            products.prefetch([int(r.product_id or 0) for r in sale_returns]
+                              + [int(r.product_id or 0) for r in purchase_returns])
 
             def _qty_summary(product_name: str, type_snapshot: str,
                               qty_kg: float, qty_bags: int) -> str:
@@ -1829,26 +1864,24 @@ class DrawerService:
             if not sales and not purchases:
                 return []
 
-            parties = {int(p.id): (p.display_name or f"Party#{p.id}")
-                       for p in s.query(Party).all()}
+            parties = _party_map(s)
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
-            products = {int(p.id): (p.name or f"Product#{p.id}", p.product_type or "")
-                        for p in s.query(Product).all()}
+            products = _product_map(s)
 
             sale_ids = [int(x.id) for x in sales]
             pur_ids = [int(x.id) for x in purchases]
 
             sale_lines: Dict[int, List[int]] = {}
             if sale_ids:
-                for si in (s.query(SaleItem)
-                          .filter(SaleItem.sale_id.in_(sale_ids)).all()):
-                    sale_lines.setdefault(int(si.sale_id), []).append(int(si.product_id))
+                for sid_, pid_ in (s.query(SaleItem.sale_id, SaleItem.product_id)
+                                   .filter(SaleItem.sale_id.in_(sale_ids)).all()):
+                    sale_lines.setdefault(int(sid_), []).append(int(pid_))
             pur_lines: Dict[int, List[int]] = {}
             if pur_ids:
-                for pi in (s.query(PurchaseItem)
-                          .filter(PurchaseItem.purchase_id.in_(pur_ids)).all()):
-                    pur_lines.setdefault(int(pi.purchase_id), []).append(int(pi.product_id))
+                for pid_, prod_ in (s.query(PurchaseItem.purchase_id, PurchaseItem.product_id)
+                                    .filter(PurchaseItem.purchase_id.in_(pur_ids)).all()):
+                    pur_lines.setdefault(int(pid_), []).append(int(prod_))
 
             def _product_summary(product_ids: List[int]) -> str:
                 if not product_ids:
@@ -1913,6 +1946,11 @@ class DrawerService:
                 if settled > 0.005:
                     return "partial"
                 return "unpaid"
+
+            parties.prefetch([int(x.buyer_party_id or 0) for x in sales]
+                             + [int(x.supplier_party_id or 0) for x in purchases])
+            products.prefetch([pid for ids_ in list(sale_lines.values()) + list(pur_lines.values())
+                               for pid in ids_])
 
             rows: List[Dict[str, Any]] = []
             for sale in sales:
