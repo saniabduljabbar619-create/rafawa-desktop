@@ -8,6 +8,7 @@ from PySide2.QtWidgets import (
 from PySide2.QtCore import Qt
 from PySide2.QtGui import QColor
 
+from shared.uix.widgets.product_select import SELECT_PRODUCT as SELECT_PRODUCT_TEXT
 from shared.config.constants import LEDGER_CROPS, LEDGER_FERTILIZERS
 from shared.uix.layout.scrollable import make_scrollable_dialog
 from datetime import datetime
@@ -326,7 +327,7 @@ class DeliveryIntakeDialog(QDialog):
       total_amount = total_kg * rate_per_kg
     """
 
-    SELECT_PRODUCT = "Select Product"
+    SELECT_PRODUCT = SELECT_PRODUCT_TEXT
 
     MODE_EXACT = "Exact (Per-bag weights)"
     MODE_TOTAL = "Quick (Total KG)"

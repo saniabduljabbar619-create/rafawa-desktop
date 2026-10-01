@@ -23,6 +23,7 @@ from typing import Optional, Dict, Any
 from PySide2.QtWidgets import QComboBox, QInputDialog, QMessageBox
 
 from database.session import get_session
+from shared.uix.widgets.product_select import SELECT_PRODUCT, add_select_placeholder
 from database.models.product import Product
 
 NEW_PRODUCT = "__new__"
@@ -51,6 +52,7 @@ def populate_product_picker(combo: QComboBox, product_type: str) -> None:
                 combo.addItem(f"{p.name}  ({p.sku})", int(p.id))
     except Exception as e:
         QMessageBox.warning(combo, "Products", f"Could not load products:\n{e}")
+    add_select_placeholder(combo)       # never start on "+ New ..." or the first product
     combo.blockSignals(False)
 
 
@@ -65,6 +67,9 @@ def resolve_selected_product(combo: QComboBox, product_type: str,
     Returns None if the operator cancels the create prompt.
     """
     data = combo.currentData()
+    if data is None:
+        QMessageBox.warning(parent, "Product", f"{SELECT_PRODUCT} first.")
+        return None
     if data != NEW_PRODUCT:
         with get_session() as s:
             p = s.get(Product, int(data))

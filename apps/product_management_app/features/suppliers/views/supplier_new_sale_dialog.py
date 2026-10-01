@@ -27,6 +27,7 @@ from PySide2.QtWidgets import (
 )
 
 from database.services.sales_service import SaleService
+from shared.uix.widgets.product_select import add_select_placeholder
 from apps.product_management_app.app_state import state
 from apps.product_management_app.features.cashier.dialogs.sale_item_dialog import SaleItemDialog
 
@@ -186,6 +187,7 @@ class SupplierNewSaleDialog(QDialog):
                 f"\u2022 {NAIRA}{p['sale_rate']:,.2f}",
                 p,
             )
+        add_select_placeholder(self.product_cb)
 
     def _add_item(self):
         if not self.current_category:
