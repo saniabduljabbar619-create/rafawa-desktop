@@ -149,6 +149,16 @@ class AdvancePayDialog(QDialog):
 
             self._last_advance_id = int(advance_id or 0)
 
+            # The advance is saved. Lock the form NOW - before anything else can go wrong - so
+            # this entry can never be submitted a second time (a retry after a later error used
+            # to record the same advance again, doubling the Advance OUT/IN balance).
+            self.btn_record.setEnabled(False)
+            self.direction.setEnabled(False)
+            self.ledger.setEnabled(False)
+            self.amount.setEnabled(False)
+            self.notes.setEnabled(False)
+            self.btn_print_receipt.setEnabled(self._last_advance_id > 0)
+
             # -----------------------------------------
             # OFFER TO SETTLE AGAINST EXISTING BALANCE
             # -----------------------------------------
@@ -159,17 +169,15 @@ class AdvancePayDialog(QDialog):
             # here; otherwise the advance just sits unused while the
             # Purchase/Sale Payment dialogs keep showing the full,
             # un-netted debt with no way to reconcile it from this screen.
-            self._offer_settlement(direction_index)
-
-            # Recorded - lock the form so this exact entry can't be
-            # accidentally submitted twice, and hand over to the operator
-            # to print (or not) on their own terms.
-            self.btn_record.setEnabled(False)
-            self.direction.setEnabled(False)
-            self.ledger.setEnabled(False)
-            self.amount.setEnabled(False)
-            self.notes.setEnabled(False)
-            self.btn_print_receipt.setEnabled(self._last_advance_id > 0)
+            try:
+                self._offer_settlement(direction_index)
+            except Exception as e:
+                QMessageBox.warning(
+                    self, "Advance Recorded - Not Applied",
+                    f"The advance was recorded, but it could not be applied to the outstanding "
+                    f"balance:\n{e}\n\nIt is NOT recorded twice - it will be offered "
+                    f"again the next time you make a payment for this party.")
+                return
 
             QMessageBox.information(self, "Success", "Advance recorded successfully.")
 
