@@ -46,3 +46,18 @@ def test_existing_installation_is_upgraded_in_place(tmp_path):
         assert c.execute(sa.text("SELECT username FROM users")).scalar() == "keepme"
         assert abs(float(c.execute(sa.text("SELECT amount FROM sale_returns")).scalar()) + 905.12) < 0.005
     assert _alembic(url, "upgrade", "head").returncode == 0     # idempotent
+
+
+def test_plain_alembic_command_works_not_only_python_dash_m(tmp_path):
+    """On Windows users run `alembic upgrade head` (the .exe launcher), which - unlike
+    `python -m alembic` - does not put the project folder on sys.path."""
+    import shutil
+    exe = shutil.which("alembic", path=os.path.dirname(sys.executable)) or shutil.which("alembic")
+    if not exe:
+        import pytest
+        pytest.skip("alembic launcher not on PATH")
+    url = f"sqlite:///{tmp_path / 'exe.db'}"
+    env = dict(os.environ, DATABASE_URL=url)
+    r = subprocess.run([exe, "upgrade", "head"], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "audit_logs" in _tables(url)

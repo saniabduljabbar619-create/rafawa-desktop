@@ -1,9 +1,14 @@
 """Alembic environment: uses the application's own engine and model metadata."""
+import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
 
-import database.init_db  # noqa: F401  (imports the core models)
+# Works however alembic is launched (alembic.exe, python -m alembic, an IDE...).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import database.init_db  # noqa: F401,E402  (imports the core models)
 from database import models as _models  # noqa: F401
 from database.base import Base
 from database.engine import engine
