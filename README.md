@@ -33,7 +33,7 @@ and optionally `CLOUD_DATABASE_URL` / `CLOUD_DB_*` for the one-way cloud backup 
 ## Tests and checks
 
 ```bash
-pytest            # unit tests against a throwaway SQLite database
+pytest            # services + headless GUI smoke tests on a throwaway SQLite database
 ruff check .      # correctness lint (undefined names, redefinitions, syntax)
 ```
 

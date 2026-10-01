@@ -302,7 +302,7 @@ class PaymentService:
 
             rows = s.execute(text("""
                 SELECT
-                    p.created_at,
+                    p.created_at AS created_at,
                     p.entity_type,
                     p.entity_id,
                     p.direction,
@@ -319,7 +319,7 @@ class PaymentService:
                 UNION ALL
 
                 SELECT
-                    p.created_at,
+                    p.created_at AS created_at,
                     p.entity_type,
                     p.entity_id,
                     p.direction,
