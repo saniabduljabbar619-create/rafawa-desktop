@@ -183,7 +183,7 @@ def record_intake_db(p: dict) -> dict:
                 discount=0,
                 total_amount=line_total,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
             )
             s.add(purchase)
             s.flush()

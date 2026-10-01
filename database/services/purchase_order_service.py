@@ -194,7 +194,7 @@ class PurchaseOrderService:
 
             order.status = "in_transit"
             order.dispatched_by_user_id = marked_by_user_id
-            order.dispatched_at = datetime.utcnow()
+            order.dispatched_at = datetime.now()
             if driver_id:
                 order.driver_id = int(driver_id)
 
@@ -428,7 +428,7 @@ class PurchaseOrderService:
 
             order.status = "confirmed"
             order.confirmed_by_user_id = confirmed_by_user_id
-            order.confirmed_at = datetime.utcnow()
+            order.confirmed_at = datetime.now()
             order.final_total_amount = round(total, 2)
 
         return {"ok": True, "purchase_order_id": purchase_order_id, "status": "confirmed",
@@ -453,7 +453,7 @@ class PurchaseOrderService:
 
             order.status = "cancelled"
             order.cancelled_by_user_id = cancelled_by_user_id
-            order.cancelled_at = datetime.utcnow()
+            order.cancelled_at = datetime.now()
             if reason:
                 order.notes = ((order.notes or "") + f"\nCancelled: {reason}").strip()
 

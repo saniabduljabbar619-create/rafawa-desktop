@@ -380,7 +380,7 @@ class SaleService:
                 discount=discount,
                 total_amount=total_amount,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
             )
 
             s.add(sale)

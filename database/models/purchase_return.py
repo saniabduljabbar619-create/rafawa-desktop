@@ -38,7 +38,7 @@ class PurchaseReturn(Base):
     reason = Column(String(255), nullable=True)
 
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
 
     purchase = relationship("Purchase", lazy="joined", foreign_keys=[purchase_id])
     purchase_item = relationship("PurchaseItem", lazy="joined", foreign_keys=[purchase_item_id])

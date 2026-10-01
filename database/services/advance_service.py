@@ -49,7 +49,7 @@ class AdvanceService:
                 notes=str(notes or "Counter-advance deposit collection"),
                 status="completed",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(adv)
             s.flush()
@@ -89,7 +89,7 @@ class AdvanceService:
                 notes=str(notes or "Counter-advance payout collection"),
                 status="completed",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(adv)
             s.flush()
@@ -136,7 +136,7 @@ class AdvanceService:
                 method=str(method),
                 notes="Advance settlement",
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
             s.add(pay)
             s.commit()

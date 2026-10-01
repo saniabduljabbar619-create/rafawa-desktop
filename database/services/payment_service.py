@@ -50,7 +50,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)
@@ -90,7 +90,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)
@@ -130,7 +130,7 @@ class PaymentService:
                 method=str(method or ""),
                 notes=str(notes or ""),
                 created_by_user_id=created_by_user_id,
-                created_at=datetime.utcnow()
+                created_at=datetime.now()
             )
 
             s.add(pay)

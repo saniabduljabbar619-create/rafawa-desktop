@@ -275,7 +275,7 @@ class SalesOrderService:
 
             order.status = "in_transit"
             order.dispatched_by_user_id = dispatched_by_user_id
-            order.dispatched_at = datetime.utcnow()
+            order.dispatched_at = datetime.now()
             if driver_id:
                 order.driver_id = int(driver_id)
 
@@ -531,7 +531,7 @@ class SalesOrderService:
 
             order.status = "confirmed"
             order.confirmed_by_user_id = confirmed_by_user_id
-            order.confirmed_at = datetime.utcnow()
+            order.confirmed_at = datetime.now()
             order.final_total_amount = round(total, 2)
 
         return {"ok": True, "sales_order_id": sales_order_id, "status": "confirmed",
@@ -558,7 +558,7 @@ class SalesOrderService:
 
             order.status = "cancelled"
             order.cancelled_by_user_id = cancelled_by_user_id
-            order.cancelled_at = datetime.utcnow()
+            order.cancelled_at = datetime.now()
             if reason:
                 order.notes = ((order.notes or "") + f"\nCancelled: {reason}").strip()
 

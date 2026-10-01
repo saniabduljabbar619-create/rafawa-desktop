@@ -946,7 +946,7 @@ class PaymentDialog(QDialog):
         self._on_type_changed()
 
         from datetime import datetime as _dt
-        self._dt = _dt.utcnow().isoformat(timespec="seconds")
+        self._dt = _dt.now().isoformat(timespec="seconds")
 
         self.GenerateReceipt = True
 

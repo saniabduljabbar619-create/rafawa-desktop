@@ -144,7 +144,7 @@ class PurchaseService:
                 discount=0,
                 total_amount=0,
                 created_by_user_id=created_by_user_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(),
                 # Quick Purchase stamps these; a normal intake passes neither.
                 is_quick=1 if payload.get("is_quick") else 0,
                 linked_sale_id=payload.get("linked_sale_id"),

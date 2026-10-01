@@ -209,7 +209,7 @@ class OrderPaymentService:
                 return {"ok": True, "payment_id": payment_id, "already_voided": True}
 
             pay.status = "voided"
-            pay.voided_at = datetime.utcnow()
+            pay.voided_at = datetime.now()
             pay.voided_by_user_id = voided_by_user_id
             pay.void_reason = reason
 
