@@ -250,10 +250,10 @@ class SupplierProfileService:
                 select(Payment)
                 .where(Payment.party_id == int(supplier_party_id))
                 .where(Payment.entity_type.in_(("purchase", "sale")))
+                .where(Payment.status != "voided")
                 .order_by(desc(Payment.created_at))
             ).scalars().all()
             for p in rows:
-                is_out = (p.direction == "out")
                 out.append({
                     "id": int(p.id),
                     "direction": p.direction,
@@ -303,6 +303,7 @@ class SupplierProfileService:
                 .where(Payment.party_id == int(supplier_party_id))
                 .where(Payment.entity_type == "purchase")
                 .where(Payment.direction == "out")
+                .where(Payment.status != "voided")
             ).scalars().all()
             for pay in payments_out:
                 out.append({
@@ -335,6 +336,7 @@ class SupplierProfileService:
                 .where(Payment.party_id == int(supplier_party_id))
                 .where(Payment.entity_type == "sale")
                 .where(Payment.direction == "in")
+                .where(Payment.status != "voided")
             ).scalars().all()
             for pay in payments_in:
                 out.append({
@@ -415,6 +417,21 @@ class SupplierProfileService:
             ).scalars().all()
             received_total = round(sum(_f(pay.amount) for pay in payments), 2)
 
+            # Same formula as the ledger / dashboard: net of returns and
+            # discounts, and advance-allocated amounts count as settled too.
+            from database.models.advance_allocations import AdvanceAllocation
+            from database.services.party_ledger_service import PartyLedgerService
+            net_total = PartyLedgerService._net_totals_for_sales(s, [int(sale.id)]).get(int(sale.id), 0.0)
+            cash_received = round(sum(
+                _f(pay.amount) for pay in payments
+                if (pay.method or "").lower() != "advance"), 2)
+            alloc_total = _f(
+                s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                .filter(AdvanceAllocation.entity_type == "sale",
+                        AdvanceAllocation.entity_id == sale.id)
+                .scalar()
+            )
+
             creator = (s.get(User, int(sale.created_by_user_id))
                       if sale.created_by_user_id else None)
 
@@ -429,7 +446,8 @@ class SupplierProfileService:
                 "discount": _f(sale.discount),
                 "total_amount": _f(sale.total_amount),
                 "received_total": received_total,
-                "balance": round(_f(sale.total_amount) - received_total, 2),
+                "net_total": round(net_total, 2),
+                "balance": round(max(net_total - cash_received - alloc_total, 0.0), 2),
                 "lines": lines,
                 "payments": [{
                     "id": int(pay.id),
@@ -482,6 +500,22 @@ class SupplierProfileService:
             ).scalars().all()
             paid_total = round(sum(_f(pay.amount) for pay in payments), 2)
 
+            # Same formula as the ledger / dashboard: net of returns, plus
+            # price adjustments, with advance-allocated amounts counted as
+            # settled and refunds (direction "in") not counted as paid.
+            from database.models.advance_allocations import AdvanceAllocation
+            from database.services.party_ledger_service import PartyLedgerService
+            net_total = PartyLedgerService._net_totals_for_purchases(s, [int(p.id)]).get(int(p.id), 0.0)
+            cash_paid = round(sum(
+                _f(pay.amount) for pay in payments
+                if pay.direction == "out" and (pay.method or "").lower() != "advance"), 2)
+            alloc_total = _f(
+                s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                .filter(AdvanceAllocation.entity_type == "purchase",
+                        AdvanceAllocation.entity_id == p.id)
+                .scalar()
+            )
+
             from database.models.purchase_price_adjustment import PurchasePriceAdjustment
             adjustment_total = round(
                 _f(
@@ -511,7 +545,8 @@ class SupplierProfileService:
                 # the same way it's folded in everywhere else this
                 # session that computes a purchase's true, current total.
                 "adjustment_total": adjustment_total,
-                "balance": round(_f(p.total_amount) + adjustment_total - paid_total, 2),
+                "net_total": round(net_total, 2),
+                "balance": round(max(net_total - cash_paid - alloc_total, 0.0), 2),
                 "lines": lines,
                 "payments": [{
                     "id": int(pay.id),
@@ -740,12 +775,31 @@ class SupplierProfileService:
             if not p:
                 raise ValueError("Supplier not found.")
 
+            # Cross-cashier settlements mirrored from this party's payments
+            # must go too, or the drawer keeps an open debt for payments that
+            # no longer exist.
+            from database.models.cashier_settlement import CashierSettlement
+            party_payment_ids = [
+                pid for (pid,) in s.query(Payment.id)
+                .filter(Payment.party_id == party_id).all()
+            ]
+            if party_payment_ids:
+                s.query(CashierSettlement).filter(
+                    CashierSettlement.source_payment_id.in_(party_payment_ids)
+                ).delete(synchronize_session=False)
+
             # ---- Purchases this party supplied ----
             purchase_ids = [
                 pid for (pid,) in s.query(Purchase.id)
                 .filter(Purchase.supplier_party_id == party_id).all()
             ]
             if purchase_ids:
+                from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+                # Real FK to purchases.id - would block the purchase delete.
+                s.query(PurchasePriceAdjustment).filter(
+                    PurchasePriceAdjustment.purchase_id.in_(purchase_ids)
+                ).delete(synchronize_session=False)
+
                 # PurchaseReturn has a real, not-nullable FK to
                 # purchase_items.id (purchase_item_id) - must go before
                 # PurchaseItem itself, or the delete fails on that
@@ -778,6 +832,17 @@ class SupplierProfileService:
                 .filter(Sale.buyer_party_id == party_id).all()
             ]
             if sale_ids:
+                from database.models.sale_discount import SaleDiscount
+                # Real FK to sales.id - would block the sale delete.
+                s.query(SaleDiscount).filter(
+                    SaleDiscount.sale_id.in_(sale_ids)
+                ).delete(synchronize_session=False)
+                # A Quick Purchase made for one of these sales (possibly from
+                # a different supplier) keeps its row but loses the link.
+                s.query(Purchase).filter(
+                    Purchase.linked_sale_id.in_(sale_ids)
+                ).update({Purchase.linked_sale_id: None}, synchronize_session=False)
+
                 # Same reasoning as PurchaseReturn above - SaleReturn has a
                 # real, not-nullable FK to sale_items.id (sale_item_id).
                 removed["sale_returns"] += s.query(SaleReturn).filter(
