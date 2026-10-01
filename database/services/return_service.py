@@ -53,6 +53,39 @@ class ReturnService:
         
         return float(qty_kg), int(qty_bags)
 
+    @staticmethod
+    def _net_sale_rate(s, sale, item) -> float:
+        """
+        Effective per-unit (per bag for fertilizer, per kg for crops) price the
+        customer paid for this sale line: the list rate scaled by
+        (line_total - its share of discounts) / line_total.
+
+        Discount share = the line's own line_discount, plus any part of the
+        sale's header discount not already covered by line discounts, spread
+        across lines in proportion to their line_total. (The checkout screen
+        sets the header discount to the sum of the line discounts, so that
+        remainder is normally zero.) Post-sale manual discounts (SaleDiscount)
+        are deliberately NOT applied here - they are a separate settlement
+        step, not a change to what the goods sold for.
+        """
+        list_rate = float(item.unit_sale_rate or 0.0)
+        line_total = float(item.line_total or 0.0)
+        if list_rate <= 0 or line_total <= 0:
+            return list_rate
+
+        lines = s.query(SaleItem.line_total, SaleItem.line_discount).filter(
+            SaleItem.sale_id == sale.id).all()
+        sum_totals = sum(float(t or 0.0) for t, _ in lines)
+        sum_line_disc = sum(float(d or 0.0) for _, d in lines)
+
+        discount = float(item.line_discount or 0.0)
+        header_rest = max(float(sale.discount or 0.0) - sum_line_disc, 0.0)
+        if header_rest > 0 and sum_totals > 0:
+            discount += header_rest * (line_total / sum_totals)
+
+        net = max(line_total - discount, 0.0)
+        return round(list_rate * (net / line_total), 4)
+
     # ---------------------------------------------------------
     # CREATE RETURN
     # ---------------------------------------------------------
@@ -238,7 +271,11 @@ class ReturnService:
             if not is_fert and qty_kg > (sold_kg - returned_kg) + _KG_EPS:
                 raise ValueError("Return kg exceed remaining quantity.")
 
-            rate = float(item.unit_sale_rate or 0.0)
+            # Refund at the price the customer actually PAID, not the list
+            # rate: a sale line can carry its own discount (line_discount)
+            # and/or a header discount not attributed to any line. Refunding
+            # at the undiscounted rate handed back more than was ever paid.
+            rate = ReturnService._net_sale_rate(s, sale, item)
             amount = -(rate * (qty_bags if is_fert else qty_kg))
 
             r = SaleReturn(
