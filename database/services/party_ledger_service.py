@@ -8,6 +8,7 @@ from datetime import date, datetime as _dt
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.config.constants import WALKIN_PARTY_ID
 
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -1103,7 +1104,7 @@ class PartyLedgerService:
                     total_amount AS amount,
                     status
                 FROM sales
-                WHERE buyer_party_id = 11
+                WHERE buyer_party_id = :wid
                 AND walkin_name = :name
 
                 UNION ALL
@@ -1117,11 +1118,11 @@ class PartyLedgerService:
                     total_amount,
                     status
                 FROM purchases
-                WHERE supplier_party_id = 11
+                WHERE supplier_party_id = :wid
                 AND walkin_name = :name
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1147,7 +1148,7 @@ class PartyLedgerService:
                 FROM sale_items si
                 JOIN sales s ON s.id = si.sale_id
                 JOIN products p ON p.id = si.product_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
                 AND si.product_type_snapshot = 'crops'
 
@@ -1166,12 +1167,12 @@ class PartyLedgerService:
                 FROM purchase_items pi
                 JOIN purchases pch ON pch.id = pi.purchase_id
                 JOIN products p ON p.id = pi.product_id
-                WHERE pch.supplier_party_id = 11
+                WHERE pch.supplier_party_id = :wid
                 AND pch.walkin_name = :name
                 AND pi.product_type_snapshot = 'crops'
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1198,7 +1199,7 @@ class PartyLedgerService:
                 FROM sale_items si
                 JOIN sales s ON s.id = si.sale_id
                 JOIN products p ON p.id = si.product_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
                 AND si.product_type_snapshot = 'fertilizer'
 
@@ -1217,12 +1218,12 @@ class PartyLedgerService:
                 FROM purchase_items pi
                 JOIN purchases pch ON pch.id = pi.purchase_id
                 JOIN products p ON p.id = pi.product_id
-                WHERE pch.supplier_party_id = 11
+                WHERE pch.supplier_party_id = :wid
                 AND pch.walkin_name = :name
                 AND pi.product_type_snapshot = 'fertilizer'
 
                 ORDER BY dt DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
     
@@ -1249,7 +1250,7 @@ class PartyLedgerService:
                     'completed' AS status
                 FROM purchase_returns pr
                 JOIN purchases p ON p.id = pr.purchase_id
-                WHERE p.supplier_party_id = 11
+                WHERE p.supplier_party_id = :wid
                 AND p.walkin_name = :name
 
                 UNION ALL
@@ -1266,11 +1267,11 @@ class PartyLedgerService:
                     'completed'
                 FROM sale_returns sr
                 JOIN sales s ON s.id = sr.sale_id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
 
                 ORDER BY dt DESC
 
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]

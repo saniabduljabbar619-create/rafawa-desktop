@@ -9,6 +9,7 @@ from PySide2.QtWidgets import (
 from PySide2.QtCore import Qt
 
 from database.session import get_session
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.sale import Sale
 from database.models.payment import Payment
 from database.models.advance_allocations import AdvanceAllocation
@@ -24,7 +25,7 @@ class SalePaymentDialog(QDialog):
         super().__init__(parent)
         
         self.party = party
-        self.party_id = int(party.id) if party else 11
+        self.party_id = int(party.id) if party else WALKIN_PARTY_ID
         self.user_id = user_id
         self._last_payment_id: int = 0   # set after each recorded payment, used by Print Receipt
         self._selected_sale_id: int = 0  # set whenever a row is selected, so Print Receipt

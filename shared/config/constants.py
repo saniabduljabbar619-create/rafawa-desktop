@@ -2,6 +2,11 @@
 LEDGER_FERTILIZERS = "fertilizers"
 LEDGERS = [LEDGER_CROPS, LEDGER_FERTILIZERS]
 
+# Shared anonymous "walk-in" party (parties.id) that sales/purchases with no
+# registered counterparty are filed under. Single source of truth - never
+# hardcode the number elsewhere.
+WALKIN_PARTY_ID = 11
+
 
 def norm_ledger(x: str) -> str:
     s = (x or "").strip().lower()

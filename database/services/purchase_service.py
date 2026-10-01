@@ -5,6 +5,7 @@ from typing import Dict, List
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -123,7 +124,7 @@ class PurchaseService:
 
             walkin_name = (payload.get("walkin_name") or "").strip()
 
-            if supplier_party_id == 11:
+            if supplier_party_id == WALKIN_PARTY_ID:
                 walkin_name = walkin_name or "Unknown"
             else:
                 walkin_name = None
@@ -131,8 +132,8 @@ class PurchaseService:
             # A real purchase FROM this party is proof they ARE a supplier,
             # whoever they were before - a longtime customer bought fertilizer
             # from us once, and this is the moment that becomes true too.
-            # id 11 is the shared anonymous bucket, not a real counterparty.
-            if supplier_party_id != 11 and auto_flag_supplier:
+            # the walk-in id is the shared anonymous bucket, not a real counterparty.
+            if supplier_party_id != WALKIN_PARTY_ID and auto_flag_supplier:
                 PurchaseService._ensure_role(supplier_party_id, "is_supplier")
 
             purchase = Purchase(

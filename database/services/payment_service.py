@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 from sqlalchemy import func
 
 from database.session import get_session
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.payment import Payment
 
 
@@ -310,7 +311,7 @@ class PaymentService:
                 JOIN sales s
                     ON p.entity_type = 'sale'
                     AND p.entity_id = s.id
-                WHERE s.buyer_party_id = 11
+                WHERE s.buyer_party_id = :wid
                 AND s.walkin_name = :name
 
                 UNION ALL
@@ -327,11 +328,11 @@ class PaymentService:
                 JOIN purchases pu
                     ON p.entity_type = 'purchase'
                     AND p.entity_id = pu.id
-                WHERE pu.supplier_party_id = 11
+                WHERE pu.supplier_party_id = :wid
                 AND pu.walkin_name = :name
 
                 ORDER BY created_at DESC
-            """), {"name": walkin_name}).fetchall()
+            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
         return [dict(r._mapping) for r in rows]
 

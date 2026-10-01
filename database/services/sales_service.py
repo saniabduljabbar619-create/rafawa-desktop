@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, case
 
 from database.session import get_session
+from shared.config.constants import WALKIN_PARTY_ID
 from database.models.product import Product
 from database.models.stock_movement import StockMovement, STOCK_IN_TYPES, STOCK_OUT_TYPES
 from database.models.sale import Sale
@@ -337,13 +338,13 @@ class SaleService:
 
             # Global walk-in party
             if buyer_party_id <= 0:
-                buyer_party_id = 11
+                buyer_party_id = WALKIN_PARTY_ID
 
             # A real sale to this party is proof they ARE a customer, whoever
             # they were before - a supplier bought from for months can be sold
             # to today, and this is the moment that becomes true. id 11 is the
             # shared anonymous bucket, not a real counterparty, so it's exempt.
-            if buyer_party_id != 11:
+            if buyer_party_id != WALKIN_PARTY_ID:
                 SaleService._ensure_role(buyer_party_id, "is_customer")
 
             product_ids = [int(it["product_id"]) for it in items]
@@ -373,7 +374,7 @@ class SaleService:
 
             sale = Sale(
                 buyer_party_id=buyer_party_id,
-                walkin_name=walkin_name if buyer_party_id == 11 else None,
+                walkin_name=walkin_name if buyer_party_id == WALKIN_PARTY_ID else None,
                 status="completed",
                 notes=note,
                 subtotal=subtotal,
