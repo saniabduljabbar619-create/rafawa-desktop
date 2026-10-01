@@ -216,6 +216,13 @@ class PurchaseService:
         if "supplier_party_id" not in payload:
             raise ValueError("supplier_party_id required")
 
+        try:
+            supplier_ok = int(payload.get("supplier_party_id") or 0) > 0
+        except (TypeError, ValueError):
+            supplier_ok = False
+        if not supplier_ok:
+            raise ValueError("supplier_party_id must be a valid party id")
+
         if "created_by_user_id" not in payload:
             raise ValueError("created_by_user_id required")
 

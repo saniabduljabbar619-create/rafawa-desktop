@@ -232,11 +232,12 @@ class DrawerService:
                                     r.walkin_name or "",
                                     r.created_at)
                         for r in s.query(Purchase).all()}
+            all_advances = s.query(Advance).all()   # loaded once, used twice below
             adv_meta = {int(r.id): (int(r.created_by_user_id or 0),
                                     int(r.party_id or 0),
                                     f"ADV-{r.id}", "",
                                     r.created_at)
-                        for r in s.query(Advance).all()}
+                        for r in all_advances}
 
             # An advance's OWN direction (received/given) - NOT the settling
             # Payment's direction, which follows an inverted bookkeeping
@@ -246,7 +247,7 @@ class DrawerService:
             # advance_in and advance_out the moment a real settlement happens
             # - this is what needs to drive the bucket everywhere below.
             adv_direction = {int(r.id): str(r.direction or "")
-                             for r in s.query(Advance).all()}
+                             for r in all_advances}
 
             def _creator_party_no(etype: str, eid: int):
                 m = {"sale": sale_meta, "purchase": pur_meta, "advance": adv_meta}.get(etype, {})
@@ -1207,9 +1208,6 @@ class DrawerService:
 
             parties = {int(p.id): (p.display_name or f"Party#{p.id}")
                        for p in s.query(Party).all()}
-            users = {int(u.id): (u.username or f"User#{u.id}")
-                     for u in s.query(User).all()}
-
             by_party: Dict[int, Dict[str, Any]] = {}
 
             def _bucket(party_id: int, name: str):

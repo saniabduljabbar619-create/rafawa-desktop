@@ -225,6 +225,16 @@ class CustomerProfileView(QWidget):
         if not ref_str:
             return "System"
 
+        # One lookup per reference per refresh: the activity/crops/fertilizer/
+        # returns tabs (and the Excel export) used to issue 1-2 queries for
+        # EVERY row. The cache is cleared in refresh_all().
+        cache = self.__dict__.setdefault("_operator_cache", {})
+        if ref_str in cache:
+            return cache[ref_str]
+        cache[ref_str] = result = self._lookup_operator(ref_str)
+        return result
+
+    def _lookup_operator(self, ref_str: str) -> str:
         match = re.match(r"^([A-Z\-]+)-(\d+)$", ref_str)
         if not match:
             return "System"
@@ -1268,6 +1278,7 @@ class CustomerProfileView(QWidget):
         self.sum_adv_out.setText(f"{adv_out:,.2f}")
 
     def refresh_all(self):
+        self._operator_cache = {}
         self.refresh_summaries()
         self.load_activity_table()
         self.load_crops_table()
@@ -1386,202 +1397,3 @@ class CustomerProfileView(QWidget):
     def _extract_id_from_ref(self, ref):
         m = re.search(r"(\d+)$", str(ref))
         return int(m.group(1)) if m else 0
-
-
-# -----------------------------------------------------------------
-# SUPPORTING DIALOGS & INTAKES TAB (RETAINED)
-# -----------------------------------------------------------------
-class AdvanceDialog(QDialog):
-    def __init__(self, parent=None, *, advance_type: str = "money"):
-        super().__init__(parent)
-        self.setWindowTitle("Record Advance")
-        self.setMinimumWidth(420)
-
-        root = QVBoxLayout(self)
-        form = QFormLayout()
-        root.addLayout(form)
-
-        self.cbo_type = QComboBox()
-        self.cbo_type.addItems(["money", "crops", "fertilizer"])
-        self.cbo_type.setCurrentText(str(advance_type or "money"))
-        form.addRow("Advance Type:", self.cbo_type)
-
-        self.cbo_money_ledger = QComboBox()
-        self.cbo_money_ledger.addItems(["crops", "fertilizers"])
-        self.cbo_money_ledger.setCurrentText("crops")
-        form.addRow("Money Ledger:", self.cbo_money_ledger)
-
-        dir_row = QWidget()
-        dir_lay = QHBoxLayout(dir_row)
-        dir_lay.setContentsMargins(0, 0, 0, 0)
-        self.rb_received = QRadioButton("Receive")
-        self.rb_given = QRadioButton("Give")
-        self.rb_received.setChecked(True)
-        dir_lay.addWidget(self.rb_received)
-        dir_lay.addWidget(self.rb_given)
-        dir_lay.addStretch(1)
-        form.addRow("Direction:", dir_row)
-
-        self.cbo_product = QComboBox()
-        self.cbo_product.setEnabled(False)
-        form.addRow("Product:", self.cbo_product)
-
-        self.ed_bags = QLineEdit()
-        self.ed_bags.setPlaceholderText("e.g. 10")
-        self.ed_bags.setEnabled(False)
-        form.addRow("Bags:", self.ed_bags)
-
-        self.ed_total_kg = QLineEdit()
-        self.ed_total_kg.setPlaceholderText("e.g. 500")
-        self.ed_total_kg.setEnabled(False)
-        form.addRow("Total KG:", self.ed_total_kg)
-
-        self.ed_unit_rate = QLineEdit()
-        self.ed_unit_rate.setPlaceholderText("optional: price per kg")
-        self.ed_unit_rate.setEnabled(False)
-        form.addRow("Unit Rate:", self.ed_unit_rate)
-
-        self.ed_amount = QLineEdit()
-        self.ed_amount.setPlaceholderText("money amount or value estimate")
-        form.addRow("Amount:", self.ed_amount)
-
-        self.ed_note = QLineEdit()
-        self.ed_note.setPlaceholderText("Optional note")
-        form.addRow("Note:", self.ed_note)
-
-        btns = QHBoxLayout()
-        root.addLayout(btns)
-        btns.addStretch(1)
-
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_save = QPushButton("Save")
-        self.btn_save.setDefault(True)
-        btns.addWidget(self.btn_cancel)
-        btns.addWidget(self.btn_save)
-
-        self.btn_cancel.clicked.connect(self.reject)
-        self.btn_save.clicked.connect(self.accept)
-
-        self.cbo_type.currentTextChanged.connect(self._sync_mode)
-        self._sync_mode(self.cbo_type.currentText())
-
-    def set_products(self, products: list):
-        self.cbo_product.clear()
-        if not products:
-            self.cbo_product.addItem("No products available", 0)
-            self.cbo_product.setEnabled(False)
-            return
-
-        self.cbo_product.setEnabled(True)
-        for p in products:
-            self.cbo_product.addItem(p.get("name", f"Product {p.get('id')}"), int(p.get("id")))
-
-        if self.cbo_product.count() > 0:
-            self.cbo_product.setCurrentIndex(0)
-
-    def _sync_mode(self, t: str):
-        t = (t or "money").strip().lower()
-        is_money = (t == "money")
-
-        self.cbo_money_ledger.setEnabled(is_money)
-        self.cbo_money_ledger.setVisible(is_money)
-
-        self.cbo_product.setEnabled(not is_money)
-        self.ed_bags.setEnabled(not is_money)
-        self.ed_total_kg.setEnabled(not is_money)
-        self.ed_unit_rate.setEnabled(not is_money)
-
-        if is_money:
-            self.ed_bags.setText("")
-            self.ed_total_kg.setText("")
-            self.ed_unit_rate.setText("")
-            self.ed_amount.setPlaceholderText("money amount")
-        else:
-            self.ed_amount.setPlaceholderText("optional: value estimate")
-
-    def payload(self) -> dict:
-        adv_type = self.cbo_type.currentText().strip().lower()
-        direction = "received" if self.rb_received.isChecked() else "given"
-
-        def fnum(x):
-            try: return float(str(x or "").replace(",", "").strip() or 0)
-            except Exception: return 0.0
-
-        ledger = None
-        if adv_type == "money":
-            ledger = (self.cbo_money_ledger.currentText() or "").strip().lower()
-            if ledger == "fertilizer": ledger = "fertilizers"
-            if ledger == "crop": ledger = "crops"
-            amount = fnum(self.ed_amount.text())
-            if amount <= 0: raise ValueError("Money advance requires a valid amount.")
-            product_id = None
-        else:
-            product_id = int(self.cbo_product.currentData() or 0)
-            if product_id <= 0: raise ValueError("Please select a product.")
-            total_kg = fnum(self.ed_total_kg.text())
-            if total_kg <= 0: raise ValueError("Total KG is required.")
-
-        return {
-            "advance_type": adv_type, "direction": direction, "ledger": ledger,
-            "amount": fnum(self.ed_amount.text()), "qty_bags": fnum(self.ed_bags.text()),
-            "total_weight_kg": fnum(self.ed_total_kg.text()), "unit_rate": fnum(self.ed_unit_rate.text()),
-            "notes": (self.ed_note.text() or "").strip(), "product_id": product_id,
-        }
-
-
-class CustomerIntakesTab(QWidget):
-    def __init__(self, customer_id: int):
-        super().__init__()
-        self.customer_id = int(customer_id)
-        self.session_user_id = state.require_user_id()
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
-
-        top = QHBoxLayout()
-        root.addLayout(top)
-
-        top.addWidget(QLabel("Search:"))
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Product / SKU / Source / Ref…")
-        top.addWidget(self.search, 1)
-
-        self.btn_refresh = QPushButton("Refresh")
-        top.addWidget(self.btn_refresh)
-
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels([
-            "DT", "Ref", "Product", "SKU", "Qty Added", "Unit Price", "Source", "Processed By"
-        ])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        root.addWidget(self.table, 1)
-
-        self.btn_refresh.clicked.connect(self.refresh)
-        self.search.textChanged.connect(self.refresh)
-        self.refresh()
-
-    def refresh(self):
-        q = self.search.text().strip().lower()
-        rows = state.list_customer_intakes_db(
-            self.customer_id, q=q, session_user_id=self.session_user_id
-        )
-
-        self.table.setRowCount(0)
-        for r in rows:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-
-            vals = [
-                r["dt"], r["ref"], r["product"], r["sku"],
-                f"{float(r['qty_added']):,.2f}", f"{float(r['unit_price']):,.2f}",
-                r["source"], r["processed_by"]
-            ]
-
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(str(v))
-                if c in (4, 5):
-                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.table.setItem(row, c, it)

@@ -308,20 +308,7 @@ class CustomerFormDialog(QDialog):
 
 
 # --- Delivery/Intake Activity Dialog (per-bag weights) ---
-from PySide2.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QDoubleSpinBox,
-    QSpinBox, QPushButton, QTableWidget, QTableWidgetItem, QMessageBox
-)
-from PySide2.QtCore import Qt
-from datetime import datetime
-
-
-from PySide2.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QDoubleSpinBox,
-    QSpinBox, QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QComboBox
-)
-from PySide2.QtCore import Qt
-from datetime import datetime
+from PySide2.QtWidgets import QTableWidget, QTableWidgetItem
 
 
 class DeliveryIntakeDialog(QDialog):
@@ -865,11 +852,7 @@ class DeliveryIntakeDialog(QDialog):
 
 
 
-from PySide2.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QLineEdit, QMessageBox,
-    QFormLayout
-)
+from PySide2.QtWidgets import QFormLayout
 
 class PaymentDialog(QDialog):
     def __init__(self, parent, ledger: str, due: float):

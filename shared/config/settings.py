@@ -2,9 +2,34 @@
 import os
 from dataclasses import dataclass
 
-def _load_dotenv(path: str = ".env") -> None:
+def _dotenv_candidates():
+    """
+    Where to look for .env, in priority order. The old code only checked the
+    current working directory, so a packaged exe started from a shortcut or
+    another folder silently ran with no database settings at all.
+    """
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(here))
+    dirs = [os.getcwd()]
+    if getattr(sys, "frozen", False):            # PyInstaller build
+        dirs.append(os.path.dirname(sys.executable))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            dirs.append(meipass)
+    dirs.append(project_root)
+    seen = set()
+    for d in dirs:
+        p = os.path.join(d, ".env")
+        if p not in seen:
+            seen.add(p)
+            yield p
+
+
+def _load_dotenv(path: str = "") -> None:
     # minimal .env loader (avoids extra dependency)
-    if not os.path.exists(path):
+    path = path or next((p for p in _dotenv_candidates() if os.path.exists(p)), "")
+    if not path:
         return
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
