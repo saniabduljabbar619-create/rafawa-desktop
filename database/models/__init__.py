@@ -40,3 +40,4 @@ from .sales_order_item import SalesOrderItem        # must be imported here so S
                                                      # relationship("SalesOrderItem") string
                                                      # reference at first-query time
 from .weigh_ticket import WeighTicket, WeighTicketLine, WeighRound   # weigher workspace: delivery weighing tickets
+from .expense import Expense                          # Debt Center: business expenses
