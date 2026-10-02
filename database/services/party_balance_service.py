@@ -207,6 +207,14 @@ class PartyBalanceService:
                 elif et == "sale" and eid in sale_map:
                     sale_map[eid]["received"] += amt
 
+            # Offsets (a purchase set against this party's sale, or the reverse) are
+            # settlements too, with no Payment row.
+            from database.services.document_balance import offset_totals
+            for eid, amt in offset_totals(s, "purchase", list(purchase_map)).items():
+                purchase_map[eid]["paid"] += amt
+            for eid, amt in offset_totals(s, "sale", list(sale_map)).items():
+                sale_map[eid]["received"] += amt
+
             # ======================================================
             # PAYMENTS (single query)
             # ======================================================

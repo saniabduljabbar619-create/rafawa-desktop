@@ -8,7 +8,7 @@ from datetime import date, datetime as _dt
 from sqlalchemy import func
 
 from database.session import get_session
-from database.services.document_balance import document_balances
+from database.services.document_balance import document_balances, offset_totals
 from shared.config.constants import WALKIN_PARTY_ID
 
 from database.models.purchase import Purchase
@@ -275,6 +275,8 @@ class PartyLedgerService:
                     .group_by(AdvanceAllocation.entity_id).all()
                 ):
                     pur_alloc[int(pid)] = float(amt or 0)
+                for pid, amt in offset_totals(s, "purchase", purchase_ids).items():
+                    pur_alloc[pid] = pur_alloc.get(pid, 0.0) + amt          # offsets settle like advances
 
             pur_net_totals: Dict[int, float] = {}
             pur_creation_dt: Dict[int, object] = {}
@@ -372,6 +374,8 @@ class PartyLedgerService:
                     .group_by(AdvanceAllocation.entity_id).all()
                 ):
                     sale_alloc[int(sid)] = float(amt or 0)
+                for sid, amt in offset_totals(s, "sale", sale_ids).items():
+                    sale_alloc[sid] = sale_alloc.get(sid, 0.0) + amt
 
                 for sid, amt in (
                     s.query(SaleDiscount.sale_id, func.coalesce(func.sum(SaleDiscount.amount), 0))

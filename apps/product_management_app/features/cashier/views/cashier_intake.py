@@ -11,7 +11,7 @@ from apps.product_management_app.app_state import state
 from apps.product_management_app.features.cashier.dialogs.purchase_payment_prompt_dialog import PurchasePaymentPromptDialog
 
 from apps.product_management_app.features.receipts_v2 import (
-    print_full_then_optional_delivery, PURCHASE,
+    print_full_then_optional_delivery, PURCHASE, SALE,
 )
 from datetime import datetime
 from shared.uix.layout.scrollable import make_scrollable_page
@@ -31,6 +31,10 @@ class CashierIntakeView(QWidget):
         header.addWidget(title)
         header.addStretch(1)
         
+        self.btn_swap = QPushButton("Swap / Exchange")
+        self.btn_swap.setToolTip("A customer brings goods and takes goods in the same visit")
+        header.addWidget(self.btn_swap)
+
         self.btn_new = QPushButton("New Intake")
         self.btn_new.setObjectName("PrimaryButton")
         self.btn_new.setAutoDefault(False)   # <-- here, after creation
@@ -65,6 +69,7 @@ class CashierIntakeView(QWidget):
 
         # Wiring
         self.btn_new.clicked.connect(self._new_intake)
+        self.btn_swap.clicked.connect(self._swap)
         self.btn_refresh.clicked.connect(self.refresh)
         self.search.textChanged.connect(self.refresh)
 
@@ -156,15 +161,25 @@ class CashierIntakeView(QWidget):
                 party_name=(party.display_name if party else ""),
             )
 
-            from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
-
-            pay = PurchasePaymentDialog(
-                party=party,
-                user_id=state.require_user_id(),
-                parent=self,
-                print_slip=False
+            # If they owe us for unpaid sales, offer to settle those with these goods.
+            from apps.product_management_app.features.profiling.dialogs.offset_choice_dialog import (
+                prompt_and_apply_offset,
             )
-            pay.exec_()
+            still_owed = prompt_and_apply_offset(
+                self, party_id=int(party_id), purchase_id=purchase_id,
+                party_name=(party.display_name if party else ""),
+            )
+
+            if still_owed > 0.005:
+                from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+
+                pay = PurchasePaymentDialog(
+                    party=party,
+                    user_id=state.require_user_id(),
+                    parent=self,
+                    print_slip=False
+                )
+                pay.exec_()
 
         except Exception as e:
             QMessageBox.critical(
@@ -187,6 +202,37 @@ class CashierIntakeView(QWidget):
                 "Receipt Error",
                 f"Intake recorded but receipt printing failed:\n{e}"
             )
+        self.refresh()
+
+    def _swap(self):
+        from PySide2.QtWidgets import QMessageBox
+        from apps.product_management_app.features.cashier.dialogs.party_search_picker_dialog import (
+            PartySearchPickerDialog,
+        )
+        from apps.product_management_app.features.cashier.dialogs.swap_dialog import SwapDialog
+
+        picker = PartySearchPickerDialog(role_flag="any", title="Swap with which customer or supplier?", parent=self)
+        if picker.exec_() != picker.Accepted or not picker.selected_party_id:
+            return
+        dlg = SwapDialog(self, party_id=int(picker.selected_party_id), party_name=picker.selected_party_name or "")
+        if dlg.exec_() != dlg.Accepted or not dlg.result_data:
+            return
+        r = dlg.result_data
+        if r["we_owe_him"] > 0:
+            tail = f"We still owe him {r['we_owe_him']:,.2f} (pay it from the Debt Center or Payments)."
+        elif r["he_owes_us"] > 0:
+            tail = f"He still owes us {r['he_owes_us']:,.2f} (collect it from the Debt Center or Payments)."
+        else:
+            tail = "Even - nothing left to pay."
+        QMessageBox.information(
+            self, "Swap recorded",
+            f"He brought {r['purchase_total']:,.2f} (PUR-{r['purchase_id']}) and took "
+            f"{r['sale_total']:,.2f} (SAL-{r['sale_id']}).\n{r['offset']:,.2f} was set off.\n\n{tail}")
+        try:
+            print_full_then_optional_delivery(self, PURCHASE, int(r["purchase_id"]))     # goods he brought
+            print_full_then_optional_delivery(self, SALE, int(r["sale_id"]))            # goods he took
+        except Exception as e:
+            QMessageBox.warning(self, "Receipt Error", f"Swap recorded but the receipt failed:\n{e}")
         self.refresh()
 
     def refresh(self):

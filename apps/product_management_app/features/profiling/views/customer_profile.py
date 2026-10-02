@@ -1425,7 +1425,13 @@ class CustomerProfileView(QWidget):
                     party_name=source_party_name,
                 )
 
-            if remaining > 0:
+            # Offer to settle their unpaid sales with these goods (never automatic).
+            if purchase_id > 0 and remaining > 0:
+                from apps.product_management_app.features.profiling.dialogs.offset_choice_dialog import prompt_and_apply_offset
+                remaining = prompt_and_apply_offset(self, party_id=source_party_id, purchase_id=purchase_id,
+                                                    party_name=source_party_name)
+
+            if remaining > 0.005:
                 from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
                 pay = PurchasePaymentDialog(party=source_party, user_id=self.session_user_id, parent=self, print_slip=False)
                 pay.exec_()

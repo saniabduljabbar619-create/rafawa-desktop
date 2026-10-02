@@ -41,3 +41,4 @@ from .sales_order_item import SalesOrderItem        # must be imported here so S
                                                      # reference at first-query time
 from .weigh_ticket import WeighTicket, WeighTicketLine, WeighRound   # weigher workspace: delivery weighing tickets
 from .expense import Expense                          # Debt Center: business expenses
+from .document_offset import DocumentOffset           # purchase <-> sale offsets (swap / settle with goods)

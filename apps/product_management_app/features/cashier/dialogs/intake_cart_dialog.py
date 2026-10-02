@@ -1,6 +1,8 @@
 # apps/product_management_app/features/cashier/dialogs/intake_cart_dialog.py
 from __future__ import annotations
 
+from typing import Optional
+
 from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView
@@ -8,6 +10,59 @@ from PySide2.QtWidgets import (
 from PySide2.QtCore import Qt
 
 from apps.product_management_app.app_state import state
+
+
+def capture_intake_line(parent, intake_type: str) -> Optional[dict]:
+    """
+    Ask for ONE intake line (product, bags, kg, price) with the standard intake dialog.
+    Returns it shaped for PurchaseService.record()'s "items", or None when cancelled/invalid.
+    Shared by the intake cart and the goods-swap dialog.
+    """
+    from shared.uix.widgets.dialogs import DeliveryIntakeDialog
+
+    intake_type = "fertilizer" if str(intake_type).strip().lower() == "fertilizer" else "crops"
+    title = "Crops Intake" if intake_type == "crops" else "Fertilizer Intake"
+    dlg = DeliveryIntakeDialog(parent, title=title, initial_bags=1)
+    dlg.ledger_in.setCurrentText("Crops" if intake_type == "crops" else "Fertilizers")
+
+    if dlg.exec_() != dlg.Accepted:
+        return None
+
+    payload = dlg.payload()
+
+    bags = int(payload.get("qty_bags") or payload.get("bags") or 0)
+    if bags <= 0:
+        QMessageBox.warning(parent, "Item", "Bags must be > 0.")
+        return None
+
+    product = str(payload.get("product") or "").strip()
+    if not product:
+        QMessageBox.warning(parent, "Item", "Product is required.")
+        return None
+
+    rate = float(payload.get("rate_per_kg") or 0.0)
+    total_kg = float(payload.get("total_kg") or 0.0)
+
+    if intake_type == "fertilizer":
+        if rate <= 0:
+            QMessageBox.warning(parent, "Item", "Price Per Bag must be > 0.")
+            return None
+        total_kg = 0.0
+    else:
+        if total_kg <= 0 or rate <= 0:
+            QMessageBox.warning(parent, "Item", "Total KG and Price Per Kg must be > 0.")
+            return None
+
+    sku = str(payload.get("sku") or "").strip() or state.make_intake_sku(intake_type, product)
+
+    return {
+        "product_name": product,
+        "sku": sku,
+        "product_type": intake_type,
+        "qty_bags": bags,
+        "total_weight_kg": total_kg,
+        "unit_cost": rate,
+    }
 
 
 class IntakeCartDialog(QDialog):
@@ -92,53 +147,10 @@ class IntakeCartDialog(QDialog):
         return list(self._items)
 
     def _add_item(self):
-        from shared.uix.widgets.dialogs import DeliveryIntakeDialog
-
-        title = "Crops Intake" if self.intake_type == "crops" else "Fertilizer Intake"
-        dlg = DeliveryIntakeDialog(self, title=title, initial_bags=1)
-        dlg.ledger_in.setCurrentText("Crops" if self.intake_type == "crops" else "Fertilizers")
-
-        if dlg.exec_() != dlg.Accepted:
-            return
-
-        payload = dlg.payload()
-
-        bags = int(payload.get("qty_bags") or payload.get("bags") or 0)
-        if bags <= 0:
-            QMessageBox.warning(self, "Item", "Bags must be > 0.")
-            return
-
-        product = str(payload.get("product") or "").strip()
-        if not product:
-            QMessageBox.warning(self, "Item", "Product is required.")
-            return
-
-        rate = float(payload.get("rate_per_kg") or 0.0)
-        total_kg = float(payload.get("total_kg") or 0.0)
-
-        if self.intake_type == "fertilizer":
-            if rate <= 0:
-                QMessageBox.warning(self, "Item", "Price Per Bag must be > 0.")
-                return
-            total_kg = 0.0
-        else:
-            if total_kg <= 0 or rate <= 0:
-                QMessageBox.warning(self, "Item", "Total KG and Price Per Kg must be > 0.")
-                return
-
-        sku = str(payload.get("sku") or "").strip() or state.make_intake_sku(
-            "fertilizer" if self.intake_type == "fertilizer" else "crops", product
-        )
-
-        self._items.append({
-            "product_name": product,
-            "sku": sku,
-            "product_type": self.intake_type,
-            "qty_bags": bags,
-            "total_weight_kg": total_kg,
-            "unit_cost": rate,
-        })
-        self._refresh_table()
+        line = capture_intake_line(self, self.intake_type)
+        if line is not None:
+            self._items.append(line)
+            self._refresh_table()
 
     def _remove_selected(self):
         row = self.table.currentRow()

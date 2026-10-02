@@ -11,7 +11,7 @@ document's total / paid / balance / status now goes through here.
     net_total  = gross - returns - discounts (+ price adjustments for purchases), never < 0
     cash_paid  = real money in (sale) / out (purchase), excluding advance-funded
                  settlements and voided payments
-    settled    = cash_paid + advance allocations
+    settled    = cash_paid + advance allocations + offsets (purchase set against sale)
     balance    = max(net_total - settled, 0)
 
 A voided document owes nothing (net_total 0) and has status "voided".
@@ -24,6 +24,7 @@ from typing import Dict, Iterable, Optional
 from sqlalchemy import func
 
 from database.models.advance_allocations import AdvanceAllocation
+from database.models.document_offset import DocumentOffset
 from database.models.payment import Payment
 from database.models.purchase import Purchase
 from database.models.purchase_price_adjustment import PurchasePriceAdjustment
@@ -49,6 +50,7 @@ class DocBalance:
     net_total: float
     cash_paid: float
     advance_applied: float
+    offset_applied: float            # set against the same party's opposite documents (no cash)
     settled: float
     balance: float
     status: str                      # "paid" | "partial" | "unpaid" | "voided"
@@ -89,6 +91,24 @@ def _sum_by(s, id_col, amount_col, ids, *extra_filters, absolute=False) -> Dict[
     return out
 
 
+def offset_totals(s, kind: str, ids: Iterable[int]) -> Dict[int, float]:
+    """
+    Active offsets per document. An offset whose counterpart document has been voided no longer
+    counts (the other half of the deal never happened), so it releases itself.
+    """
+    mine, theirs, other = ((DocumentOffset.sale_id, DocumentOffset.purchase_id, Purchase) if kind == "sale"
+                           else (DocumentOffset.purchase_id, DocumentOffset.sale_id, Sale))
+    out: Dict[int, float] = {}
+    for chunk in _chunks(ids):
+        q = (s.query(mine, func.coalesce(func.sum(DocumentOffset.amount), 0))
+             .join(other, other.id == theirs)
+             .filter(mine.in_(chunk), DocumentOffset.status == "active", other.status != "voided")
+             .group_by(mine))
+        for eid, amt in q.all():
+            out[int(eid)] = _f(amt)
+    return out
+
+
 def document_balances(s, kind: str, ids: Iterable[int],
                       payments_by_user_id: Optional[int] = None) -> Dict[int, DocBalance]:
     """
@@ -125,6 +145,8 @@ def document_balances(s, kind: str, ids: Iterable[int],
     alloc = _sum_by(s, AdvanceAllocation.entity_id, AdvanceAllocation.amount, ids,
                     AdvanceAllocation.entity_type == kind)
 
+    offsets = offset_totals(s, kind, ids)
+
     if kind == "sale":
         returned = _sum_by(s, SaleReturn.sale_id, SaleReturn.amount, ids, absolute=True)
         discounts = _sum_by(s, SaleDiscount.sale_id, SaleDiscount.amount, ids)
@@ -142,10 +164,11 @@ def document_balances(s, kind: str, ids: Iterable[int],
         ret, disc, adj = returned.get(did, 0.0), discounts.get(did, 0.0), adjustments.get(did, 0.0)
         net = 0.0 if voided else max(gross - ret - disc + adj, 0.0)
         paid, applied = cash.get(did, 0.0), alloc.get(did, 0.0)
-        settled = paid + applied
+        off = offsets.get(did, 0.0)
+        settled = paid + applied + off
         out[did] = DocBalance(
             kind=kind, doc_id=did, voided=voided, gross=gross, returned=ret, discount=disc,
             adjustment=adj, net_total=net, cash_paid=paid, advance_applied=applied,
-            settled=settled, balance=max(net - settled, 0.0),
+            offset_applied=off, settled=settled, balance=max(net - settled, 0.0),
             status="voided" if voided else payment_status(net, settled))
     return out

@@ -68,3 +68,17 @@ and the payment trail.
   a wrong one is voided with a reason, edits are audited. Admin only. Expenses are not yet linked
   to the cashier drawer.
 - Walk-ins are not listed (they share one anonymous party, so a per-person balance does not exist).
+
+## Offsets and swaps (settle with goods)
+
+`services/offset_service.py`, model `document_offsets` (migration `0006`).
+
+- **Settle unpaid sales with a purchase.** After a purchase from a party who still owes us, the intake
+  asks "settle their unpaid sales with this?" (never automatic). `OffsetService.apply` sets the purchase
+  against their open sales, oldest first on both sides. What is left is paid/collected as usual.
+- **Swap.** Cashier Purchase -> *Swap / Exchange*: goods he brings (purchase) and goods we give him
+  (sale) are recorded together by `SwapService.record` and set against each other; only the
+  difference is left owing either way. If the second document fails the first is voided.
+- **Net off.** Debt Center worksheet, for a party we both owe and are owed by.
+- An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
+  balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).

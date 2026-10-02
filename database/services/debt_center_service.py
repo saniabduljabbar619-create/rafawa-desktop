@@ -155,11 +155,13 @@ class DebtCenterService:
             head = {"party_id": party_id, "name": p.display_name, "phone": p.phone or "",
                     "address": p.address or "", "is_customer": bool(p.is_customer),
                     "is_supplier": bool(p.is_supplier)}
+        from database.services.offset_service import OffsetService
+        offsets = OffsetService.list_for_party(party_id)
         overall = PartyBalanceService.compute(party_id, int(require_user_id()), "admin").get("overall", {})
         we_owe = sum(d["balance"] for d in payables)
         they_owe = sum(d["balance"] for d in receivables)
         return {
-            **head, "payables": payables, "receivables": receivables, "payments": pays[:300],
+            **head, "payables": payables, "receivables": receivables, "payments": pays[:300], "offsets": offsets,
             "we_owe": we_owe, "they_owe": they_owe, "net": they_owe - we_owe,
             "advance_out": _f(overall.get("advance_out")),   # money we advanced them
             "advance_in": _f(overall.get("advance_in")),     # deposits they hold with us
