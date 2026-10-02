@@ -42,3 +42,5 @@ from .sales_order_item import SalesOrderItem        # must be imported here so S
 from .weigh_ticket import WeighTicket, WeighTicketLine, WeighRound   # weigher workspace: delivery weighing tickets
 from .expense import Expense                          # Debt Center: business expenses
 from .document_offset import DocumentOffset           # purchase <-> sale offsets (swap / settle with goods)
+from .expenditure import Expenditure                  # Debt Center: larger outlays, separate from Expenses
+from .debt import DebtPerson, DebtEntry               # Debt Center: standalone creditor/debtor book

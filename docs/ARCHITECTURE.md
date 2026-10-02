@@ -54,20 +54,20 @@ Finalizing takes a row lock on the ticket so two terminals cannot book it twice.
 at intake are written to `audit_logs`.
 
 
-## Debt Center (admin)
+## Debt Center (admin) - a standalone book
 
-`features/debt_center/` - hub with three tiles; double-click opens **My Creditors** (we owe, from
-purchases), **My Debtors** (they owe us, from sales) or **Expenses**. A party row opens a
-**worksheet**: open documents (tick some to pay only those, otherwise oldest first), a payment panel,
-and the payment trail.
+`features/debt_center/`, styled like alg-erp's Master Supplier sheets (cream paper, ink totals row, amber).
+Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expenditures**.
 
-- `services/debt_center_service.py` - balances come from `document_balance` (never re-derived);
-  `pay()` spreads one amount over the open documents in a single transaction, refuses overpayment,
-  writes ordinary `Payment` rows (so every other screen sees them) and an audit entry.
-- `services/expense_service.py` + `models/expense.py` (migration `0005`) - expenses are never deleted;
-  a wrong one is voided with a reason, edits are audited. Admin only. Expenses are not yet linked
-  to the cashier drawer.
-- Walk-ins are not listed (they share one anonymous party, so a per-person balance does not exist).
+- **Standalone.** `models/debt.py` (`debt_people`, `debt_entries`) references no party, customer, supplier,
+  sale, purchase or payment, and nothing else reads it: recording a debt here changes nothing elsewhere.
+  Any number of people; one sheet each: Date | What it was for | owed | paid | How | Note | running balance,
+  dark totals row. Type in the empty last row to add; click a cell to change it (audited); remove crosses a
+  row out (never deleted) and it can be brought back. `services/debt_book_service.py`, admin only.
+- **Expenses vs Expenditures** are two separate tables and sheets (tabs along the bottom), as in alg-erp:
+  Expenses = day-to-day running costs (`expenses`, EXP-), Expenditures = larger outlays (`expenditures`,
+  EXD-). `services/expense_service.py` serves both. They are not linked to the cashier drawer.
+- Migrations: `0005` expenses, `0007` debt book + expenditures.
 
 ## Offsets and swaps (settle with goods)
 
@@ -79,7 +79,7 @@ and the payment trail.
 - **Swap.** Cashier Purchase -> *Swap / Exchange*: goods he brings (purchase) and goods we give him
   (sale) are recorded together by `SwapService.record` and set against each other; only the
   difference is left owing either way. If the second document fails the first is voided.
-- **Net off.** Debt Center worksheet, for a party we both owe and are owed by.
+- **Net off.** `OffsetService.apply(party_id, kind="net_off")` cancels the overlap for a party we both owe and are owed by (service only; no screen).
 - An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
   balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).
 

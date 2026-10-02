@@ -12,7 +12,12 @@ from shared.auth.permissions import PermissionDenied
 from shared.auth.session import UserSession, set_session
 from tests.conftest import (ADMIN_ID, CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, SUPPLIER_ID, make_sale, pay,
                             stock)
-from tests.test_debt_center import _purchase
+
+
+def _purchase(party=SUPPLIER_ID, kg=1000, cost=50):                      # 50,000
+    return PurchaseService.record({"supplier_party_id": party, "created_by_user_id": CASHIER_A,
+        "items": [{"sku": "CROP-MAIZE", "product_name": "Maize", "product_type": "crops",
+                   "qty_bags": 10, "total_weight_kg": kg, "unit_cost": cost}]})["purchase_id"]
 
 
 def _b(kind, doc):
@@ -126,9 +131,8 @@ def test_swap_he_brings_more_so_we_owe_him_change():
     assert r["we_owe_him"] == 20000 and r["he_owes_us"] == 0
     assert _b("sale", r["sale_id"]).status == "paid"
     assert _b("purchase", r["purchase_id"]).balance == 20000
-    # the change can then be paid out through the Debt Center
-    from database.services.debt_center_service import DebtCenterService as D
-    D.pay(CUSTOMER_ID, "creditors", 20000)
+    # the change is then paid out like any other payment
+    pay("purchase", r["purchase_id"], CUSTOMER_ID, "out", 20000)
     assert _b("purchase", r["purchase_id"]).status == "paid"
 
 
@@ -166,10 +170,8 @@ def test_cashier_may_swap_but_a_weigher_may_not():
         SW.record(CUSTOMER_ID, _recv(), _give())
 
 
-def test_net_off_between_a_two_way_party_via_debt_center_numbers():
-    _purchase()                                            # we owe supplier 50,000
-    make_sale(buyer=SUPPLIER_ID)                           # supplier owes us 20,000
+def test_net_off_between_a_two_way_party():
+    p = _purchase()                                        # we owe supplier 50,000
+    s = make_sale(buyer=SUPPLIER_ID)["sale_id"]            # supplier owes us 20,000
     O.apply(SUPPLIER_ID, kind="net_off")
-    from database.services.debt_center_service import DebtCenterService as D
-    w = D.worksheet(SUPPLIER_ID)
-    assert (w["we_owe"], w["they_owe"]) == (30000, 0)
+    assert _b("purchase", p).balance == 30000 and _b("sale", s).balance == 0
