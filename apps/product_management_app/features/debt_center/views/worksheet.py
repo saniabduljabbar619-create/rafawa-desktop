@@ -6,10 +6,13 @@ from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
     QAbstractItemView, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from datetime import datetime
+
 from database.services.debt_center_service import DebtCenterService, OVERDUE_DAYS
+from database.services.offset_service import OffsetService
 from shared.auth.permissions import PermissionDenied
 from shared.uix.widgets.cards import KpiCard, Segmented, avatar, chip, money, style_table
 
@@ -116,6 +119,9 @@ class DebtWorksheetPage(QWidget):
         self.lbl_after = QLabel("")
         self.lbl_after.setStyleSheet("color:#374151; font-size:12px; font-weight:600;")
         cl.addWidget(self.lbl_after)
+        self.btn_netoff = QPushButton("Net off what we owe each other")
+        self.btn_netoff.setProperty("role", "plain")
+        cl.addWidget(self.btn_netoff)
         self.btn_pay = QPushButton("")
         self.btn_pay.setObjectName("PrimaryButton")
         self.btn_pay.setMinimumHeight(40)
@@ -139,11 +145,17 @@ class DebtWorksheetPage(QWidget):
         self.hist.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.hist.setMaximumHeight(220)
         root.addWidget(self.hist)
+        self.btn_reverse = QPushButton("Reverse selected offset")
+        self.btn_reverse.setProperty("role", "danger")
+        self.btn_reverse.setToolTip("Select an Offset row in the history above")
+        root.addWidget(self.btn_reverse, 0, Qt.AlignLeft)
 
         self.docs.itemChanged.connect(self._sync_amount)
         self.btn_full.clicked.connect(self._fill_full)
         self.amount.valueChanged.connect(self._update_after)
         self.btn_pay.clicked.connect(self._pay)
+        self.btn_netoff.clicked.connect(self._net_off)
+        self.btn_reverse.clicked.connect(self._reverse)
         self.reload()
 
     # ---------------------------------------------------------------- data
@@ -220,18 +232,73 @@ class DebtWorksheetPage(QWidget):
         self._fill_full()
 
     def _render_history(self) -> None:
-        pays = self.data.get("payments", [])
-        self.hist.setRowCount(len(pays))
-        for i, p in enumerate(pays):
+        rows = []
+        for p in self.data.get("payments", []):
             ref = ("PUR-" if p["kind"] == "purchase" else "SAL-") + str(p["doc_id"])
-            vals = [p["date"].strftime("%d %b %Y %H:%M") if p["date"] else "", ref,
-                    "Paid out" if p["direction"] == "out" else "Received", p["method"].title(),
-                    money(p["amount"]), p["notes"]]
+            rows.append((p["date"], [p["date"].strftime("%d %b %Y %H:%M") if p["date"] else "", ref,
+                                     "Paid out" if p["direction"] == "out" else "Received", p["method"].title(),
+                                     money(p["amount"]), p["notes"]], None, False))
+        for o in self.data.get("offsets", []):
+            rev = o["status"] == "reversed"
+            rows.append((o["date"], [o["date"].strftime("%d %b %Y %H:%M") if o["date"] else "",
+                                     f"PUR-{o['purchase_id']} / SAL-{o['sale_id']}", "Offset",
+                                     o["kind"].replace("_", " ").title(), money(o["amount"]),
+                                     ("REVERSED: " + o["reverse_reason"]) if rev else o["note"]],
+                         None if rev else o["id"], rev))
+        rows.sort(key=lambda r: r[0] or datetime.min, reverse=True)
+        self.hist.setRowCount(len(rows))
+        for i, (_d, vals, offset_id, reversed_) in enumerate(rows):
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
+                it.setData(Qt.UserRole, offset_id)
                 if c == 4:
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if reversed_:
+                    it.setForeground(QColor("#9ca3af"))
+                    f = it.font()
+                    f.setStrikeOut(True)
+                    it.setFont(f)
                 self.hist.setItem(i, c, it)
+        d = self.data
+        self.btn_netoff.setVisible(d.get("we_owe", 0) > 0.005 and d.get("they_owe", 0) > 0.005)
+        self.btn_reverse.setVisible(any(not o["status"] == "reversed" for o in d.get("offsets", [])))
+
+    def _net_off(self) -> None:
+        pv = OffsetService.preview(self.party_id)
+        if pv["offsettable"] <= 0:
+            QMessageBox.information(self, "Net off", "There is nothing to net off.")
+            return
+        if QMessageBox.question(
+                self, "Net off",
+                f"We owe {money(pv['we_owe'])} and they owe us {money(pv['they_owe'])}.\n\n"
+                f"Cancel {money(pv['offsettable'])} on both sides, no money moving?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            OffsetService.apply(self.party_id, kind="net_off", note="Net off from the Debt Center")
+        except (ValueError, PermissionDenied) as e:
+            QMessageBox.warning(self, "Net off", str(e))
+            return
+        self.reload()
+        self.changed.emit()
+
+    def _reverse(self) -> None:
+        row = self.hist.currentRow()
+        it = self.hist.item(row, 0) if row >= 0 else None
+        oid = it.data(Qt.UserRole) if it is not None else None
+        if not oid:
+            QMessageBox.information(self, "Offsets", "Select an active Offset row in the history first.")
+            return
+        reason, ok = QInputDialog.getText(self, "Reverse offset", "Why is this offset being reversed?")
+        if not ok:
+            return
+        try:
+            OffsetService.reverse(int(oid), reason)
+        except (ValueError, PermissionDenied) as e:
+            QMessageBox.warning(self, "Offsets", str(e))
+            return
+        self.reload()
+        self.changed.emit()
 
     # ---------------------------------------------------------------- payment panel
     def _checked(self):

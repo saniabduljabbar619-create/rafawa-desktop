@@ -22,12 +22,12 @@ class PartySearchPickerDialog(QDialog):
     exec_() then read .selected_party_id / .selected_party_name.
 
     role_flag: "is_customer" or "is_supplier" - which Party column to
-    filter on. title/search_placeholder let the caller phrase this for
+    filter on ("any" lists every registered party except walk-ins). title/search_placeholder let the caller phrase this for
     whichever role it's actually being used for.
     """
     def __init__(self, role_flag: str, title: str = "Select", parent=None):
         super().__init__(parent)
-        assert role_flag in ("is_customer", "is_supplier"), "role_flag must be is_customer or is_supplier"
+        assert role_flag in ("is_customer", "is_supplier", "any"), "role_flag must be is_customer, is_supplier or any"
         self.role_flag = role_flag
         self.selected_party_id = None
         self.selected_party_name = None
@@ -85,7 +85,10 @@ class PartySearchPickerDialog(QDialog):
         term = (self.search_in.text() or "").strip()
         with get_session() as s:
             q = s.query(Party).filter(Party.is_active == True)  # noqa: E712
-            q = q.filter(getattr(Party, self.role_flag) == True)  # noqa: E712
+            if self.role_flag != "any":                  # "any" = every real party (customers AND suppliers)
+                q = q.filter(getattr(Party, self.role_flag) == True)  # noqa: E712
+            else:
+                q = q.filter(Party.party_type != "walkin")
             if term:
                 q = q.filter(
                     (Party.display_name.ilike(f"%{term}%")) |
