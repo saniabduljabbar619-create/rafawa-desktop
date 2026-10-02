@@ -171,8 +171,8 @@ def test_sales_order_whole_life_on_one_sheet(qapp, boxes):
     # history lists the whole story
     hist = [pg.d["timeline"][i]["event"] for i in range(len(pg.d["timeline"]))]
     assert hist[0].startswith("Created") and any(h.startswith("Dispatched") for h in hist) and hist[-1].startswith("Confirmed")
-    texts = [pg.slot_hist.layout().itemAt(0).widget().table.item(r, 2).text() for r in range(
-        pg.slot_hist.layout().itemAt(0).widget().table.rowCount())]
+    hist = pg.slot_hist.layout().itemAt(0).widget().table
+    texts = [hist.item(r, 3).text() for r in range(hist.rowCount())]
     assert any("Payment" in t for t in texts)
 
 
@@ -291,3 +291,104 @@ def test_cashier_can_work_delivery_and_payments_but_not_create_or_dispatch(qapp,
     v.open_order("sales", c, draft)
     d = _sheet(v)
     assert d.btn_add.isHidden() and d.btn_go.isHidden() and d.btn_cancel.isHidden() and d.grid.allow_add is False
+
+
+# ----------------------------------------------------------------------------- moving an order along; review and correct
+def test_next_step_button_walks_a_sales_order_from_draft_to_paid(qapp, boxes):
+    c = CompanyService.create("Acme Foods", ADMIN_ID)
+    oid = O.create("sales", c, _lines())
+    v = _hub()
+    v.open_order("sales", c, oid)
+    pg = _sheet(v)
+    assert not pg.btn_next.isHidden() and pg.btn_next.text().startswith("Dispatch")
+    assert "stay as long as you like" in pg.lbl_next.text()
+    pg.btn_next.click()                                                       # draft -> on the road
+    _settle()
+    assert pg.stage == "in_transit" and pg.btn_next.text().startswith("Confirm delivery")
+    assert "arrive" in pg.lbl_next.text()
+    pg.btn_next.click()                                                       # nothing entered yet -> told what is missing
+    assert "Still to enter" in pg.msg.text() and pg.stage == "in_transit"
+    pg.btn_fill.click()
+    _settle()
+    pg.btn_next.click()                                                       # on the road -> confirmed
+    _settle()
+    assert pg.stage == "confirmed" and pg.btn_next.text().startswith("Record a payment") and pg.tabs.currentIndex() == 1
+    pg.tabs.setCurrentIndex(0)
+    pg.btn_next.click()                                                       # takes you to the payments tab
+    assert pg.tabs.currentIndex() == 1
+    type_cell(pg.pay_grid, "amount", str(int(pg.d["total"])))
+    assert pg.d["pay_status"] == "paid" and pg.btn_next.isHidden() and "Fully paid" in pg.lbl_next.text()
+
+
+def test_draft_can_be_reviewed_over_days_with_notes_and_dates(qapp, boxes):
+    c = CompanyService.create("Acme Foods", ADMIN_ID)
+    oid = O.create("sales", c, _lines())
+    v = _hub()
+    v.open_order("sales", c, oid)
+    pg = _sheet(v)
+    pg.tabs.setCurrentIndex(2)
+    hist = pg.slot_hist.layout().itemAt(0).widget()
+    type_cell(hist, "text", "Buyer asked to wait until Monday")
+    type_cell(pg.slot_hist.layout().itemAt(0).widget(), "category", "Delay", row=1)
+    reviews = O.detail("sales", oid)["reviews"]
+    assert [(r["category"], r["text"]) for r in reviews] == [("Note", "Buyer asked to wait until Monday")]
+    assert pg.stage == "draft"                                                # still a draft, notes don't change status
+    h = pg.slot_hist.layout().itemAt(0).widget().table
+    assert any("Buyer asked" in h.item(r, 3).text() for r in range(h.rowCount()))
+
+
+def test_correct_a_confirmed_order_for_damaged_goods_through_the_dialog(qapp, boxes, monkeypatch):
+    c, _p, so, _po = _seed()
+    O.confirm("sales", so, [{"id": l["id"], "type": l["type"], "rcv_qty": l["kg"] or l["bags"], "rej_qty": 0,
+                             "rcv_price": l["price"]} for l in O.detail("sales", so)["lines"]])
+    O.pay("sales", so, 145000)
+    kg0 = stock(CROP_ID)[1]
+    v = _hub()
+    v.open_order("sales", c, so)
+    pg = _sheet(v)
+    assert not pg.btn_correct.isHidden()
+    pg.btn_correct.click()
+    assert "Click the line" in pg.msg.text()
+    pg.grid.table.setCurrentCell(0, 1)
+    from apps.product_management_app.features.orders.dialogs import correction_dialog as cd
+    made = {}
+
+    def fill(self):
+        made["preview_start"] = self.preview.text()
+        self.category.setCurrentText("Damaged goods")
+        self.rej.setValue(100)
+        made["stock_text"] = self.stock.text()
+        made["preview"] = self.preview.text()
+        self._save()                                                          # no reason yet -> refused
+        made["refused"] = self.result is None
+        self.reason.setText("100 kg arrived wet")
+        self._save()
+        return 1
+    monkeypatch.setattr(cd.CorrectionDialog, "exec_", fill)
+    pg.btn_correct.click()
+    _settle()
+    assert made["refused"]
+    assert "back on the shelf" in made["stock_text"] and "overpaid by 11,000.00" in made["preview"]
+    assert stock(CROP_ID)[1] == kg0 + 100
+    assert pg.d["total"] == 134000 and pg.d["overpaid"] == 11000
+    assert pg.k_balance.val.text() == "11,000.00" and "Overpaid" in pg.k_balance.cap.text()
+    assert "Overpaid by 11,000.00" in pg.lbl_next.text()
+    hist = O.detail("sales", so)["reviews"][-1]
+    assert hist["correction"] and hist["text"] == "100 kg arrived wet"
+    pg.tabs.setCurrentIndex(2)
+    h = pg.slot_hist.layout().itemAt(0).widget().table
+    rows = [(h.item(r, 2).text(), h.item(r, 3).text()) for r in range(h.rowCount())]
+    assert any(cat == "Correction: Damaged goods" and "145,000.00 → 134,000.00" in txt for cat, txt in rows)
+
+
+def test_correction_button_is_admin_only_and_hidden_before_confirmation(qapp, boxes):
+    c, _p, so, _po = _seed()
+    v = _hub()
+    v.open_order("sales", c, so)                                              # on the road
+    assert _sheet(v).btn_correct.isHidden()
+    O.confirm("sales", so, [{"id": l["id"], "type": l["type"], "rcv_qty": l["kg"] or l["bags"], "rej_qty": 0,
+                             "rcv_price": l["price"]} for l in O.detail("sales", so)["lines"]])
+    set_session(UserSession(user_id=CASHIER_A, username="alice", role="cashier"))
+    v2 = _hub("cashier")
+    v2.open_order("sales", c, so)
+    assert _sheet(v2).btn_correct.isHidden()

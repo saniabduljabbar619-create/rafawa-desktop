@@ -111,3 +111,14 @@ opened from Orders -> partner profile -> order, in the same style as the Debt Ce
 - `services/order_sheet_service.py` is a thin normalising layer over `SalesOrderService` / `PurchaseOrderService`
   (the rules - stock, validation, totals - stay there). Draft/dispatch/revert/cancel are admin-only; the delivery
   result, confirmation and payments are open to admin and cashier.
+
+### Moving an order along, review notes and post-delivery corrections
+
+- The stage strip has one **next step** button with a plain-language hint (Draft -> Dispatch / Mark in transit ->
+  Confirm delivery / receipt -> Record a payment). A draft can sit for days; notes and the expected date can change.
+- **Review notes** (`order_reviews`, migration `0008`): at ANY stage, type a note in the History sheet's last row
+  (Note, Delay, Damaged goods, Shortage, Wrong count, Price issue, Other). Never edited or deleted.
+- **Correct a line after delivery** (admin; `OrderSheetService.correct_line`): on a CONFIRMED order change a line's
+  rejected quantity and/or price with a required reason. The line, the order total and (optionally, with a stock
+  check first) one stock movement are updated together and logged with before/after. Payments are not touched: an
+  overpayment is shown ("Overpaid - refund or void a payment"), never hidden.

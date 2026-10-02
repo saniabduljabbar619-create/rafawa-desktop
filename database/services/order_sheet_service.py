@@ -21,6 +21,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from database.models.product import Product
+from database.models.order_review import OrderReview
+from database.models.purchase_order import PurchaseOrder
+from database.models.purchase_order_item import PurchaseOrderItem
+from database.models.sales_order import SalesOrder
+from database.models.sales_order_item import SalesOrderItem
+from database.models.stock_movement import STOCK_IN_TYPES, STOCK_OUT_TYPES, StockMovement
+from database.models.user import User
+from sqlalchemy import func
+
 from database.services.audit_service import AuditService
 from database.services.order_hub_service import OrderHubService
 from database.services.order_payment_service import OrderPaymentService
@@ -33,6 +42,32 @@ from shared.auth.permissions import INTAKE_ROLES, require_admin, require_role
 from shared.auth.session import require_user_id
 
 KINDS = ("sales", "purchase")
+REVIEW_CATEGORIES = ["Note", "Delay", "Damaged goods", "Shortage", "Wrong count", "Price issue", "Other"]
+CORRECTION_CATEGORIES = ["Damaged goods", "Shortage", "Wrong count", "Price issue", "Other"]
+
+# per-kind names of the columns a post-delivery correction touches
+_CFG = {
+    "sales": dict(Order=SalesOrder, Item=SalesOrderItem, fk="sales_order_id", rcv_kg="company_weight_kg",
+                  rcv_bags="company_qty_bags", price="company_price", base_kg="dispatched_weight_kg",
+                  base_bags="dispatched_qty_bags", ref="sales_order_item", pay="sales_order",
+                  more_rejected="return_in", less_rejected="sale_out"),
+    "purchase": dict(Order=PurchaseOrder, Item=PurchaseOrderItem, fk="purchase_order_id", rcv_kg="received_weight_kg",
+                     rcv_bags="received_qty_bags", price="received_price", base_kg="ordered_weight_kg",
+                     base_bags="ordered_qty_bags", ref="purchase_order_item", pay="purchase_order",
+                     more_rejected="adjustment_out", less_rejected="purchase_in"),
+}
+
+
+def _on_hand(s, product_id: int):
+    """(bags, kg) on the shelf right now."""
+    bags = kg = 0.0
+    for mtype, b, w in (s.query(StockMovement.movement_type, func.coalesce(func.sum(StockMovement.qty_bags), 0),
+                                func.coalesce(func.sum(StockMovement.total_weight_kg), 0))
+                        .filter(StockMovement.product_id == product_id).group_by(StockMovement.movement_type)):
+        sign = 1 if mtype in STOCK_IN_TYPES else -1 if mtype in STOCK_OUT_TYPES else 0
+        bags += sign * _f(b)
+        kg += sign * _f(w)
+    return bags, kg
 
 
 def _f(v) -> float:
@@ -161,6 +196,15 @@ class OrderSheetService:
         live = [x for x in payments if x["status"] != "voided"]
         total = d["final_total_amount"] if d["final_total_amount"] is not None else estimate(kind, lines)
         paid = round(sum(x["amount"] for x in live), 2)
+        with get_session() as s:
+            users = {int(u.id): u.username for u in s.query(User).all()}
+            reviews = [{"id": int(r.id), "at": r.created_at, "category": r.category, "text": r.text,
+                        "by": users.get(int(r.created_by_user_id), ""), "correction": bool(r.is_correction),
+                        "line_id": r.line_id, "total_before": r.total_before, "total_after": r.total_after,
+                        "stock_moved": bool(r.stock_moved)}
+                       for r in s.query(OrderReview).filter(OrderReview.order_type == _pay_type(kind),
+                                                            OrderReview.order_id == int(order_id))
+                       .order_by(OrderReview.created_at.asc(), OrderReview.id.asc()).all()]
         return {
             "kind": kind, "id": int(order_id), "order_no": d["order_no"], "status": d["status"],
             "partner_id": int(partner_id), "partner_name": p.get("name", "?"), "partner_phone": p.get("phone", ""),
@@ -169,6 +213,8 @@ class OrderSheetService:
             "notes": d["notes"] or "", "lines": lines, "estimate": estimate(kind, lines),
             "final": d["final_total_amount"], "total": total, "estimated": d["final_total_amount"] is None,
             "paid": paid, "balance": (round(max(total - paid, 0), 2) if d["final_total_amount"] is not None else None),
+            "overpaid": (round(max(paid - total, 0), 2) if d["final_total_amount"] is not None else 0.0),
+            "reviews": reviews,
             "pay_status": pay["status"], "payments": payments,
             "timeline": OrderHubService.timeline(kind, int(order_id)),
         }
@@ -297,3 +343,111 @@ class OrderSheetService:
     @require_admin
     def void_payment(payment_id: int, reason: str) -> None:
         OrderPaymentService.void_payment(int(payment_id), int(require_user_id()), reason)
+
+    # ------------------------------------------------------------------ review log
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def add_review(kind: str, order_id: int, category: str, text: str) -> int:
+        """A note on the order at ANY stage (a delay, damage spotted on the road, a call with the driver ...)."""
+        _check(kind)
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("Write the note.")
+        _svc(kind).get_order_detail(int(order_id))                       # raises if the order does not exist
+        category = category if category in REVIEW_CATEGORIES else "Note"
+        with get_session() as s:
+            r = OrderReview(order_type=_pay_type(kind), order_id=int(order_id), category=category, text=text,
+                            created_by_user_id=int(require_user_id()))
+            s.add(r)
+            s.flush()
+            AuditService.record(f"{kind}_order.review", f"{kind}_order", int(order_id), f"{category}: {text[:120]}",
+                                session=s)
+            s.commit()
+            return int(r.id)
+
+    @staticmethod
+    @require_admin
+    def correct_line(kind: str, order_id: int, line_id: int, reason: str, rej_qty: Optional[float] = None,
+                     price: Optional[float] = None, category: str = "Damaged goods", stock_move: bool = True) -> Dict[str, Any]:
+        """
+        Fix a CONFIRMED order after the fact: some of what was accepted turns out damaged or short, a count was
+        wrong, or the price was disputed.
+
+            rej_qty     the new rejected quantity for the line (kg for crops, bags for fertilizer)
+            price       the new price for the line
+            stock_move  apply the matching stock movement (default). Untick when the goods never went back on the
+                        shelf / were never added (e.g. destroyed before they reached it).
+
+        The line's accepted quantity and amount and the order total are recalculated, one stock movement is written
+        for the difference (checked against what is on the shelf first) and the correction is logged with who, why
+        and before/after. Payments are left alone: if the order is now overpaid that is shown, not hidden.
+        """
+        _check(kind)
+        cfg = _CFG[kind]
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("Give a reason for the correction - it stays in the order's history.")
+        uid = int(require_user_id())
+        with get_session() as s:
+            order = s.get(cfg["Order"], int(order_id))
+            if order is None:
+                raise ValueError("Order not found.")
+            if order.status != "confirmed":
+                raise ValueError("Only a confirmed order can be corrected. Before that, use the normal steps.")
+            item = s.get(cfg["Item"], int(line_id))
+            if item is None or int(getattr(item, cfg["fk"])) != int(order_id):
+                raise ValueError("That line does not belong to this order.")
+            fert = _is_fert(item.product_type_snapshot)
+            rcv = _f(getattr(item, cfg["rcv_bags"] if fert else cfg["rcv_kg"]))
+            rej_attr = "rejected_qty_bags" if fert else "rejected_weight_kg"
+            acc_attr = "accepted_qty_bags" if fert else "accepted_weight_kg"
+            rej_old, price_old = _f(getattr(item, rej_attr)), _f(getattr(item, cfg["price"]))
+            new_rej = rej_old if rej_qty is None else round(_f(rej_qty), 2)
+            new_price = price_old if price is None else round(_f(price), 2)
+            if new_rej < 0 or new_rej > rcv + 0.005:
+                raise ValueError(f"Rejected must be between 0 and what was received ({rcv:,.2f}).")
+            if new_price < 0:
+                raise ValueError("The price cannot be negative.")
+            if abs(new_rej - rej_old) < 0.005 and abs(new_price - price_old) < 0.005:
+                raise ValueError("Nothing changed.")
+
+            total_before = sum(_f(i.final_line_amount) for i in s.query(cfg["Item"]).filter(
+                getattr(cfg["Item"], cfg["fk"]) == int(order_id)).all())
+            delta = round(new_rej - rej_old, 2)
+            moved = False
+            if stock_move and abs(delta) >= 0.005:
+                base_kg, base_bags = _f(getattr(item, cfg["base_kg"])), _f(getattr(item, cfg["base_bags"]))
+                qty = abs(delta)
+                bags = qty if fert else (min(base_bags, round(base_bags * qty / base_kg)) if base_kg > 0 else 0)
+                kg = 0.0 if fert else qty
+                mtype = cfg["more_rejected"] if delta > 0 else cfg["less_rejected"]
+                if mtype in STOCK_OUT_TYPES:
+                    have_bags, have_kg = _on_hand(s, item.product_id)
+                    if have_bags + 0.005 < bags or have_kg + 0.005 < kg:
+                        name = (s.get(Product, item.product_id).name if s.get(Product, item.product_id) else "product")
+                        raise ValueError(f"Not enough {name} in stock to make this correction "
+                                         f"(on the shelf: {have_bags:,.0f} bags, {have_kg:,.2f} kg).")
+                s.add(StockMovement(product_id=item.product_id, movement_type=mtype, qty_bags=bags, total_weight_kg=kg,
+                                    unit_rate=new_price, reference_type=cfg["ref"], reference_id=item.id,
+                                    created_by_user_id=uid))
+                moved = True
+
+            setattr(item, rej_attr, new_rej)
+            setattr(item, acc_attr, round(rcv - new_rej, 2))
+            setattr(item, cfg["price"], new_price)
+            item.final_line_amount = round((rcv - new_rej) * new_price, 2)
+            s.flush()
+            total_after = round(sum(_f(i.final_line_amount) for i in s.query(cfg["Item"]).filter(
+                getattr(cfg["Item"], cfg["fk"]) == int(order_id)).all()), 2)
+            order.final_total_amount = total_after
+            s.add(OrderReview(order_type=cfg["pay"], order_id=int(order_id), is_correction=True,
+                              category=category if category in CORRECTION_CATEGORIES else "Other", text=reason,
+                              line_id=int(line_id), rej_before=rej_old, rej_after=new_rej, price_before=price_old,
+                              price_after=new_price, total_before=round(total_before, 2), total_after=total_after,
+                              stock_moved=moved, created_by_user_id=uid))
+            AuditService.record(f"{kind}_order.correct", f"{kind}_order", int(order_id),
+                                f"Line corrected ({category}): total {total_before:,.2f} -> {total_after:,.2f}. {reason}",
+                                {"line_id": int(line_id), "rej": [rej_old, new_rej], "price": [price_old, new_price],
+                                 "stock_moved": moved}, session=s)
+            s.commit()
+        return {"total_before": round(total_before, 2), "total_after": total_after, "stock_moved": moved}
