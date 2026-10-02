@@ -26,11 +26,30 @@ from database.models.purchase import Purchase
 from database.models.sale import Sale
 from database.models.stock_movement import STOCK_IN_TYPES, STOCK_OUT_TYPES, StockMovement
 from database.services.audit_service import AuditService
-from database.services.debt_center_service import EPS, _open_docs
+from database.services.document_balance import document_balances
 from database.session import get_session
 from shared.auth.permissions import INTAKE_ROLES, require_admin, require_role, system_context
 from shared.auth.session import require_user_id
 from shared.config.constants import WALKIN_PARTY_ID
+
+EPS = 0.005
+
+
+def _open_docs(s, side: str, party_id: int) -> List[Dict[str, Any]]:
+    """Open (unsettled, not voided) documents of one party, oldest first.
+    side: "creditors" = purchases we still owe on, "debtors" = sales they still owe on."""
+    model, party_col, kind = ((Purchase, Purchase.supplier_party_id, "purchase") if side == "creditors"
+                              else (Sale, Sale.buyer_party_id, "sale"))
+    rows = (s.query(model.id, model.completed_at, model.created_at)
+            .filter(model.status != "voided", party_col == int(party_id))
+            .order_by(model.completed_at.asc(), model.id.asc()).all())
+    balances = document_balances(s, kind, [r[0] for r in rows])
+    out = []
+    for did, completed, created in rows:
+        b = balances.get(int(did))
+        if b is not None and b.balance > EPS:
+            out.append({"kind": kind, "doc_id": int(did), "date": completed or created, "balance": b.balance})
+    return out
 
 
 def _f(v) -> float:

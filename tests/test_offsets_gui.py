@@ -4,10 +4,8 @@ from PySide2.QtWidgets import QMessageBox
 
 from database.models.party import Party
 from database.services.document_balance import document_balances
-from database.services.offset_service import OffsetService as O
 from database.session import get_session
 from tests.conftest import CUSTOMER_ID, FERT_ID, SUPPLIER_ID, make_sale
-from tests.test_debt_center import _purchase
 from tests.test_offsets import _p
 
 
@@ -95,20 +93,3 @@ def test_party_picker_any_lists_customers_and_suppliers_but_not_walkins(qapp):
     d = PartySearchPickerDialog("any")
     names = {r["name"] for r in d._rows}
     assert "Customer One" in names and "Supplier One" in names and "Walk-in" not in names
-
-
-def test_worksheet_net_off_and_reverse(qapp, boxes, monkeypatch):
-    _purchase()
-    make_sale(buyer=SUPPLIER_ID)
-    from apps.product_management_app.features.debt_center.views import worksheet as ws_mod
-    ws = ws_mod.DebtWorksheetPage(SUPPLIER_ID, "creditors")
-    assert not ws.btn_netoff.isHidden() and ws.btn_reverse.isHidden()
-    ws.btn_netoff.click()
-    assert ws.kpi_we.value.text() == "30,000.00" and ws.kpi_they.value.text() == "0.00"
-    assert ws.btn_netoff.isHidden() and not ws.btn_reverse.isHidden()
-    offset_rows = [r for r in range(ws.hist.rowCount()) if ws.hist.item(r, 2).text() == "Offset"]
-    assert len(offset_rows) == 1
-    ws.hist.setCurrentCell(offset_rows[0], 0)
-    monkeypatch.setattr(ws_mod.QInputDialog, "getText", staticmethod(lambda *a, **k: ("oops", True)))
-    ws.btn_reverse.click()
-    assert ws.kpi_we.value.text() == "50,000.00" and ws.kpi_they.value.text() == "20,000.00"
