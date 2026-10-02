@@ -94,3 +94,20 @@ Companies and PO suppliers stay two tables (their orders keep their own foreign 
 `OrderHubService.sync_partners()` copies any partner missing on the other side (matched by name), and
 both `create()` services call it, so a partner added on one side shows in the other side's picker.
 Details are copied at creation; later edits to a phone/address are not kept in step.
+
+
+## Orders as sheets
+
+Sales Orders and Purchase Orders share ONE sheet-based workspace (`features/orders/views/order_sheet_page.py`),
+opened from Orders -> partner profile -> order, in the same style as the Debt Center sheets
+(`debt_center/views/sheet_grid.py`). The old per-action dialogs were removed.
+
+- **Order lines tab**: draft = type lines into the last row (product, bags, kg for crops, price; saved as soon as
+  complete, no stock moves); on the road = enter what the other side received / rejected and the price (kept as
+  you type, accepted and amount are automatic, "Fill from order" for a clean delivery); confirmed = final figures.
+- **Payments tab**: type a payment into the last row; before confirmation it is an advance; remove = void with a
+  reason. **History tab**: who did what and when.
+- A stage strip (Draft -> Dispatched/In transit -> Confirmed -> Paid) and KPIs show where the order is.
+- `services/order_sheet_service.py` is a thin normalising layer over `SalesOrderService` / `PurchaseOrderService`
+  (the rules - stock, validation, totals - stay there). Draft/dispatch/revert/cancel are admin-only; the delivery
+  result, confirmation and payments are open to admin and cashier.

@@ -19,20 +19,6 @@ def _assert_placeholder(combo):
     assert combo.currentData() is None
 
 
-@pytest.mark.parametrize("module,cls", [
-    ("apps.product_management_app.features.purchase_orders.dialogs.purchase_order_create_dialog", "PurchaseOrderCreateDialog"),
-    ("apps.product_management_app.features.sales_orders.dialogs.sales_order_create_dialog", "SalesOrderCreateDialog"),
-])
-def test_order_dialogs_start_on_placeholder_and_refuse_add(qapp, module, cls, quiet):
-    import importlib
-    dlg = getattr(importlib.import_module(module), cls)()
-    _assert_placeholder(dlg.product_cb)
-    dlg._add_line()
-    assert not dlg._lines and any("Select a product" in m for _k, m in quiet)
-    dlg.product_cb.setCurrentIndex(1)
-    assert dlg.product_cb.currentData() is not None
-
-
 def test_supplier_sale_dialog_placeholder(qapp):
     from apps.product_management_app.features.suppliers.views.supplier_new_sale_dialog import SupplierNewSaleDialog
     dlg = SupplierNewSaleDialog(2, "Supplier One")

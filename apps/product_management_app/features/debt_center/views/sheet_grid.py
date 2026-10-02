@@ -41,6 +41,12 @@ def show_value(col: Dict[str, Any], raw: Any) -> str:
         except ValueError:
             return str(raw)
         return "" if v == 0 else f"{v:,.2f}"
+    if t == "number":
+        try:
+            v = float(str(raw).replace(",", ""))
+        except ValueError:
+            return str(raw)
+        return f"{v:,.2f}".rstrip("0").rstrip(".")
     if t == "date":
         try:
             return datetime.strptime(str(raw)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -75,7 +81,7 @@ class _Delegate(QStyledItemDelegate):
                 w.addItem(o, o)
             return w
         w = QLineEdit(parent)
-        if t == "money":
+        if t in ("money", "number"):
             w.setValidator(QRegularExpressionValidator(NUMBER_RX, w))
             w.setAlignment(RIGHT)
         return w
@@ -102,7 +108,7 @@ class _Delegate(QStyledItemDelegate):
             raw = (editor.currentData() or editor.currentText() or "").strip()
         else:
             raw = editor.text().strip()
-            if c["type"] == "money" and raw:
+            if c["type"] in ("money", "number") and raw:
                 raw = raw.replace(",", "")
         model.setData(index, raw, RAW)
         model.setData(index, show_value(c, raw), Qt.DisplayRole)
@@ -119,7 +125,8 @@ class SheetGrid(QWidget):
                  on_edit: Optional[Callable[[Any, str, str], Any]] = None,
                  on_remove: Optional[Callable[[Any, str], Any]] = None,
                  on_restore: Optional[Callable[[Any], Any]] = None,
-                 reload: Optional[Callable[[], Any]] = None, hint: str = ""):
+                 reload: Optional[Callable[[], Any]] = None, hint: str = "", allow_add: bool = True,
+                 notify: Optional[Callable[[str, bool], Any]] = None):
         super().__init__()
         self.setStyleSheet(STYLE)
         self.columns = list(columns)
@@ -129,6 +136,8 @@ class SheetGrid(QWidget):
         self.defaults = dict(defaults or {})
         self.ready, self.on_add, self.on_edit = ready, on_add, on_edit
         self.on_remove, self.on_restore, self.reload = on_remove, on_restore, reload
+        self.allow_add = allow_add
+        self.notify = notify          # a page that rebuilds this grid shows the messages itself
         self.rows: List[Dict[str, Any]] = []
         self.totals: Dict[str, str] = {}
         self._draft: Dict[str, str] = {}
@@ -184,6 +193,9 @@ class SheetGrid(QWidget):
         return self.columns[table_col - 1] if 1 <= table_col <= len(self.columns) else None
 
     def say(self, text: str, bad: bool = True) -> None:
+        if self.notify is not None:
+            self.notify(text, bad)
+            return
         self.msg.setText(text)
         self.msg.setVisible(bool(text))
         self.msg.setStyleSheet(f"color:{RED if bad else GREEN}; font-size:12.5px; font-weight:600;")
@@ -223,7 +235,7 @@ class SheetGrid(QWidget):
         t.blockSignals(True)
         t.clear()
         t.setColumnCount(n)
-        t.setRowCount(len(self.rows) + 1)
+        t.setRowCount(len(self.rows) + (1 if self.allow_add else 0))
         t.setHorizontalHeaderLabels(["#"] + [c["label"] for c in cols] + [c["label"] for c in comp])
         grey = QColor("#9a958a")
         for i, r in enumerate(self.rows):
@@ -234,15 +246,18 @@ class SheetGrid(QWidget):
                 it = QTableWidgetItem(show_value(c, raw))
                 it.setData(RAW, raw)
                 it.setData(ORIG, raw)
-                if c["type"] == "money":
+                if c["type"] in ("money", "number"):
                     it.setTextAlignment(RIGHT)
+                if c["type"] == "money":
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)
                     if c.get("tone") and raw not in ("", None, 0, 0.0, "0"):
                         it.setForeground(QBrush(QColor(c["tone"])))
-                if removed:
+                if removed or r.get("locked") or c.get("readonly"):
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                    if c.get("readonly") and not removed:
+                        it.setBackground(QColor("#faf8f4"))
                 t.setItem(i, j, it)
             for k, c in enumerate(comp, start=len(cols) + 1):
                 it = self._fixed(i, k, r.get("computed", {}).get(c["key"], ""), RIGHT)
@@ -261,8 +276,10 @@ class SheetGrid(QWidget):
                         it.setFont(f)
                         it.setForeground(QBrush(grey))
         last = len(self.rows)
-        self._fixed(last, 0, "+", Qt.AlignCenter, AMBER)
         for j, c in enumerate(cols, start=1):
+            if not self.allow_add:
+                break
+            self._fixed(last, 0, "+", Qt.AlignCenter, AMBER)
             k = c["key"]
             raw = self._draft.get(k, "")
             shown = raw or self.defaults.get(k, "")
@@ -279,11 +296,15 @@ class SheetGrid(QWidget):
                     f = it.font()
                     f.setItalic(True)
                     it.setFont(f)
-            if c["type"] == "money":
+            if c["type"] in ("money", "number"):
                 it.setTextAlignment(RIGHT)
+            if c.get("readonly"):
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                it.setToolTip("")
             t.setItem(last, j, it)
         for j in range(len(cols) + 1, n):
-            self._fixed(last, j, "")
+            if self.allow_add:
+                self._fixed(last, j, "")
         t.setColumnWidth(0, 44)
         hh = t.horizontalHeader()
         for j, c in enumerate(cols, start=1):
@@ -307,7 +328,7 @@ class SheetGrid(QWidget):
             it = QTableWidgetItem(text)
             it.setForeground(QBrush(QColor("#ffffff")))
             col = self.col_at(j)
-            if (col and col["type"] == "money") or j > len(self.columns):
+            if (col and col["type"] in ("money", "number")) or j > len(self.columns):
                 it.setTextAlignment(RIGHT)
             self.foot.setItem(0, j, it)
 
@@ -354,6 +375,8 @@ class SheetGrid(QWidget):
 
     # ------------------------------------------------------------ actions
     def add_row(self) -> None:
+        if not self.allow_add:
+            return
         last = len(self.rows)
         j = next(j for j, c in enumerate(self.columns, start=1) if c["key"] == self.first_edit_key)
         self.table.setCurrentCell(last, j)
@@ -367,9 +390,13 @@ class SheetGrid(QWidget):
         if r is None:
             m.addAction("Click a row first").setEnabled(False)
         elif r.get("removed"):
-            m.addAction("Bring the row back").triggered.connect(lambda: self._run(lambda: self.on_restore(r["id"])))
+            a = m.addAction("Bring the row back")
+            a.setEnabled(self.on_restore is not None)
+            a.triggered.connect(lambda: self._run(lambda: self.on_restore(r["id"])))
         else:
-            m.addAction("Remove row…").triggered.connect(lambda: self.remove(r))
+            a = m.addAction("Remove row…")
+            a.setEnabled(self.on_remove is not None and not r.get("locked_remove"))
+            a.triggered.connect(lambda: self.remove(r))
         m.exec_(pos)
 
     def remove(self, r: Optional[Dict[str, Any]] = None) -> None:
@@ -377,7 +404,7 @@ class SheetGrid(QWidget):
         if r is None:
             self.say("Click the row you want to remove first.")
             return
-        if r.get("removed"):
+        if r.get("removed") or self.on_remove is None:
             return
         reason, ok = QInputDialog.getText(
             self, "Remove row",
@@ -387,7 +414,7 @@ class SheetGrid(QWidget):
 
     def restore(self) -> None:
         r = self.selected_row()
-        if r is None or not r.get("removed"):
+        if r is None or not r.get("removed") or self.on_restore is None:
             self.say("Click a removed (crossed-out) row first.")
             return
         self._run(lambda: self.on_restore(r["id"]))

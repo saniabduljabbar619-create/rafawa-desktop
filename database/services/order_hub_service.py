@@ -129,6 +129,7 @@ class OrderHubService:
                     pay = OrderPaymentService.get_balance(pay_type, o.id) if o.status == "confirmed" else None
                     rows.append({
                         "kind": k, "id": int(o.id), "order_no": o.order_no, "partner": partner,
+                        "partner_id": int(getattr(o, partner_col)),
                         "status": o.status, "created_at": _naive(o.created_at), "dispatched_at": dispatched,
                         "confirmed_at": _naive(o.confirmed_at), "expected": expected,
                         "days_out": max((now - dispatched).days, 0) if in_transit and dispatched else None,

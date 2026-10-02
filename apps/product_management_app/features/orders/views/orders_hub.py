@@ -126,20 +126,8 @@ class OrdersBoard(QWidget):
 
     def _open_selected(self) -> None:
         r = self._selected()
-        if r is None:
-            return
-        if r["kind"] == "sales":
-            from apps.product_management_app.features.sales_orders.dialogs.sales_order_detail_dialog import (
-                SalesOrderDetailDialog,
-            )
-            dlg = SalesOrderDetailDialog(r["id"], parent=self, is_admin=self.hub.is_admin)
-        else:
-            from apps.product_management_app.features.purchase_orders.dialogs.purchase_order_detail_dialog import (
-                PurchaseOrderDetailDialog,
-            )
-            dlg = PurchaseOrderDetailDialog(r["id"], parent=self, is_admin=self.hub.is_admin)
-        dlg.exec_()
-        self.hub.refresh()
+        if r is not None:
+            self.hub.open_order(r["kind"], r["partner_id"], r["id"])
 
     def _track(self) -> None:
         r = self._selected()
@@ -192,10 +180,13 @@ class OrdersHubView(QWidget):
         root.addLayout(kp)
 
         self.tabs = Segmented(TABS)
-        row = QHBoxLayout()
+        self.tabs_row = QWidget()
+        row = QHBoxLayout(self.tabs_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.tabs)
         row.addStretch(1)
-        root.addLayout(row)
+        root.addWidget(self.tabs_row)
+        self._trail = []
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -207,17 +198,15 @@ class OrdersHubView(QWidget):
 
     def _page(self, key: str):
         if key not in self._pages:              # built on first visit
-            if key == "sales":
-                from apps.product_management_app.features.sales_orders.views.companies_view import CompaniesView
-                page = CompaniesView(mode=self.mode)
-            else:
-                from apps.product_management_app.features.purchase_orders.views.suppliers_view import SuppliersView
-                page = SuppliersView(mode=self.mode)
+            from apps.product_management_app.features.orders.views.partners_page import PartnersPage
+            page = PartnersPage(key, is_admin=self.is_admin)
+            page.open_partner.connect(lambda pid, k=key: self.open_profile(k, pid))
             self._pages[key] = page
             self.stack.addWidget(page)
         return self._pages[key]
 
     def show_tab(self, key: str) -> None:
+        self._close_deep_pages()
         self.tabs.set_key(key)
         page = self._page(key)
         if hasattr(page, "refresh"):
@@ -226,6 +215,47 @@ class OrdersHubView(QWidget):
             self.board.reload()
         self.stack.setCurrentWidget(page)
         self.refresh_kpis()
+
+    # ---------------------------------------------------------------- deeper pages (profile, order sheet)
+    def _push(self, page) -> None:
+        self._trail.append(self.stack.currentWidget())
+        self.stack.addWidget(page)
+        self.stack.setCurrentWidget(page)
+        self.tabs_row.setVisible(False)
+
+    def _pop(self) -> None:
+        if not self._trail:
+            return
+        page = self.stack.currentWidget()
+        prev = self._trail.pop()
+        self.stack.setCurrentWidget(prev)
+        self.stack.removeWidget(page)
+        page.deleteLater()
+        for fn in ("reload", "refresh"):
+            if hasattr(prev, fn):
+                getattr(prev, fn)()
+                break
+        self.tabs_row.setVisible(not self._trail)
+        self.refresh_kpis()
+
+    def _close_deep_pages(self) -> None:
+        while self._trail:
+            self._pop()
+
+    def open_profile(self, kind: str, partner_id: int) -> None:
+        from apps.product_management_app.features.orders.views.partner_profile_page import PartnerProfilePage
+        page = PartnerProfilePage(kind, partner_id, is_admin=self.is_admin)
+        page.back.connect(self._pop)
+        page.open_order.connect(lambda oid, k=kind, p=partner_id: self.open_order(k, p, oid))
+        page.new_order.connect(lambda k=kind, p=partner_id: self.open_order(k, p, None))
+        self._push(page)
+
+    def open_order(self, kind: str, partner_id: int, order_id=None) -> None:
+        from apps.product_management_app.features.orders.views.order_sheet_page import OrderSheetPage
+        page = OrderSheetPage(kind, partner_id, order_id, is_admin=self.is_admin)
+        page.back.connect(self._pop)
+        page.changed.connect(self.refresh_kpis)
+        self._push(page)
 
     def refresh(self) -> None:
         self.show_tab(self.tabs.key())
