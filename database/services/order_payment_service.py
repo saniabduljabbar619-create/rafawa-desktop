@@ -170,7 +170,7 @@ class OrderPaymentService:
                 .join(User, User.id == OrderPayment.created_by_user_id)
                 .filter(OrderPayment.order_type == order_type)
                 .filter(OrderPayment.order_id == order_id)
-                .order_by(OrderPayment.created_at.desc())
+                .order_by(OrderPayment.created_at.desc(), OrderPayment.id.desc())
                 .all()
             )
             return [
