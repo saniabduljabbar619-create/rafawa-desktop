@@ -50,8 +50,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.admin_users.views.users_list import UsersListView
     from apps.product_management_app.features.admin_dashboard.views.admin_dashboard import AdminDashboardView
     from apps.product_management_app.features.cashier.views.cashier_daily_summary import CashierDailySummaryView
-    from apps.product_management_app.features.sales_orders.views.companies_view import CompaniesView
-    from apps.product_management_app.features.purchase_orders.views.suppliers_view import SuppliersView
+    from apps.product_management_app.features.orders.views.orders_hub import OrdersHubView
     from apps.product_management_app.features.business_history.views.cashier_list_view import CashierHistoryListView
     from apps.product_management_app.features.reports.views.reports_view import ReportsView
     from apps.product_management_app.features.weigher.views.weigher_station import WeigherStationView
@@ -88,10 +87,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             SidebarItem(label="Debt Center", route="admin.debt_center"),
             SidebarItem(label="Weigh Tickets", route="admin.weigh_tickets"),
             SidebarItem(label="Returns", route="admin.returns"),
-            SidebarItem(label="Orders", children=[
-                SidebarItem(label="Sales Orders", route="admin.sales_orders"),
-                SidebarItem(label="Purchase Orders", route="admin.purchase_orders"),
-            ]),
+            SidebarItem(label="Orders", route="admin.orders"),
             SidebarItem(label="Business History", route="admin.business_history"),
             SidebarItem(label="Reports", route="admin.reports"),
             SidebarItem(label="Users", route="admin.users"),
@@ -111,8 +107,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "admin.debt_center": lambda: DebtCenterView(),
             "admin.weigh_tickets": lambda: WeighTicketsAdminView(mode="admin"),
             "admin.returns": lambda: AdminReturnsView(),
-            "admin.sales_orders": lambda: CompaniesView(mode="admin"),
-            "admin.purchase_orders": lambda: SuppliersView(mode="admin"),
+            "admin.orders": lambda: OrdersHubView(mode="admin"),
             "admin.business_history": lambda: CashierHistoryListView(),
             "admin.reports": lambda: ReportsView(),
             "admin.users": lambda: UsersListView(),
@@ -129,8 +124,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "admin.debt_center": "Debt Center",
             "admin.weigh_tickets": "Weigh Tickets",
             "admin.returns": "Returns",
-            "admin.sales_orders": "Sales Orders",
-            "admin.purchase_orders": "Purchase Orders",
+            "admin.orders": "Orders",
             "admin.business_history": "Aggregated Business History",
             "admin.reports": "Reports",
             "admin.users": "Admin • Users",
@@ -152,10 +146,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
                 SidebarItem(label="Walk-ins", route="cashier.walkins"),
             ]),
             SidebarItem(label="Returns", route="cashier.returns"),
-            SidebarItem(label="Orders", children=[
-                SidebarItem(label="Sales Orders", route="cashier.sales_orders"),
-                SidebarItem(label="Purchase Orders", route="cashier.purchase_orders"),
-            ]),
+            SidebarItem(label="Orders", route="cashier.orders"),
             SidebarItem(label="Receipts", route="cashier.receipts"),
             SidebarItem(label="Daily Summary", route="cashier.daily_summary"),
         ],
@@ -168,8 +159,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.suppliers": lambda: SuppliersListPage(),
             "cashier.walkins": lambda: WalkinsListView(mode="cashier"),
             "cashier.returns": lambda: AdminReturnsView(mode="cashier"),
-            "cashier.sales_orders": lambda: CompaniesView(mode="cashier"),
-            "cashier.purchase_orders": lambda: SuppliersView(mode="cashier"),
+            "cashier.orders": lambda: OrdersHubView(mode="cashier"),
             "cashier.daily_summary": lambda: CashierDailySummaryView(),
         },
         default_route="cashier.sales",
@@ -182,8 +172,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.suppliers": "Suppliers",
             "cashier.walkins": "Walk-ins",
             "cashier.returns": "Returns",
-            "cashier.sales_orders": "Sales Orders",
-            "cashier.purchase_orders": "Purchase Orders",
+            "cashier.orders": "Orders",
             "cashier.daily_summary": "Daily Summary",
         },
     )
