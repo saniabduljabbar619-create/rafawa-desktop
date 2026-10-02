@@ -184,3 +184,125 @@ def test_partners_list_orders_of_and_products():
     prods = {x["id"]: x for x in O.products("sales")}
     assert prods[CROP_ID]["price"] == 100 and prods[FERT_ID]["type"] == "fertilizer"
     assert {x["id"]: x for x in O.products("purchase")}[CROP_ID]["price"] == 80
+
+
+# ----------------------------------------------------------------------------- review notes and corrections
+def _confirmed(kind, rej=None, price=None):
+    p = _partner(kind) if kind == "sales" else PurchaseOrderSupplierService.create("Farm Co", ADMIN_ID)
+    oid = O.create(kind, p, _lines(price_crop=100, price_fert=9000))
+    O.dispatch(kind, oid)
+    O.confirm(kind, oid, _results(O.detail(kind, oid), rej=rej, price=price))
+    return oid
+
+
+@pytest.mark.parametrize("kind", ["sales", "purchase"])
+def test_review_notes_work_at_any_stage_and_are_logged(kind):
+    p = _partner(kind) if kind == "sales" else PurchaseOrderSupplierService.create("Farm Co", ADMIN_ID)
+    oid = O.create(kind, p, _lines())
+    O.add_review(kind, oid, "Delay", "Truck delayed at the border")                 # draft
+    O.dispatch(kind, oid)
+    O.add_review(kind, oid, "Damaged goods", "2 bags torn on the road")             # on the road
+    O.confirm(kind, oid, _results(O.detail(kind, oid)))
+    O.add_review(kind, oid, "bogus category", "called the driver")                  # confirmed; unknown -> Note
+    r = O.detail(kind, oid)["reviews"]
+    assert [(x["category"], x["correction"]) for x in r] == [("Delay", False), ("Damaged goods", False), ("Note", False)]
+    assert r[0]["text"] == "Truck delayed at the border" and r[0]["by"] == "admin"
+    with pytest.raises(ValueError):
+        O.add_review(kind, oid, "Note", "  ")
+
+
+def test_sales_correction_more_damaged_returns_stock_recalculates_and_logs():
+    oid = _confirmed("sales")
+    d = O.detail("sales", oid)
+    assert d["total"] == 500 * 100 + 10 * 9000
+    kg0, bags0 = stock(CROP_ID)[1], stock(CROP_ID)[0]
+    crops = d["lines"][0]
+    res = O.correct_line("sales", oid, crops["id"], "100 kg arrived wet and was refused later", rej_qty=100,
+                         category="Damaged goods")
+    assert res == {"total_before": 140000.0, "total_after": 130000.0, "stock_moved": True}
+    assert stock(CROP_ID)[1] == kg0 + 100 and stock(CROP_ID)[0] == bags0 + 1              # 5 bags x 100/500
+    d = O.detail("sales", oid)
+    line = d["lines"][0]
+    assert (line["rej_qty"], line["acc_qty"], line["final"]) == (100, 400, 40000) and d["total"] == 130000
+    log = d["reviews"][-1]
+    assert log["correction"] and log["category"] == "Damaged goods" and (log["total_before"], log["total_after"]) == (140000, 130000)
+    assert d["balance"] == 130000
+
+
+def test_sales_correction_without_stock_move_and_price_change_and_reversal():
+    oid = _confirmed("sales")
+    crops = O.detail("sales", oid)["lines"][0]
+    kg0 = stock(CROP_ID)[1]
+    O.correct_line("sales", oid, crops["id"], "destroyed in the buyer's store", rej_qty=100, stock_move=False)
+    assert stock(CROP_ID)[1] == kg0 and O.detail("sales", oid)["total"] == 130000                # written off, not restocked
+    O.correct_line("sales", oid, crops["id"], "agreed a discount", price=90, category="Price issue")
+    assert O.detail("sales", oid)["lines"][0]["final"] == 400 * 90
+    O.correct_line("sales", oid, crops["id"], "my mistake, nothing was damaged", rej_qty=0, stock_move=False)
+    assert O.detail("sales", oid)["lines"][0]["acc_qty"] == 500
+
+
+def test_purchase_correction_removes_damaged_goods_from_stock():
+    oid = _confirmed("purchase")
+    d = O.detail("purchase", oid)
+    kg0 = stock(CROP_ID)[1]
+    O.correct_line("purchase", oid, d["lines"][0]["id"], "found rotten in the warehouse", rej_qty=30)
+    assert stock(CROP_ID)[1] == kg0 - 30
+    d = O.detail("purchase", oid)
+    assert d["lines"][0]["acc_qty"] == 470 and d["total"] == 470 * 100 + 10 * 9000
+    O.correct_line("purchase", oid, d["lines"][0]["id"], "recounted - it was fine", rej_qty=0)    # reversing puts it back
+    assert stock(CROP_ID)[1] == kg0 and O.detail("purchase", oid)["lines"][0]["acc_qty"] == 500
+
+
+def test_correction_rules():
+    oid = _confirmed("sales")
+    d = O.detail("sales", oid)
+    lid = d["lines"][0]["id"]
+    with pytest.raises(ValueError, match="reason"):
+        O.correct_line("sales", oid, lid, " ", rej_qty=5)
+    with pytest.raises(ValueError, match="Nothing changed"):
+        O.correct_line("sales", oid, lid, "x", rej_qty=0)
+    with pytest.raises(ValueError, match="between 0"):
+        O.correct_line("sales", oid, lid, "x", rej_qty=501)
+    with pytest.raises(ValueError, match="negative"):
+        O.correct_line("sales", oid, lid, "x", price=-1)
+    with pytest.raises(ValueError, match="does not belong"):
+        O.correct_line("sales", oid, 99999, "x", rej_qty=1)
+    # not a confirmed order
+    p = CompanyService.create("Other Co", ADMIN_ID)
+    draft = O.create("sales", p, _lines())
+    with pytest.raises(ValueError, match="confirmed"):
+        O.correct_line("sales", draft, O.detail("sales", draft)["lines"][0]["id"], "x", rej_qty=1)
+    assert O.detail("sales", oid)["reviews"] == []                                     # refusals logged nothing
+
+
+def test_purchase_correction_refused_when_the_goods_are_no_longer_in_stock():
+    oid = _confirmed("purchase")
+    from database.services.sales_service import SaleService
+    have = stock(CROP_ID)[1]
+    SaleService.record({"buyer_party_id": 1, "created_by_user_id": ADMIN_ID,
+                        "items": [{"product_id": CROP_ID, "qty_bags": 20, "total_weight_kg": have, "unit_price": 1}]})
+    with pytest.raises(ValueError, match="Not enough"):
+        O.correct_line("purchase", oid, O.detail("purchase", oid)["lines"][0]["id"], "rotten", rej_qty=30)
+    assert O.detail("purchase", oid)["lines"][0]["rej_qty"] == 0                        # nothing half-applied
+
+
+def test_overpayment_after_a_correction_is_shown_not_hidden():
+    oid = _confirmed("sales")
+    O.pay("sales", oid, 140000)
+    d = O.detail("sales", oid)
+    assert d["pay_status"] == "paid" and d["overpaid"] == 0
+    O.correct_line("sales", oid, d["lines"][0]["id"], "damaged", rej_qty=100)
+    d = O.detail("sales", oid)
+    assert d["total"] == 130000 and d["balance"] == 0 and d["overpaid"] == 10000
+
+
+def test_correction_is_admin_only_but_notes_are_for_everyone_who_works_orders():
+    oid = _confirmed("sales")
+    lid = O.detail("sales", oid)["lines"][0]["id"]
+    set_session(UserSession(user_id=CASHIER_A, username="alice", role="cashier"))
+    with pytest.raises(PermissionDenied):
+        O.correct_line("sales", oid, lid, "x", rej_qty=1)
+    O.add_review("sales", oid, "Note", "customer called")
+    set_session(UserSession(user_id=CASHIER_A, username="w", role="weigher"))
+    with pytest.raises(PermissionDenied):
+        O.add_review("sales", oid, "Note", "x")

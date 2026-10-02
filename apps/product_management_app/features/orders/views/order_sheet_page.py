@@ -24,7 +24,7 @@ from PySide2.QtWidgets import (
     QTabBar, QVBoxLayout, QWidget,
 )
 
-from database.services.order_sheet_service import OrderSheetService, estimate
+from database.services.order_sheet_service import REVIEW_CATEGORIES, OrderSheetService, estimate
 from shared.auth.permissions import PermissionDenied
 from shared.uix.widgets.cards import avatar, chip, money
 from apps.product_management_app.features.debt_center.sheet_style import STYLE
@@ -98,7 +98,15 @@ class OrderSheetPage(QWidget):
             self.step_labels.append(lab)
             self.steps.addWidget(lab)
         self.steps.addStretch(1)
+        self.btn_next = QPushButton("")
+        self.btn_next.setObjectName("msBig")
+        self.btn_next.setMinimumHeight(30)
+        self.steps.addWidget(self.btn_next)
         root.addLayout(self.steps)
+        self.lbl_next = QLabel("")
+        self.lbl_next.setObjectName("dcSub")
+        self.lbl_next.setWordWrap(True)
+        root.addWidget(self.lbl_next)
 
         kp = QHBoxLayout()
         kp.setSpacing(10)
@@ -142,11 +150,14 @@ class OrderSheetPage(QWidget):
         self.btn_fill.setToolTip("Everything arrived as ordered: copy the ordered quantity and price into the result")
         self.btn_confirm = QPushButton(self.w["confirm"])
         self.btn_confirm.setObjectName("msPay")
+        self.btn_correct = QPushButton("Review / correct a line…")
+        self.btn_correct.setObjectName("dcGhost")
+        self.btn_correct.setToolTip("Goods found damaged or short after delivery, a wrong count or a price dispute")
         self.btn_revert = QPushButton("Revert to draft")
         self.btn_revert.setObjectName("dcGhost")
         self.btn_cancel = QPushButton("Cancel order")
         self.btn_cancel.setObjectName("dcGhost")
-        for b in (self.btn_add, self.btn_remove, self.btn_fill, self.btn_go, self.btn_confirm):
+        for b in (self.btn_add, self.btn_remove, self.btn_fill, self.btn_go, self.btn_confirm, self.btn_correct):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.btn_revert)
@@ -189,6 +200,8 @@ class OrderSheetPage(QWidget):
         self.btn_add.clicked.connect(lambda: self.grid.add_row())
         self.btn_remove.clicked.connect(lambda: self.grid.remove())
         self.btn_go.clicked.connect(self._go)
+        self.btn_next.clicked.connect(self._next_step)
+        self.btn_correct.clicked.connect(self._correct)
         self.btn_fill.clicked.connect(self._fill)
         self.btn_confirm.clicked.connect(self._confirm)
         self.btn_revert.clicked.connect(self._revert)
@@ -270,7 +283,10 @@ class OrderSheetPage(QWidget):
         self.k_value.val.setText(money(value))
         self.k_value.cap.setText("Order value" + (" (estimate)" if (not d or d["estimated"]) else " (final)"))
         self.k_paid.val.setText(money(d["paid"] if d else 0))
-        if d and d["balance"] is not None:
+        if d and d["balance"] is not None and d["overpaid"] > 0.005:
+            self.k_balance.val.setText(money(d["overpaid"]))
+            self.k_balance.cap.setText("Overpaid - refund or void a payment")
+        elif d and d["balance"] is not None:
             self.k_balance.val.setText(money(d["balance"]))
             self.k_balance.cap.setText("Still to pay" if self.kind == "purchase" else "Still to receive")
         else:
@@ -313,6 +329,63 @@ class OrderSheetPage(QWidget):
         self.btn_confirm.setVisible(st == "in_transit")
         self.btn_revert.setVisible(adm and st == "in_transit")
         self.btn_cancel.setVisible(adm and st == "draft")
+        self.btn_correct.setVisible(adm and st == "confirmed")
+        self._render_next()
+
+    # ================================================================== what happens next
+    def _render_next(self) -> None:
+        st, adm, w = self.stage, self.is_admin, self.w
+        d = self.d
+        if st == "new":
+            text, hint, show = "", "Add the lines below. The order is saved as a draft as soon as the first line is complete.", False
+        elif st == "draft":
+            show = adm
+            text = f"{w['go']}  →"
+            hint = ("A draft can stay as long as you like - review it, add notes, change the lines. When the goods "
+                    + ("leave the warehouse" if self.kind == "sales" else "are on the road")
+                    + f", press {w['go']}.")
+        elif st == "in_transit":
+            show, text = True, f"{w['confirm']}  →"
+            hint = ("The goods are on the road. When they arrive, enter below how much was "
+                    + ("received by the company" if self.kind == "sales" else "received")
+                    + ", what was rejected and the price (or use Fill from order), then " + w["confirm"].lower() + ".")
+        elif st == "confirmed":
+            owing = d and d["balance"] is not None and d["balance"] > 0.005
+            show, text = bool(owing), "Record a payment  →"
+            over = d["overpaid"] if d else 0
+            hint = ("Delivered and confirmed. " + ("Take a payment in the Payments tab. " if owing else
+                    ("Fully paid. " if not over else f"Overpaid by {money(over)} - void or refund in the Payments tab. "))
+                    + ("Something wrong after delivery (damaged, short, wrong count)? Use Review / correct a line." if adm
+                       else ""))
+        else:
+            show, text, hint = False, "", "This order was cancelled."
+        self.btn_next.setVisible(show)
+        self.btn_next.setText(text)
+        self.lbl_next.setText(hint)
+
+    def _next_step(self) -> None:
+        st = self.stage
+        if st == "draft":
+            self._go()
+        elif st == "in_transit":
+            self._confirm()
+        elif st == "confirmed":
+            self.tabs.setCurrentIndex(1)
+
+    def _correct(self) -> None:
+        line = None
+        row = self.grid.table.currentRow() if self.grid else -1
+        if 0 <= row < len(self.lines):
+            line = self.lines[row]
+        if line is None:
+            self.say("Click the line you want to review first.")
+            return
+        from apps.product_management_app.features.orders.dialogs.correction_dialog import CorrectionDialog
+        dlg = CorrectionDialog(self.kind, self.d, line, self)
+        if dlg.exec_() == dlg.Accepted:
+            self.say("Correction applied - it is in the History tab.", bad=False)
+            self._refresh()
+            self.tabs.setCurrentIndex(0)
 
     # ================================================================== lines grid
     def _line_cells(self, l: Dict[str, Any]) -> Dict[str, Any]:
@@ -625,20 +698,38 @@ class OrderSheetPage(QWidget):
         d = self.d
         events = []
         for e in (d["timeline"] if d else []):
-            events.append((e["at"], e["event"], e["by"], ""))
+            events.append((e["at"], "Status", e["event"], e["by"], ""))
         for p in (d["payments"] if d else []):
             note = f"Payment {money(p['amount'])} ({(p['method'] or '').title()})"
-            events.append((p["created_at"], note + (" - VOIDED" if p["status"] == "voided" else ""), p["created_by"],
-                           p["notes"]))
+            events.append((p["created_at"], "Payment", note + (" - VOIDED" if p["status"] == "voided" else ""),
+                           p["created_by"], p["notes"]))
+        for r in (d["reviews"] if d else []):
+            what = r["text"]
+            if r["correction"]:
+                what = f"{r['text']}   [total {money(r['total_before'])} → {money(r['total_after'])}" + \
+                       (", stock adjusted" if r["stock_moved"] else ", stock not moved") + "]"
+            events.append((r["at"], ("Correction: " if r["correction"] else "") + r["category"], what, r["by"], ""))
         events.sort(key=lambda e: (e[0] is None, e[0]))
-        cols = [{"key": "at", "label": "When", "type": "text", "width": 150, "readonly": True},
-                {"key": "event", "label": "What happened", "type": "text", "width": 360, "stretch": True,
-                 "readonly": True},
-                {"key": "by", "label": "By", "type": "text", "width": 140, "readonly": True},
-                {"key": "note", "label": "Note", "type": "text", "width": 240, "readonly": True}]
+        cols = [{"key": "at", "label": "When", "type": "text", "width": 140, "readonly": True},
+                {"key": "category", "label": "Type", "type": "choice", "options": REVIEW_CATEGORIES, "width": 190},
+                {"key": "text", "label": "What happened / note", "type": "text", "width": 420, "stretch": True},
+                {"key": "by", "label": "By", "type": "text", "width": 120, "readonly": True},
+                {"key": "extra", "label": "Note", "type": "text", "width": 160, "readonly": True}]
         rows = [{"id": i, "locked": True,
-                 "cells": {"at": e[0].strftime("%d/%m/%Y %H:%M") if e[0] else "", "event": e[1], "by": e[2],
-                           "note": e[3]}} for i, e in enumerate(events)]
-        grid = SheetGrid(columns=cols, allow_add=False, hint="Everything that has happened to this order, in order.")
-        grid.set_rows(rows, {"event": f"{len(rows)} event(s)"})
+                 "cells": {"at": e[0].strftime("%d/%m/%Y %H:%M") if e[0] else "", "category": e[1], "text": e[2],
+                           "by": e[3], "extra": e[4]}} for i, e in enumerate(events)]
+        can_note = bool(d)
+        grid = SheetGrid(columns=cols, first_edit_key="text", placeholder_key="text", defaults={"category": "Note"},
+                         ready=self._ready_note, on_add=self._add_note, allow_add=can_note, notify=self.say,
+                         reload=self._refresh,
+                         hint=("Everything that has happened to this order, in order. Type a review note in the last "
+                               "row (a delay, damage on the road, a call with the driver ...); it is kept for good."
+                               if can_note else "Save the order first - notes can be added once it exists."))
+        grid.set_rows(rows, {"text": f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}"})
         self._swap(self.slot_hist, grid)
+
+    def _ready_note(self, v) -> str:
+        return "" if str(v.get("text", "")).strip() else "Now write the note to save it."
+
+    def _add_note(self, v) -> None:
+        OrderSheetService.add_review(self.kind, self.order_id, v.get("category") or "Note", v.get("text", ""))
