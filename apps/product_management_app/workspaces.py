@@ -57,6 +57,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.weigher.views.weigher_station import WeigherStationView
     from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
     from apps.product_management_app.features.weigher.views.weigh_tickets_admin import WeighTicketsAdminView
+    from apps.product_management_app.features.debt_center.views.debt_center import DebtCenterView
 
     # 👑 THE ANCHOR BLUEPRINTS: Import the completed executive analytics and valuation dashboards
     from apps.product_management_app.features.catalog.views.product_profit_view import ProductProfitView
@@ -84,6 +85,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
                 SidebarItem(label="Sales", route="catalog.sales"),
                 SidebarItem(label="Profits", route="catalog.profits"),
             ]),
+            SidebarItem(label="Debt Center", route="admin.debt_center"),
             SidebarItem(label="Weigh Tickets", route="admin.weigh_tickets"),
             SidebarItem(label="Returns", route="admin.returns"),
             SidebarItem(label="Orders", children=[
@@ -106,6 +108,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.profits": lambda: ProductProfitView(),
             "catalog.capital": lambda: ProductCapitalView(),
             "catalog.live_valuation": lambda: ProductInventoryCapitalView(),
+            "admin.debt_center": lambda: DebtCenterView(),
             "admin.weigh_tickets": lambda: WeighTicketsAdminView(mode="admin"),
             "admin.returns": lambda: AdminReturnsView(),
             "admin.sales_orders": lambda: CompaniesView(mode="admin"),
@@ -123,6 +126,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.products": "Catalog • Products",
             "catalog.sales": "Catalog • Sales",
             "catalog.profits": "Catalog • Realized Profit & Margins",
+            "admin.debt_center": "Debt Center",
             "admin.weigh_tickets": "Weigh Tickets",
             "admin.returns": "Returns",
             "admin.sales_orders": "Sales Orders",

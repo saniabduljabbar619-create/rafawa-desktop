@@ -52,3 +52,19 @@ calls for the role and never returns a price to a weigher. A ticket is `open` (b
 `submitted` (locked for the weigher) -> `finalized` (a `Purchase` exists) or `cancelled`.
 Finalizing takes a row lock on the ticket so two terminals cannot book it twice. Corrections made
 at intake are written to `audit_logs`.
+
+
+## Debt Center (admin)
+
+`features/debt_center/` - hub with three tiles; double-click opens **My Creditors** (we owe, from
+purchases), **My Debtors** (they owe us, from sales) or **Expenses**. A party row opens a
+**worksheet**: open documents (tick some to pay only those, otherwise oldest first), a payment panel,
+and the payment trail.
+
+- `services/debt_center_service.py` - balances come from `document_balance` (never re-derived);
+  `pay()` spreads one amount over the open documents in a single transaction, refuses overpayment,
+  writes ordinary `Payment` rows (so every other screen sees them) and an audit entry.
+- `services/expense_service.py` + `models/expense.py` (migration `0005`) - expenses are never deleted;
+  a wrong one is voided with a reason, edits are audited. Admin only. Expenses are not yet linked
+  to the cashier drawer.
+- Walk-ins are not listed (they share one anonymous party, so a per-person balance does not exist).
