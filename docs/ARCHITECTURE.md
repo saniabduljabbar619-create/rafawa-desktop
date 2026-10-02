@@ -82,3 +82,15 @@ and the payment trail.
 - **Net off.** Debt Center worksheet, for a party we both owe and are owed by.
 - An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
   balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).
+
+## Orders (unified)
+
+One sidebar entry, **Orders** (`features/orders/views/orders_hub.py`), in the Product Management and
+Cashier workspaces. Tabs: **Tracking board** (every Sales and Purchase Order: status, days on the road,
+overdue delivery, value, payment balance; double-click opens the order, *Track history* shows who did
+what and when), **Sales Orders** (companies) and **Purchase Orders** (suppliers).
+
+Companies and PO suppliers stay two tables (their orders keep their own foreign keys) but are ONE pool:
+`OrderHubService.sync_partners()` copies any partner missing on the other side (matched by name), and
+both `create()` services call it, so a partner added on one side shows in the other side's picker.
+Details are copied at creation; later edits to a phone/address are not kept in step.

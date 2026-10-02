@@ -79,7 +79,12 @@ class PurchaseOrderSupplierService:
             )
             s.add(sup)
             s.flush()
-            return int(sup.id)
+            new_id = int(sup.id)
+
+        # the same counterparty must be pickable on the other side too (Sales <-> Purchase Orders)
+        from database.services.order_hub_service import OrderHubService
+        OrderHubService.sync_partners()
+        return new_id
 
     @staticmethod
     def get(supplier_id: int) -> Optional[Dict]:
