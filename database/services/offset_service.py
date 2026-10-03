@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import func
 
+from database.models.category import Category
 from database.models.document_offset import DocumentOffset
 from database.models.party import Party
 from database.models.product import Product
@@ -180,6 +181,7 @@ class SwapService:
         """Products we could hand over, with what is on the shelf right now."""
         with get_session() as s:
             prods = s.query(Product).filter(Product.is_active == True).order_by(Product.name).all()  # noqa: E712
+            cats = {int(c.id): c.name for c in s.query(Category).all()}
             bags: Dict[int, float] = {}
             kg: Dict[int, float] = {}
             for pid, mtype, b, w in s.query(StockMovement.product_id, StockMovement.movement_type,
@@ -190,7 +192,8 @@ class SwapService:
                 bags[int(pid)] = bags.get(int(pid), 0.0) + sign * _f(b)
                 kg[int(pid)] = kg.get(int(pid), 0.0) + sign * _f(w)
             return [{"id": int(p.id), "name": p.name, "sku": p.sku, "type": str(p.product_type or "").lower(),
-                     "price": _f(p.default_sale_rate), "bags": bags.get(int(p.id), 0.0),
+                     "price": _f(p.default_sale_rate), "category": cats.get(int(p.category_id or 0), ""),
+                     "bags": bags.get(int(p.id), 0.0),
                      "kg": kg.get(int(p.id), 0.0)}
                     for p in prods]
 
@@ -201,45 +204,103 @@ class SwapService:
         """
         received: purchase lines (PurchaseService.record item shape) - what he brings us.
         given:    sale lines (SaleService.record item shape)         - what we hand him.
+        """
+        if not received:
+            raise ValueError("Add the goods he is bringing us.")
+        if not given:
+            raise ValueError("Add the goods we are giving him.")
+        return SwapService.record_from_records(party_id, [], [], received, given, note)
 
-        Both documents are recorded and then set against each other for the smaller total. If the
-        second document fails, the first is voided so a half-recorded swap never remains.
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def record_from_records(party_id: int, purchase_ids: Iterable[int], sale_ids: Iterable[int],
+                            received: List[Dict[str, Any]], given: List[Dict[str, Any]],
+                            note: str = "") -> Dict[str, Any]:
+        """
+        A swap built from records already on the profile plus new goods.
+
+          purchase_ids  purchases from him already recorded (what we still owe him on them)
+          sale_ids      sales to him already recorded       (what he still owes us on them)
+          received      NEW goods he brings now  -> recorded as one new purchase
+          given         NEW goods we hand him now -> recorded as one new sale
+
+        Everything on the "we owe him" side is set against everything on the "he owes us" side, oldest
+        first, for the smaller total; only the difference is left to settle either way. Nothing is
+        written unless both sides have something to set against. If a later step fails, the documents
+        this call created are voided so a half-recorded swap never remains.
         """
         from database.services.purchase_service import PurchaseService
         from database.services.sales_service import SaleService
 
         party_id = int(party_id)
+        purchase_ids, sale_ids = [int(i) for i in purchase_ids], [int(i) for i in sale_ids]
+        received, given = list(received or []), list(given or [])
         if party_id <= 0 or party_id == WALKIN_PARTY_ID:
             raise ValueError("Choose a registered customer or supplier for a swap.")
-        if not received:
-            raise ValueError("Add the goods he is bringing us.")
-        if not given:
-            raise ValueError("Add the goods we are giving him.")
+        if not (purchase_ids or received):
+            raise ValueError("Choose the purchases from him, or add the goods he is bringing us.")
+        if not (sale_ids or given):
+            raise ValueError("Choose the sales to him, or add the goods we are giving him.")
         user_id = int(require_user_id())
         label = ("Swap" + (f": {note.strip()}" if (note or "").strip() else ""))[:200]
 
+        with get_session() as s:                      # every chosen record must be an open one of his
+            open_p = {d["doc_id"]: d["balance"] for d in _open_docs(s, "creditors", party_id)}
+            open_s = {d["doc_id"]: d["balance"] for d in _open_docs(s, "debtors", party_id)}
+        for ids, open_, word in ((purchase_ids, open_p, "purchase"), (sale_ids, open_s, "sale")):
+            bad = [i for i in ids if i not in open_]
+            if bad:
+                raise ValueError(f"{word.title()} {bad[0]} is not an open (unpaid) record of this customer.")
+        new_in = round(sum(_buy_total(i) for i in received), 2)
+        new_out = round(sum(_sell_total(i) for i in given), 2)
+        we_owe = round(sum(open_p[i] for i in purchase_ids) + new_in, 2)
+        they_owe = round(sum(open_s[i] for i in sale_ids) + new_out, 2)
+        if we_owe <= EPS or they_owe <= EPS:
+            raise ValueError("Nothing to set against: both sides need a value above zero.")
+
         purchase_payload = {"supplier_party_id": party_id, "created_by_user_id": user_id, "items": received,
                             "note": label, "auto_flag_supplier": True}
-        PurchaseService._validate_payload(purchase_payload)         # fail before anything is written
+        if received:
+            PurchaseService._validate_payload(purchase_payload)         # fail before anything is written
 
-        sale = SaleService.record({"buyer_party_id": party_id, "created_by_user_id": user_id,
-                                   "items": given, "note": label})         # stock is checked here
+        sale = purchase = None
         try:
-            purchase = PurchaseService.record(purchase_payload)
+            if given:
+                sale = SaleService.record({"buyer_party_id": party_id, "created_by_user_id": user_id,
+                                           "items": given, "note": label})      # stock is checked here
+            if received:
+                purchase = PurchaseService.record(purchase_payload)
+            res = OffsetService.apply(
+                party_id, purchase_ids=purchase_ids + ([purchase["purchase_id"]] if purchase else []),
+                sale_ids=sale_ids + ([sale["sale_id"]] if sale else []), kind="swap", note=label)
         except Exception:
             with system_context():
-                SaleService.void_sale(int(sale["sale_id"]), user_id, "Swap failed - purchase side not recorded")
+                if sale:
+                    SaleService.void_sale(int(sale["sale_id"]), user_id, "Swap failed - not recorded")
+                if purchase:
+                    PurchaseService.void_purchase(int(purchase["purchase_id"]), user_id, "Swap failed - not recorded")
             raise
 
-        p_total, s_total = _f(purchase["total_amount"]), _f(sale["total_amount"])
-        res = OffsetService.apply(party_id, purchase_ids=[purchase["purchase_id"]],
-                                  sale_ids=[sale["sale_id"]], kind="swap", note=label)
         with get_session() as s:
             AuditService.record("swap.record", "party", party_id,
-                                f"Swap: received {p_total:,.2f}, gave {s_total:,.2f}",
-                                {"purchase_id": purchase["purchase_id"], "sale_id": sale["sale_id"]}, session=s)
+                                f"Swap: he brings {we_owe:,.2f}, we give {they_owe:,.2f}",
+                                {"purchase_ids": purchase_ids, "sale_ids": sale_ids,
+                                 "new_purchase_id": purchase["purchase_id"] if purchase else None,
+                                 "new_sale_id": sale["sale_id"] if sale else None}, session=s)
             s.commit()
-        diff = round(p_total - s_total, 2)
-        return {"purchase_id": int(purchase["purchase_id"]), "sale_id": int(sale["sale_id"]),
-                "purchase_total": p_total, "sale_total": s_total, "offset": res["amount"],
+        diff = round(we_owe - they_owe, 2)
+        return {"purchase_id": int(purchase["purchase_id"]) if purchase else None,
+                "sale_id": int(sale["sale_id"]) if sale else None,
+                "purchase_total": we_owe, "sale_total": they_owe, "offset": res["amount"],
                 "we_owe_him": max(diff, 0.0), "he_owes_us": max(-diff, 0.0)}
+
+
+def _buy_total(it: Dict[str, Any]) -> float:
+    crops = str(it.get("product_type", "")).lower() != "fertilizer"
+    return _f(it["total_weight_kg"] if crops else it["qty_bags"]) * _f(it["unit_cost"])
+
+
+def _sell_total(it: Dict[str, Any]) -> float:
+    """A sale line: product_id, qty_bags, total_weight_kg (crops only), unit_price. Crops are sold by the kg."""
+    kg = _f(it.get("total_weight_kg"))
+    return (kg if kg > 0 else _f(it["qty_bags"])) * _f(it["unit_price"])
