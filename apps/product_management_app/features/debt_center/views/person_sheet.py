@@ -6,20 +6,20 @@ import csv
 
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStackedWidget, QTabBar, QVBoxLayout, QWidget,
 )
 
 from database.services.debt_book_service import DebtBookService
 from shared.uix.widgets.cards import avatar, chip, money
-from apps.product_management_app.features.debt_center.dialogs.payment_dialog import PaymentDialog
 from apps.product_management_app.features.debt_center.sheet_style import STYLE
+from apps.product_management_app.features.debt_center.views.payments_sheet import PaymentsSheet
 from apps.product_management_app.features.debt_center.views.people_page import kpi
 from apps.product_management_app.features.debt_center.views.sheet_grid import SheetGrid, today_iso
 
 WORDS = {
-    "creditor": {"owed": "He gave us / we owe (₦)", "paid": "We paid him (₦)", "pay": "Record payment to him", "list": "My Creditors",
+    "creditor": {"owed": "He gave us / we owe (₦)", "paid": "We paid him (₦)", "pay": "Pay this record", "list": "My Creditors",
                  "bal": "We still owe him", "owed_cap": "Total he gave us", "paid_cap": "Total we paid him"},
-    "debtor": {"owed": "We gave him / he owes (₦)", "paid": "He paid us (₦)", "pay": "Record payment from him", "list": "My Debtors",
+    "debtor": {"owed": "We gave him / he owes (₦)", "paid": "He paid us (₦)", "pay": "Receive on this record", "list": "My Debtors",
                "bal": "He still owes us", "owed_cap": "Total we gave him", "paid_cap": "Total he paid us"},
 }
 
@@ -96,10 +96,22 @@ class PersonSheetPage(QWidget):
             ready=self._ready, on_add=self._add, on_edit=self._edit, on_remove=self._remove,
             on_restore=lambda rid: DebtBookService.restore_entry(rid), reload=self.reload,
             hint="Type in the last row to add a debt - “What it was for” and the amount save it. To pay on a row, "
-                 "click the row and press “Record payment” - every payment is saved separately on that row. "
+                 "click the row and press “Pay this record” (or open the Payments tab) - every payment is its own saved row. "
                  "Right-click a row to remove it. This sheet is your own record; it does not change any "
                  "customer, supplier, sale or purchase.")
-        root.addWidget(self.grid, 1)
+        self.payments = PaymentsSheet(self.person_id, w["paid"].replace(" (₦)", ""), self._payments_saved)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.grid)
+        self.stack.addWidget(self.payments)
+        root.addWidget(self.stack, 1)
+        self.tabs = QTabBar()
+        self.tabs.setObjectName("msSheets")
+        self.tabs.setShape(QTabBar.RoundedSouth)
+        self.tabs.setDrawBase(False)
+        self.tabs.addTab("Records")
+        self.tabs.addTab("Payments")
+        self.tabs.currentChanged.connect(self._tab)
+        root.addWidget(self.tabs)
 
         self.btn_add.clicked.connect(self.grid.add_row)
         self.btn_pay.clicked.connect(self._pay)
@@ -121,19 +133,27 @@ class PersonSheetPage(QWidget):
             return "Now type the amount of the debt to save the row."
         return ""
 
+    def _tab(self, i: int) -> None:
+        self.stack.setCurrentIndex(i)
+        for b in (self.btn_add, self.btn_pay, self.btn_remove, self.btn_restore):
+            b.setVisible(i == 0)
+
     def _pay(self) -> None:
         r = self.grid.selected_row()
         if not r or r.get("id") is None:
-            self.grid.say("Click the debt row you are paying on first.")
+            self.grid.say("Click the record you are paying on first.")
             return
         if r.get("removed"):
-            self.grid.say("That row is crossed out - bring it back before paying on it.")
+            self.grid.say("That record is crossed out - bring it back before paying on it.")
             return
-        dlg = PaymentDialog(r["id"], self.person_id, self.words["paid"].replace(" (₦)", ""), self)
-        dlg.exec_()
-        if dlg.changed:
-            self.reload()
-            self.changed.emit()
+        self.tabs.setCurrentIndex(1)
+        self.payments.select_record(r["id"])
+
+    def _payments_saved(self) -> None:
+        keep = self.payments.msg.text()
+        self.reload()
+        self.changed.emit()
+        self.payments.msg.setText(keep)
 
     def _add(self, values) -> None:
         DebtBookService.add_entry(self.person_id, values)
@@ -195,6 +215,7 @@ class PersonSheetPage(QWidget):
                              "running": "" if r["removed"] else money(r["running"])},
                 "tip": (f"Removed: {r['removed_reason']}" if r["removed"] and r["removed_reason"] else ""),
             })
+        self.payments.load(self.data["rows"])
         self.grid.set_rows(rows, {"owed": money(f["owed"]), "paid": money(f["paid"]),
                                   "left": money(f["balance"]), "running": money(f["balance"])})
 

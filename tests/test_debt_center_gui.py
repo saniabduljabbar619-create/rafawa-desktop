@@ -220,22 +220,45 @@ def test_period_filter_and_validation_message(qapp, boxes):
     assert "amount" in pg.grid.msg.text().lower() and len(E.list_expenses()) == 2
 
 
-def test_record_payment_dialog_saves_each_payment_on_the_selected_row(qapp, boxes):
-    from apps.product_management_app.features.debt_center.dialogs.payment_dialog import PaymentDialog
+def test_payments_sheet_pick_a_record_type_the_amount_save_and_pay_the_rest_later(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.debt_center.views import sheet_grid as sg
     from apps.product_management_app.features.debt_center.views.person_sheet import PersonSheetPage
     c = B.add_person("creditor", "Alhaji Musa")
-    r = B.add_entry(c, {"details": "Crops purchasing", "owed": 50_000_000})
+    r1 = B.add_entry(c, {"details": "Crops purchasing", "owed": 50_000_000})
+    r2 = B.add_entry(c, {"details": "Fertilizer", "owed": 2_000_000})
     sh = PersonSheetPage(c, "creditor")
-    sh.grid.say  # page is built
-    dlg = PaymentDialog(r, c, "We paid him")
-    dlg.amount.setText("30000000")
-    dlg.save()
-    dlg.amount.setText("10000000")
-    dlg.save()
-    assert dlg.changed and dlg.table.rowCount() == 2 and "paid so far 40,000,000.00" in dlg.sub.text()
-    dlg.amount.setText("20000000")
-    dlg.save()                                                                    # more than the 10m left
-    assert "Only 10,000,000.00" in dlg.msg.text() and dlg.table.rowCount() == 2
-    sh.reload()
-    assert sh.k_balance.val.text() == "10,000,000.00" and sh.k_paid.val.text() == "40,000,000.00"
-    assert sh.grid.table.item(0, 5).text() == "40,000,000.00" and sh.grid.table.item(0, 6).text() == "10,000,000.00"
+    pay = sh.payments
+    assert pay.record.count() == 2 and sh.tabs.count() == 2
+
+    sh.grid.table.setCurrentCell(0, 1)                   # select the record on the Records tab ...
+    sh.btn_pay.click()                                   # ... and jump to Payments with it picked
+    assert sh.stack.currentWidget() is pay and pay.record.currentData() == r1
+
+    pay.amount.setText("30000000")
+    pay.save()
+    assert pay.msg.text() == "Payment saved." and pay.grid.table.rowCount() == 1
+    pay.select_record(r1)
+    pay.amount.setText("10000000")
+    pay.save()
+    assert B.sheet(c)["rows"][0]["paid"] == 40_000_000 and len(B.sheet(c)["rows"][0]["payments"]) == 2
+    assert pay.grid.table.rowCount() == 2
+    assert pay.grid.table.item(1, 6).text() == "10,000,000.00"        # record still unpaid after the 2nd payment
+    assert sh.k_balance.val.text() == "12,000,000.00"
+    assert sh.grid.table.item(0, 5).text() == "40,000,000.00"          # Records tab shows paid so far
+
+    pay.select_record(r1)
+    pay.amount.setText("20000000")
+    pay.save()                                                          # more than the 10m left
+    assert "Only 10,000,000.00" in pay.msg.text() and pay.grid.table.rowCount() == 2
+
+    pay.select_record(r1)                                               # pay the rest later
+    pay.amount.setText("10000000")
+    pay.save()
+    assert pay.record.count() == 1 and pay.record.currentData() == r2   # settled records leave the picker
+    assert pay.grid.foot.item(0, 3).text() == "50,000,000.00"
+
+    pay.grid.table.setCurrentCell(0, 1)
+    monkeypatch.setattr(sg.QInputDialog, "getText", staticmethod(lambda *a, **k: ("typed twice", True)))
+    pay.btn_remove.click()
+    _settle()
+    assert B.sheet(c)["rows"][0]["paid"] == 20_000_000 and pay.grid.table.item(0, 2).font().strikeOut()
