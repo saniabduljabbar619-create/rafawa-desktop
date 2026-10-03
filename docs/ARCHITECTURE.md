@@ -63,9 +63,10 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
   sale, purchase or payment, and nothing else reads it: recording a debt here changes nothing elsewhere.
   Any number of people; one sheet each: Date | What it was for | amount | Note | paid so far | row still unpaid |
   running balance, dark totals row. Type in the empty last row to add a debt; click a cell to change it
-  (audited; the amount cannot go below what is already paid). Payments are NOT typed over the row: select the
-  row and press "Record payment" - each payment is saved on its own (`debt_payments`, with Save), capped at what
-  the row still owes, crossed out rather than deleted. Paying 30m then 10m on a 50m debt gives 40m paid; remove crosses a
+  (audited; the amount cannot go below what is already paid). Payments are NOT typed over the row: the
+  **Payments** tab (tabs along the bottom) tracks every record: pick the record, type the amount, Save - each
+  payment is its own row (`debt_payments`), capped at what the record still owes, crossed out rather than
+  deleted; the rest is paid later the same way. Paying 30m then 10m on a 50m debt gives 40m paid; remove crosses a
   row out (never deleted) and it can be brought back. `services/debt_book_service.py`, admin only.
 - **Expenses vs Expenditures** are two separate tables and sheets (tabs along the bottom), as in alg-erp:
   Expenses = day-to-day running costs (`expenses`, EXP-), Expenditures = larger outlays (`expenditures`,
