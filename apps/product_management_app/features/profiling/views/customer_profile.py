@@ -242,6 +242,22 @@ class CustomerProfileView(QWidget):
         if self.mode != "cashier":
             self._build_revert_tab(tabs)
 
+        # Record-by-record tabs (registered customers only): Sales, Purchases, Products, Transaction history
+        self.tab_sales = self.tab_purchases = self.tab_products = self.tab_history = None
+        if self.customer:
+            from apps.product_management_app.features.profiling.views.records_tabs import (
+                DocumentsTab, HistoryTab, ProductsTab)
+            pid = int(self.customer.id)
+            self.tab_sales, self.tab_purchases = DocumentsTab(pid, "sale"), DocumentsTab(pid, "purchase")
+            self.tab_products, self.tab_history = ProductsTab(pid), HistoryTab(pid)
+            tabs.setElideMode(Qt.ElideNone)
+            for i, (w, label) in enumerate(((self.tab_sales, "Sales"), (self.tab_purchases, "Purchases"),
+                                            (self.tab_products, "Products"),
+                                            (self.tab_history, "Transaction history")), start=1):
+                tabs.insertTab(i, w, label)
+            self.tab_sales.swap_requested.connect(self.open_swap)
+            self.tab_purchases.swap_requested.connect(self.open_swap)
+
         # Connect Signal Slots
         self.btn_make_payment.clicked.connect(self.open_payment_router)
         self.btn_advance_pay.clicked.connect(self.open_advance_center)
@@ -1331,6 +1347,17 @@ class CustomerProfileView(QWidget):
         self.load_advances_table()
         if hasattr(self, "revert_table"):
             self.load_revert_table()
+        for tab in (self.tab_sales, self.tab_purchases, self.tab_products, self.tab_history):
+            if tab is not None:
+                tab.reload()
+
+    def open_swap(self):
+        """Swap page: starts from the rows ticked on the Sales and Purchases tabs."""
+        from apps.product_management_app.features.profiling.dialogs.swap_records_dialog import SwapRecordsDialog
+        dlg = SwapRecordsDialog(self, party_id=int(self.customer.id), party_name=self.customer.full_name,
+                                purchase_ids=self.tab_purchases.ticked_ids(), sale_ids=self.tab_sales.ticked_ids())
+        if dlg.exec_() == dlg.Accepted:
+            self.refresh_all()
 
     def new_activity(self):
         if self.mode == "cashier":

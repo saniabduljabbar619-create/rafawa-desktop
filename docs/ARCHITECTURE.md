@@ -83,6 +83,16 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
 - **Swap.** Cashier Purchase -> *Swap / Exchange*: goods he brings (purchase) and goods we give him
   (sale) are recorded together by `SwapService.record` and set against each other; only the
   difference is left owing either way. If the second document fails the first is voided.
+- **Swap from a customer profile.** Besides Activity/Crops/..., a registered customer's profile has **Sales**,
+  **Purchases** (one row per document, tick box on every row that still has a balance, multi-select),
+  **Products** (bought from / sold to him per product) and **Transaction history** (everything in date order
+  with a running position) - `services/customer_records_service.py`, read-only. *Swap with ticked ->* opens
+  the swap page (`profiling/dialogs/swap_records_dialog.py`): the ticked purchases (we owe him) and sales
+  (he owes us) are the starting point; goods we give him are ticked from the shelf by category with quantity
+  and price, goods he brings are added line by line; both sides are totalled and
+  `SwapService.record_from_records` records the new documents and sets everything off, oldest first. Only
+  open (unpaid) records can be ticked; nothing is written unless both sides have value, and the documents it
+  created are voided if a later step fails.
 - **Net off.** `OffsetService.apply(party_id, kind="net_off")` cancels the overlap for a party we both owe and are owed by (service only; no screen).
 - An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
   balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).
