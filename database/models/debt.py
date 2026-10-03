@@ -7,9 +7,11 @@ purchases, and nothing else in the app reads them: recording a debt here never c
 balance, a sale, a purchase or the drawer. It is a ledger kept by hand, one sheet per person.
 
     DebtPerson (creditor | debtor)
-      └─ DebtEntry   a dated line: an amount that adds to the debt ("owed") and/or a payment ("paid")
+      └─ DebtEntry     a dated debt: what it was for and the amount ("owed")
+           └─ DebtPayment   each payment made against that one debt, saved on its own
 
-balance = sum(owed) - sum(paid) over the person's entries that are not removed.
+A row's paid-so-far is the sum of its payments, so paying a debt in instalments (30m, then 10m, ...) never
+overwrites an earlier payment. balance = sum(owed) - sum(payments) over rows and payments not removed.
 """
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, func,
@@ -47,7 +49,6 @@ class DebtEntry(Base):
     entry_date = Column(Date, nullable=False)
     details = Column(String(255), nullable=False)
     owed = Column(Numeric(14, 2), nullable=False, default=0, server_default="0")      # adds to the debt
-    paid = Column(Numeric(14, 2), nullable=False, default=0, server_default="0")      # settles part of it
     method = Column(String(30), nullable=True)
     note = Column(Text, nullable=True)
 
@@ -62,5 +63,30 @@ class DebtEntry(Base):
     updated_at = Column(DateTime, nullable=True)
 
     person = relationship("DebtPerson", back_populates="entries")
+    payments = relationship("DebtPayment", back_populates="entry", cascade="all, delete-orphan",
+                            order_by="DebtPayment.pay_date, DebtPayment.id")
 
     __table_args__ = (Index("idx_debt_entries_person", "person_id"), Index("idx_debt_entries_date", "entry_date"))
+
+
+class DebtPayment(Base):
+    __tablename__ = "debt_payments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entry_id = Column(Integer, ForeignKey("debt_entries.id", ondelete="CASCADE"), nullable=False)
+    pay_date = Column(Date, nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    method = Column(String(30), nullable=True)
+    note = Column(Text, nullable=True)
+
+    is_removed = Column(Boolean, nullable=False, default=False, server_default="0")
+    removed_by_user_id = Column(Integer, nullable=True)
+    removed_at = Column(DateTime, nullable=True)
+    removed_reason = Column(String(255), nullable=True)
+
+    created_by_user_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    entry = relationship("DebtEntry", back_populates="payments")
+
+    __table_args__ = (Index("idx_debt_payments_entry", "entry_id"),)

@@ -11,15 +11,15 @@ from PySide2.QtWidgets import (
 
 from database.services.debt_book_service import DebtBookService
 from shared.uix.widgets.cards import avatar, chip, money
+from apps.product_management_app.features.debt_center.dialogs.payment_dialog import PaymentDialog
 from apps.product_management_app.features.debt_center.sheet_style import STYLE
 from apps.product_management_app.features.debt_center.views.people_page import kpi
 from apps.product_management_app.features.debt_center.views.sheet_grid import SheetGrid, today_iso
 
-METHOD_OPTIONS = ["Cash", "Transfer", "POS", "Cheque", "Goods", "Other"]
 WORDS = {
-    "creditor": {"owed": "He gave us / we owe (₦)", "paid": "We paid him (₦)", "list": "My Creditors",
+    "creditor": {"owed": "He gave us / we owe (₦)", "paid": "We paid him (₦)", "pay": "Record payment to him", "list": "My Creditors",
                  "bal": "We still owe him", "owed_cap": "Total he gave us", "paid_cap": "Total we paid him"},
-    "debtor": {"owed": "We gave him / he owes (₦)", "paid": "He paid us (₦)", "list": "My Debtors",
+    "debtor": {"owed": "We gave him / he owes (₦)", "paid": "He paid us (₦)", "pay": "Record payment from him", "list": "My Debtors",
                "bal": "He still owes us", "owed_cap": "Total we gave him", "paid_cap": "Total he paid us"},
 }
 
@@ -63,6 +63,8 @@ class PersonSheetPage(QWidget):
         bar = QHBoxLayout()
         self.btn_add = QPushButton("+ Add row")
         self.btn_add.setObjectName("msBig")
+        self.btn_pay = QPushButton(self.words["pay"])
+        self.btn_pay.setObjectName("msPay")
         self.btn_remove = QPushButton("Remove row")
         self.btn_remove.setObjectName("dcGhost")
         self.btn_restore = QPushButton("Bring row back")
@@ -71,7 +73,7 @@ class PersonSheetPage(QWidget):
         self.btn_edit.setObjectName("dcGhost")
         self.btn_export = QPushButton("Export CSV")
         self.btn_export.setObjectName("dcGhost")
-        for b in (self.btn_add, self.btn_remove, self.btn_restore):
+        for b in (self.btn_add, self.btn_pay, self.btn_remove, self.btn_restore):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(self.btn_edit)
@@ -84,21 +86,23 @@ class PersonSheetPage(QWidget):
                 {"key": "date", "label": "Date", "type": "date", "width": 100},
                 {"key": "details", "label": "What it was for", "type": "text", "width": 220, "stretch": True},
                 {"key": "owed", "label": w["owed"], "type": "money", "width": 175, "tone": "#a23b34"},
-                {"key": "paid", "label": w["paid"], "type": "money", "width": 140, "tone": "#3f6b4a"},
-                {"key": "method", "label": "How", "type": "choice", "options": METHOD_OPTIONS, "width": 95},
                 {"key": "note", "label": "Note", "type": "text", "width": 150},
             ],
-            computed=[{"key": "running", "label": "Balance\nauto", "width": 150}],
+            computed=[{"key": "paid", "label": w["paid"].replace("(₦)", "so far (₦)"), "width": 150},
+                      {"key": "left", "label": "Row still\nunpaid", "width": 130},
+                      {"key": "running", "label": "Balance\nauto", "width": 150}],
             first_edit_key="details", placeholder_key="details",
             defaults={"date": today_iso(), "method": "Cash"},
             ready=self._ready, on_add=self._add, on_edit=self._edit, on_remove=self._remove,
             on_restore=lambda rid: DebtBookService.restore_entry(rid), reload=self.reload,
-            hint="Type in the last row to add one - “What it was for” and an amount save it. Click a cell to change "
-                 "it. Right-click a row to remove it. This sheet is your own record; it does not change any "
+            hint="Type in the last row to add a debt - “What it was for” and the amount save it. To pay on a row, "
+                 "click the row and press “Record payment” - every payment is saved separately on that row. "
+                 "Right-click a row to remove it. This sheet is your own record; it does not change any "
                  "customer, supplier, sale or purchase.")
         root.addWidget(self.grid, 1)
 
         self.btn_add.clicked.connect(self.grid.add_row)
+        self.btn_pay.clicked.connect(self._pay)
         self.btn_remove.clicked.connect(lambda: self.grid.remove())
         self.btn_restore.clicked.connect(self.grid.restore)
         self.btn_edit.clicked.connect(self.edit_person.emit)
@@ -110,12 +114,26 @@ class PersonSheetPage(QWidget):
         if not str(d.get("details", "")).strip():
             return "Now type what it was for to save the row."
         try:
-            amt = float(str(d.get("owed") or 0).replace(",", "")) + float(str(d.get("paid") or 0).replace(",", ""))
+            amt = float(str(d.get("owed") or 0).replace(",", ""))
         except ValueError:
             return "Amounts must be numbers."
         if amt <= 0:
-            return "Now type an amount in one of the two money columns to save the row."
+            return "Now type the amount of the debt to save the row."
         return ""
+
+    def _pay(self) -> None:
+        r = self.grid.selected_row()
+        if not r or r.get("id") is None:
+            self.grid.say("Click the debt row you are paying on first.")
+            return
+        if r.get("removed"):
+            self.grid.say("That row is crossed out - bring it back before paying on it.")
+            return
+        dlg = PaymentDialog(r["id"], self.person_id, self.words["paid"].replace(" (₦)", ""), self)
+        dlg.exec_()
+        if dlg.changed:
+            self.reload()
+            self.changed.emit()
 
     def _add(self, values) -> None:
         DebtBookService.add_entry(self.person_id, values)
@@ -171,13 +189,14 @@ class PersonSheetPage(QWidget):
             rows.append({
                 "id": r["id"], "removed": r["removed"],
                 "cells": {"date": r["date"].isoformat(), "details": r["details"], "owed": r["owed"] or "",
-                          "paid": r["paid"] or "", "method": r["method"].title() if r["method"] else "",
                           "note": r["note"]},
-                "computed": {"running": "" if r["removed"] else money(r["running"])},
+                "computed": {"paid": "" if r["removed"] or not r["paid"] else money(r["paid"]),
+                             "left": "" if r["removed"] else money(r["row_balance"]),
+                             "running": "" if r["removed"] else money(r["running"])},
                 "tip": (f"Removed: {r['removed_reason']}" if r["removed"] and r["removed_reason"] else ""),
             })
         self.grid.set_rows(rows, {"owed": money(f["owed"]), "paid": money(f["paid"]),
-                                  "running": money(f["balance"])})
+                                  "left": money(f["balance"]), "running": money(f["balance"])})
 
     def _export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export sheet", f"{self.data['person']['name']}.csv", "CSV (*.csv)")
@@ -185,9 +204,12 @@ class PersonSheetPage(QWidget):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["Date", "What it was for", self.words["owed"], self.words["paid"], "How", "Note", "Balance",
-                        "Removed"])
+            w.writerow(["Date", "What it was for", self.words["owed"], self.words["paid"], "Row still unpaid", "Note",
+                        "Balance", "Removed", "Payments (date: amount how)"])
             for r in self.data["rows"]:
-                w.writerow([r["date"].isoformat(), r["details"], r["owed"], r["paid"], r["method"], r["note"],
-                            "" if r["removed"] else f"{r['running']:.2f}", "yes" if r["removed"] else ""])
+                pays = "; ".join(f"{p['date']:%d/%m/%Y}: {p['amount']:.2f} {p['method']}".strip()
+                                 for p in r["payments"] if not p["removed"])
+                w.writerow([r["date"].isoformat(), r["details"], r["owed"], r["paid"], f"{r['row_balance']:.2f}",
+                            r["note"], "" if r["removed"] else f"{r['running']:.2f}", "yes" if r["removed"] else "",
+                            pays])
         QMessageBox.information(self, "Debt Center", f"Saved to\n{path}")

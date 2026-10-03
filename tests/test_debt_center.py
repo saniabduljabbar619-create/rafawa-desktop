@@ -19,8 +19,12 @@ def _person(kind="creditor", name="Alhaji Musa"):
     return B.add_person(kind, name, phone="0803")
 
 
-def _row(pid, details="Fertilizer on credit", owed=0, paid=0, **kw):
-    return B.add_entry(pid, {"details": details, "owed": owed, "paid": paid, **kw})
+def _row(pid, details="Fertilizer on credit", owed=0, paid=0, pay_date=None, **kw):
+    """A debt row, optionally with one payment already saved on it."""
+    rid = B.add_entry(pid, {"details": details, "owed": owed, **kw})
+    if paid:
+        B.pay_entry(rid, {"amount": paid, "date": pay_date or date.today(), "method": "cash"})
+    return rid
 
 
 # ----------------------------------------------------------------- standalone book
@@ -38,8 +42,7 @@ def test_the_book_never_touches_customers_sales_or_the_drawer():
     with get_session() as s:
         before = (s.query(Party).count(), s.query(Sale).count(), s.query(Purchase).count(), s.query(Payment).count())
     pid = _person("debtor", "Customer One")                       # same name as a real customer
-    _row(pid, owed=5000)
-    _row(pid, "part payment", paid=1000)
+    _row(pid, owed=5000, paid=1000)
     with get_session() as s:
         after = (s.query(Party).count(), s.query(Sale).count(), s.query(Purchase).count(), s.query(Payment).count())
     assert before == after
@@ -51,13 +54,13 @@ def test_the_book_never_touches_customers_sales_or_the_drawer():
 
 def test_sheet_has_running_balance_and_totals():
     pid = _person()
-    a = _row(pid, owed=50000, date="01/06/2026")
-    _row(pid, "paid part", paid=20000, date="10/06/2026", method="transfer")
+    a = _row(pid, owed=50000, paid=20000, date="01/06/2026")
     _row(pid, "more goods", owed=5000, date="15/06/2026")
     sh = B.sheet(pid)
-    assert [r["running"] for r in sh["rows"]] == [50000, 30000, 35000]
+    assert [r["running"] for r in sh["rows"]] == [30000, 35000]
+    assert [r["row_balance"] for r in sh["rows"]] == [30000, 5000]
     assert sh["figures"] == {"owed": 55000, "paid": 20000, "balance": 35000}
-    assert sh["person"]["balance"] == 35000 and sh["person"]["entries"] == 3
+    assert sh["person"]["balance"] == 35000 and sh["person"]["entries"] == 2
     assert B.people("creditor")[0]["balance"] == 35000 and a
 
 
@@ -88,7 +91,7 @@ def test_edit_a_cell_is_audited_and_recalculates():
         log = s.query(AuditLog).filter(AuditLog.action == "debt.entry.edit").one()
         assert "10000" in log.details and "12000" in log.details
     with pytest.raises(ValueError):
-        B.edit_entry(e, {"owed": 0, "paid": 0})                   # would leave an empty row
+        B.edit_entry(e, {"owed": 0})                              # would leave an empty row
     with pytest.raises(ValueError):
         B.edit_entry(e, {"bogus": 1})
 
@@ -106,15 +109,75 @@ def test_remove_crosses_out_stops_counting_and_can_come_back():
     assert B.sheet(pid)["figures"]["balance"] == 150 and b
 
 
+def test_paying_in_instalments_adds_up_and_never_overwrites_earlier_payments():
+    """Owed 50m; pay 30m, later 10m on the same row: 40m paid, 10m left (the 30m is still there)."""
+    pid = _person()
+    r = _row(pid, owed=50_000_000)
+    B.pay_entry(r, {"amount": 30_000_000, "date": "01/07/2026", "method": "transfer"})
+    B.pay_entry(r, {"amount": 10_000_000, "date": "03/07/2026", "note": "second instalment"})
+    row = B.sheet(pid)["rows"][0]
+    assert row["paid"] == 40_000_000 and row["row_balance"] == 10_000_000
+    assert [p["amount"] for p in row["payments"]] == [30_000_000, 10_000_000]
+    assert B.sheet(pid)["figures"]["balance"] == 10_000_000
+    assert B.people("creditor")[0]["paid"] == 40_000_000
+
+
+def test_a_payment_goes_to_the_row_it_names_and_cannot_exceed_it():
+    pid = _person()
+    a, b = _row(pid, "first", owed=1000), _row(pid, "second", owed=500)
+    B.pay_entry(b, {"amount": 200})
+    rows = {r["details"]: r for r in B.sheet(pid)["rows"]}
+    assert rows["first"]["paid"] == 0 and rows["second"]["paid"] == 200
+    with pytest.raises(ValueError):
+        B.pay_entry(b, {"amount": 301})                           # only 300 left on that row
+    for bad in ({"amount": 0}, {"amount": "abc"}, {"amount": -5}, {"amount": 5, "date": "nope"}):
+        with pytest.raises(ValueError):
+            B.pay_entry(a, bad)
+    B.pay_entry(b, {"amount": 300})                               # exactly what is left is fine
+    assert B.sheet(pid)["figures"]["balance"] == 1000
+
+
+def test_row_amount_cannot_be_cut_below_what_was_paid_and_payments_can_be_crossed_out():
+    pid = _person()
+    r = _row(pid, owed=1000)
+    p1 = B.pay_entry(r, {"amount": 600})
+    with pytest.raises(ValueError):
+        B.edit_entry(r, {"owed": 500})
+    B.edit_entry(r, {"owed": 800})
+    B.remove_payment(p1, "typed twice")
+    row = B.sheet(pid)["rows"][0]
+    assert row["paid"] == 0 and row["payments"][0]["removed"] and B.sheet(pid)["figures"]["balance"] == 800
+    B.restore_payment(p1)
+    assert B.sheet(pid)["rows"][0]["paid"] == 600
+    B.remove_entry(r)                                             # a crossed-out row stops counting its payments
+    assert B.sheet(pid)["figures"] == {"owed": 0, "paid": 0, "balance": 0}
+    with pytest.raises(ValueError):
+        B.pay_entry(r, {"amount": 1})
+
+
+def test_payments_are_audited_and_admin_only():
+    from database.models.audit_log import AuditLog
+    pid = _person()
+    r = _row(pid, owed=100)
+    B.pay_entry(r, {"amount": 40})
+    with get_session() as s:
+        assert s.query(AuditLog).filter(AuditLog.action == "debt.payment.add").count() == 1
+    set_session(UserSession(user_id=2, username="cash", role="Cashier"))
+    with pytest.raises(PermissionDenied):
+        B.pay_entry(r, {"amount": 10})
+
+
 def test_overpaid_shows_as_negative_balance_and_overview_counts_only_what_is_owing():
     c1, c2 = _person("creditor", "A"), _person("creditor", "B")
     _row(c1, owed=1000)
-    _row(c2, owed=100, paid=300)                                  # overpaid
+    r2 = _row(c2, owed=400, paid=300)
+    B.edit_entry(r2, {"owed": 300})                               # fully paid, not overpaid
     d = _person("debtor", "D")
     _row(d, owed=700)
     ov = B.overview()
     assert ov["creditor"]["balance"] == 1000 and ov["creditor"]["owing"] == 1
     assert ov["debtor"]["balance"] == 700 and ov["net"] == -300
+    assert ov["creditor"]["paid"] == 300
     assert [r["name"] for r in B.people("creditor")] == ["A", "B"]          # biggest balance first
 
 

@@ -59,15 +59,18 @@ at intake are written to `audit_logs`.
 `features/debt_center/`, styled like alg-erp's Master Supplier sheets (cream paper, ink totals row, amber).
 Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expenditures**.
 
-- **Standalone.** `models/debt.py` (`debt_people`, `debt_entries`) references no party, customer, supplier,
+- **Standalone.** `models/debt.py` (`debt_people`, `debt_entries`, `debt_payments`) references no party, customer, supplier,
   sale, purchase or payment, and nothing else reads it: recording a debt here changes nothing elsewhere.
-  Any number of people; one sheet each: Date | What it was for | owed | paid | How | Note | running balance,
-  dark totals row. Type in the empty last row to add; click a cell to change it (audited); remove crosses a
+  Any number of people; one sheet each: Date | What it was for | amount | Note | paid so far | row still unpaid |
+  running balance, dark totals row. Type in the empty last row to add a debt; click a cell to change it
+  (audited; the amount cannot go below what is already paid). Payments are NOT typed over the row: select the
+  row and press "Record payment" - each payment is saved on its own (`debt_payments`, with Save), capped at what
+  the row still owes, crossed out rather than deleted. Paying 30m then 10m on a 50m debt gives 40m paid; remove crosses a
   row out (never deleted) and it can be brought back. `services/debt_book_service.py`, admin only.
 - **Expenses vs Expenditures** are two separate tables and sheets (tabs along the bottom), as in alg-erp:
   Expenses = day-to-day running costs (`expenses`, EXP-), Expenditures = larger outlays (`expenditures`,
   EXD-). `services/expense_service.py` serves both. They are not linked to the cashier drawer.
-- Migrations: `0005` expenses, `0007` debt book + expenditures.
+- Migrations: `0005` expenses, `0007` debt book + expenditures, `0009` debt payments (old "paid" amounts move across).
 
 ## Offsets and swaps (settle with goods)
 
