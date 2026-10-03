@@ -6,9 +6,10 @@ STANDALONE by design - it never reads or writes customers, suppliers, sales, pur
 drawer, and nothing else reads it. Admin only; every change is audited; a row is crossed out (removed),
 never deleted, and can be brought back.
 
-    owed   an amount that adds to the debt   (creditor: they lent/supplied us; debtor: we lent/gave them)
-    paid   a payment that settles part of it (creditor: we paid them; debtor: they paid us)
-    balance = sum(owed) - sum(paid)  over the rows that are not removed  (negative = overpaid)
+    owed      the amount of one debt row (creditor: they lent/supplied us; debtor: we lent/gave them)
+    payments  each saved against ONE row (creditor: we paid them; debtor: they paid us); a row's paid-so-far
+              is the sum of its payments, so a later payment never replaces an earlier one
+    balance = sum(owed) - sum(payments)  over rows and payments not removed  (negative = overpaid)
 """
 from __future__ import annotations
 
@@ -16,7 +17,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from database.models.debt import DebtEntry, DebtPerson
+from sqlalchemy import func
+
+from database.models.debt import DebtEntry, DebtPayment, DebtPerson
 from database.services.audit_service import AuditService
 from database.session import get_session
 from shared.auth.permissions import require_admin
@@ -24,7 +27,8 @@ from shared.auth.session import require_user_id
 
 KINDS = ("creditor", "debtor")
 METHODS = ["cash", "transfer", "pos", "cheque", "goods", "other"]
-EDITABLE = ("date", "details", "owed", "paid", "method", "note")
+EDITABLE = ("date", "details", "owed", "note")
+EPS = 0.005
 
 
 def _f(v) -> float:
@@ -71,17 +75,25 @@ def _person_row(p: DebtPerson, owed: float, paid: float, count: int, last) -> Di
 
 
 def _clean_entry(data: Dict[str, Any]) -> Dict[str, Any]:
-    owed, paid = _money(data.get("owed")), _money(data.get("paid"))
-    if owed < 0 or paid < 0:
-        raise ValueError("Amounts cannot be negative.")
-    if owed == 0 and paid == 0:
-        raise ValueError("Enter an amount in one of the money columns.")
+    owed = _money(data.get("owed"))
+    if owed <= 0:
+        raise ValueError("Enter the amount of the debt.")
     details = str(data.get("details") or "").strip()
     if not details:
         raise ValueError("Write what it was for.")
     return {"entry_date": _as_date(data.get("date") or date.today()), "details": details[:255], "owed": owed,
-            "paid": paid, "method": (str(data.get("method") or "").strip().lower()[:30] or None),
             "note": (str(data.get("note") or "").strip() or None)}
+
+
+def _paid_by_entry(s, entry_ids) -> Dict[int, float]:
+    out: Dict[int, float] = {}
+    ids = list(entry_ids)
+    for i in range(0, len(ids), 500):
+        for eid, total in (s.query(DebtPayment.entry_id, func.coalesce(func.sum(DebtPayment.amount), 0))
+                           .filter(DebtPayment.entry_id.in_(ids[i:i + 500]), DebtPayment.is_removed == False)  # noqa: E712
+                           .group_by(DebtPayment.entry_id)):
+            out[int(eid)] = _f(total)
+    return out
 
 
 class DebtBookService:
@@ -149,10 +161,12 @@ class DebtBookService:
             totals: Dict[int, List[Any]] = {}
             ids = [p.id for p in people]
             if ids:
-                for e in s.query(DebtEntry).filter(DebtEntry.person_id.in_(ids), DebtEntry.is_removed == False).all():  # noqa: E712
+                live = s.query(DebtEntry).filter(DebtEntry.person_id.in_(ids), DebtEntry.is_removed == False).all()  # noqa: E712
+                paid = _paid_by_entry(s, [e.id for e in live])
+                for e in live:
                     t = totals.setdefault(int(e.person_id), [0.0, 0.0, 0, None])
                     t[0] += _f(e.owed)
-                    t[1] += _f(e.paid)
+                    t[1] += paid.get(int(e.id), 0.0)
                     t[2] += 1
                     if t[3] is None or e.entry_date > t[3]:
                         t[3] = e.entry_date
@@ -183,18 +197,28 @@ class DebtBookService:
                 raise ValueError("Person not found.")
             entries = (s.query(DebtEntry).filter(DebtEntry.person_id == p.id)
                        .order_by(DebtEntry.entry_date.asc(), DebtEntry.id.asc()).all())
+            pays: Dict[int, List[DebtPayment]] = {}
+            for pm in (s.query(DebtPayment).filter(DebtPayment.entry_id.in_([e.id for e in entries] or [0]))
+                       .order_by(DebtPayment.pay_date.asc(), DebtPayment.id.asc()).all()):
+                pays.setdefault(int(pm.entry_id), []).append(pm)
             run = Decimal("0")
             owed = paid = Decimal("0")
             rows = []
             for e in entries:
+                mine = pays.get(int(e.id), [])
+                e_paid = sum((Decimal(str(m.amount or 0)) for m in mine if not m.is_removed), Decimal("0"))
                 if not e.is_removed:
-                    run += Decimal(str(e.owed or 0)) - Decimal(str(e.paid or 0))
+                    run += Decimal(str(e.owed or 0)) - e_paid
                     owed += Decimal(str(e.owed or 0))
-                    paid += Decimal(str(e.paid or 0))
+                    paid += e_paid
                 rows.append({"id": int(e.id), "date": e.entry_date, "details": e.details, "owed": _f(e.owed),
-                             "paid": _f(e.paid), "method": e.method or "", "note": e.note or "",
-                             "running": float(run), "removed": bool(e.is_removed),
-                             "removed_reason": e.removed_reason or "", "at": e.created_at})
+                             "paid": float(e_paid), "row_balance": round(_f(e.owed) - float(e_paid), 2),
+                             "note": e.note or "", "running": float(run), "removed": bool(e.is_removed),
+                             "removed_reason": e.removed_reason or "", "at": e.created_at,
+                             "payments": [{"id": int(m.id), "date": m.pay_date, "amount": _f(m.amount),
+                                           "method": m.method or "", "note": m.note or "",
+                                           "removed": bool(m.is_removed), "removed_reason": m.removed_reason or ""}
+                                          for m in mine]})
             person = _person_row(p, float(owed), float(paid), sum(1 for e in entries if not e.is_removed),
                                  max((e.entry_date for e in entries if not e.is_removed), default=None))
         return {"person": person, "rows": rows,
@@ -213,7 +237,7 @@ class DebtBookService:
             s.add(e)
             s.flush()
             AuditService.record("debt.entry.add", "debt_person", p.id,
-                                f"{p.name}: {vals['details']} (owed {vals['owed']:,.2f}, paid {vals['paid']:,.2f})",
+                                f"{p.name}: {vals['details']} ({vals['owed']:,.2f})",
                                 session=s)
             s.commit()
             return int(e.id)
@@ -231,10 +255,13 @@ class DebtBookService:
                 raise ValueError("Row not found.")
             if e.is_removed:
                 raise ValueError("Bring the row back before changing it.")
-            current = {"date": e.entry_date, "details": e.details, "owed": _f(e.owed), "paid": _f(e.paid),
-                       "method": e.method, "note": e.note}
+            current = {"date": e.entry_date, "details": e.details, "owed": _f(e.owed), "note": e.note}
             merged = {**current, **changes}
             vals = _clean_entry(merged)
+            already = _paid_by_entry(s, [e.id]).get(int(e.id), 0.0)
+            if vals["owed"] < already - EPS:
+                raise ValueError(f"{already:,.2f} has already been paid on this row, so the amount cannot be "
+                                 "less than that.")
             before = {}
             for k, v in vals.items():
                 old = getattr(e, k)
@@ -277,4 +304,71 @@ class DebtBookService:
             e.removed_at = e.removed_by_user_id = e.removed_reason = None
             AuditService.record("debt.entry.restore", "debt_person", e.person_id, f"Row brought back: {e.details}",
                                 {"entry_id": e.id}, session=s)
+            s.commit()
+
+    # ------------------------------------------------------------------ payments (saved one by one, on one row)
+    @staticmethod
+    @require_admin
+    def pay_entry(entry_id: int, data: Dict[str, Any]) -> int:
+        """Save a payment against ONE debt row. Earlier payments on the row are never touched."""
+        amount = _money(data.get("amount"))
+        if amount <= 0:
+            raise ValueError("Enter the amount paid.")
+        with get_session() as s:
+            e = s.get(DebtEntry, int(entry_id))
+            if e is None:
+                raise ValueError("Row not found.")
+            if e.is_removed:
+                raise ValueError("Bring the row back before paying on it.")
+            left = round(_f(e.owed) - _paid_by_entry(s, [e.id]).get(int(e.id), 0.0), 2)
+            if amount > left + EPS:
+                raise ValueError(f"Only {max(left, 0):,.2f} is still unpaid on this row - that payment is more.")
+            pm = DebtPayment(entry_id=e.id, pay_date=_as_date(data.get("date") or date.today()), amount=amount,
+                             method=(str(data.get("method") or "").strip().lower()[:30] or None),
+                             note=(str(data.get("note") or "").strip() or None),
+                             created_by_user_id=int(require_user_id()))
+            s.add(pm)
+            s.flush()
+            AuditService.record("debt.payment.add", "debt_person", e.person_id,
+                                f"Payment {amount:,.2f} on: {e.details}", {"entry_id": e.id, "payment_id": pm.id},
+                                session=s)
+            s.commit()
+            return int(pm.id)
+
+    @staticmethod
+    @require_admin
+    def remove_payment(payment_id: int, reason: str = "") -> None:
+        """Cross a payment out (kept in the history, no longer counted)."""
+        with get_session() as s:
+            pm = s.get(DebtPayment, int(payment_id))
+            if pm is None:
+                raise ValueError("Payment not found.")
+            if pm.is_removed:
+                return
+            pm.is_removed, pm.removed_at = True, datetime.now()
+            pm.removed_by_user_id, pm.removed_reason = int(require_user_id()), (reason or "").strip()[:255] or None
+            AuditService.record("debt.payment.remove", "debt_person", pm.entry.person_id,
+                                f"Payment {_f(pm.amount):,.2f} removed" + (f" ({reason})" if reason else ""),
+                                {"entry_id": pm.entry_id, "payment_id": pm.id}, session=s)
+            s.commit()
+
+    @staticmethod
+    @require_admin
+    def restore_payment(payment_id: int) -> None:
+        with get_session() as s:
+            pm = s.get(DebtPayment, int(payment_id))
+            if pm is None:
+                raise ValueError("Payment not found.")
+            if not pm.is_removed:
+                return
+            if pm.entry.is_removed:
+                raise ValueError("Bring the row back first.")
+            left = _f(pm.entry.owed) - _paid_by_entry(s, [pm.entry_id]).get(int(pm.entry_id), 0.0)
+            if _f(pm.amount) > left + EPS:
+                raise ValueError("Bringing this payment back would pay more than the row owes.")
+            pm.is_removed = False
+            pm.removed_at = pm.removed_by_user_id = pm.removed_reason = None
+            AuditService.record("debt.payment.restore", "debt_person", pm.entry.person_id,
+                                f"Payment {_f(pm.amount):,.2f} brought back",
+                                {"entry_id": pm.entry_id, "payment_id": pm.id}, session=s)
             s.commit()

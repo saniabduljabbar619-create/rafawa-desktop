@@ -53,7 +53,7 @@ def test_hub_totals_and_double_click_tiles(qapp):
     B.add_entry(c, {"details": "fertilizer", "owed": 50000})
     d = B.add_person("debtor", "Mama Ngozi")
     B.add_entry(d, {"details": "goods", "owed": 20000})
-    B.add_entry(d, {"details": "part", "paid": 5000})
+    B.pay_entry(B.sheet(d)["rows"][0]["id"], {"amount": 5000})
     E.add({"amount": 3000, "description": "diesel", "date": date.today()})
     XD.add({"amount": 100000, "description": "generator", "category": "Equipment & Machinery", "date": date.today()})
     v = _hub()
@@ -107,13 +107,13 @@ def test_double_click_a_person_opens_the_sheet_and_typing_in_the_last_row_saves(
     rows = B.sheet(c)["rows"]
     assert len(rows) == 1 and rows[0]["owed"] == 50000 and rows[0]["details"] == "Fertilizer on credit"
     assert sh.grid.table.rowCount() == 2 and sh.k_balance.val.text() == "50,000.00"
-    type_cell(sh.grid, "details", "Paid part")
-    type_cell(sh.grid, "paid", "20000")
+    B.pay_entry(rows[0]["id"], {"amount": 20000})
+    sh.reload()
     assert B.sheet(c)["figures"]["balance"] == 30000
     assert sh.k_balance.val.text() == "30,000.00" and sh.k_balance.cap.text() == "We still owe him"
-    run_col = len(sh.grid.columns) + 1
-    assert [sh.grid.table.item(r, run_col).text() for r in range(2)] == ["50,000.00", "30,000.00"]
-    assert sh.grid.foot.item(0, 3).text() == "50,000.00" and sh.grid.foot.item(0, 4).text() == "20,000.00"
+    run_col = len(sh.grid.columns) + 3
+    assert sh.grid.table.item(0, run_col).text() == "30,000.00"
+    assert sh.grid.foot.item(0, 3).text() == "50,000.00" and sh.grid.foot.item(0, 5).text() == "20,000.00"
 
 
 def test_debtor_sheet_uses_debtor_words_and_edit_remove_restore(qapp, boxes, monkeypatch):
@@ -218,3 +218,24 @@ def test_period_filter_and_validation_message(qapp, boxes):
     assert len(pg._rows) == 2 and pg.k_period.val.text() == "109.00"
     type_cell(pg.grid, "description", "no amount yet")
     assert "amount" in pg.grid.msg.text().lower() and len(E.list_expenses()) == 2
+
+
+def test_record_payment_dialog_saves_each_payment_on_the_selected_row(qapp, boxes):
+    from apps.product_management_app.features.debt_center.dialogs.payment_dialog import PaymentDialog
+    from apps.product_management_app.features.debt_center.views.person_sheet import PersonSheetPage
+    c = B.add_person("creditor", "Alhaji Musa")
+    r = B.add_entry(c, {"details": "Crops purchasing", "owed": 50_000_000})
+    sh = PersonSheetPage(c, "creditor")
+    sh.grid.say  # page is built
+    dlg = PaymentDialog(r, c, "We paid him")
+    dlg.amount.setText("30000000")
+    dlg.save()
+    dlg.amount.setText("10000000")
+    dlg.save()
+    assert dlg.changed and dlg.table.rowCount() == 2 and "paid so far 40,000,000.00" in dlg.sub.text()
+    dlg.amount.setText("20000000")
+    dlg.save()                                                                    # more than the 10m left
+    assert "Only 10,000,000.00" in dlg.msg.text() and dlg.table.rowCount() == 2
+    sh.reload()
+    assert sh.k_balance.val.text() == "10,000,000.00" and sh.k_paid.val.text() == "40,000,000.00"
+    assert sh.grid.table.item(0, 5).text() == "40,000,000.00" and sh.grid.table.item(0, 6).text() == "10,000,000.00"
