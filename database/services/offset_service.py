@@ -251,8 +251,17 @@ class SwapService:
             bad = [i for i in ids if i not in open_]
             if bad:
                 raise ValueError(f"{word.title()} {bad[0]} is not an open (unpaid) record of this customer.")
+        with get_session() as s:
+            ptype = {int(i): str(t or "").lower() for i, t in s.query(Product.id, Product.product_type).all()}
+            pname = {int(i): n for i, n in s.query(Product.id, Product.name).all()}
+        for ln in given:
+            if _sell_total(ln, ptype) <= 0:
+                raise ValueError(f"Enter the quantity and a selling price for {pname.get(int(ln['product_id']), 'the product')}.")
+        for ln in received:
+            if _buy_total(ln) <= 0:
+                raise ValueError(f"Enter the quantity and a price for {ln.get('product_name', 'the goods he brings')}.")
         new_in = round(sum(_buy_total(i) for i in received), 2)
-        new_out = round(sum(_sell_total(i) for i in given), 2)
+        new_out = round(sum(_sell_total(i, ptype) for i in given), 2)
         we_owe = round(sum(open_p[i] for i in purchase_ids) + new_in, 2)
         they_owe = round(sum(open_s[i] for i in sale_ids) + new_out, 2)
         if we_owe <= EPS or they_owe <= EPS:
@@ -288,11 +297,15 @@ class SwapService:
                                  "new_purchase_id": purchase["purchase_id"] if purchase else None,
                                  "new_sale_id": sale["sale_id"] if sale else None}, session=s)
             s.commit()
-        diff = round(we_owe - they_owe, 2)
+        all_p = purchase_ids + ([int(purchase["purchase_id"])] if purchase else [])
+        all_s = sale_ids + ([int(sale["sale_id"])] if sale else [])
+        with get_session() as s:                      # what is REALLY left open on the documents involved
+            left_p = sum(b.balance for b in document_balances(s, "purchase", all_p).values())
+            left_s = sum(b.balance for b in document_balances(s, "sale", all_s).values())
         return {"purchase_id": int(purchase["purchase_id"]) if purchase else None,
                 "sale_id": int(sale["sale_id"]) if sale else None,
                 "purchase_total": we_owe, "sale_total": they_owe, "offset": res["amount"],
-                "we_owe_him": max(diff, 0.0), "he_owes_us": max(-diff, 0.0)}
+                "we_owe_him": round(left_p, 2), "he_owes_us": round(left_s, 2)}
 
 
 def _buy_total(it: Dict[str, Any]) -> float:
@@ -300,7 +313,8 @@ def _buy_total(it: Dict[str, Any]) -> float:
     return _f(it["total_weight_kg"] if crops else it["qty_bags"]) * _f(it["unit_cost"])
 
 
-def _sell_total(it: Dict[str, Any]) -> float:
-    """A sale line: product_id, qty_bags, total_weight_kg (crops only), unit_price. Crops are sold by the kg."""
-    kg = _f(it.get("total_weight_kg"))
-    return (kg if kg > 0 else _f(it["qty_bags"])) * _f(it["unit_price"])
+def _sell_total(it: Dict[str, Any], ptype: Optional[Dict[int, str]] = None) -> float:
+    """A sale line: product_id, qty_bags, total_weight_kg, unit_price. Crops are priced per kg, fertilizer per bag."""
+    crops = ((ptype or {}).get(int(it.get("product_id") or 0), "crops") == "crops") if ptype is not None \
+        else _f(it.get("total_weight_kg")) > 0
+    return _f(it.get("total_weight_kg") if crops else it.get("qty_bags")) * _f(it.get("unit_price"))
