@@ -13,6 +13,7 @@ from database.models.purchase import Purchase
 from database.models.purchase_return import PurchaseReturn
 from database.models.payment import Payment
 from database.models.advance_allocations import AdvanceAllocation
+from database.services.purchase_adjustment_service import PurchaseAdjustmentService
 from database.models.purchase_price_adjustment import PurchasePriceAdjustment
 from database.services.payment_service import PaymentService
 
@@ -180,44 +181,12 @@ class PurchasePaymentDialog(QDialog):
 
             for p in purchases:
 
-                paid = (
-                    s.query(func.coalesce(func.sum(Payment.amount), 0))
-                    .filter(
-                        Payment.entity_type == "purchase",
-                        Payment.entity_id == p.id,
-                        Payment.direction == "out",
-                        Payment.status != "voided",
-                    )
-                    .scalar()
-                )
-                total_paid = float(paid or 0)
+                # One shared definition of "what is still owed" (cash, advances, swaps/set-offs, returns,
+                # price adjustments; voided = nothing) - the same numbers every other screen shows.
+                nums = PurchaseAdjustmentService._purchase_balance(s, p)
+                total_paid, net_total, balance = nums["paid"], nums["net_total"], nums["balance"]
 
-                # Previously never subtracted here at all - a purchase with
-                # a return against it would show its FULL original total as
-                # still owed, even though part of it was already returned.
-                returned = abs(float(
-                    s.query(func.coalesce(func.sum(PurchaseReturn.amount), 0))
-                    .filter(PurchaseReturn.purchase_id == p.id)
-                    .scalar() or 0.0
-                ))
-
-                # Same reasoning as returns just above - a price
-                # adjustment is a real, additional amount now genuinely
-                # owed (e.g. a supplier renegotiating after delivery),
-                # so this table needs to know about it directly, not
-                # just the summary cards elsewhere in the app. Without
-                # this, a purchase already fully paid before an
-                # adjustment would silently stay invisible here forever.
-                adjustment_total = float(
-                    s.query(func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-                    .filter(PurchasePriceAdjustment.purchase_id == p.id)
-                    .scalar() or 0.0
-                )
-
-                net_total = max(float(p.total_amount) - returned + adjustment_total, 0.0)
-                balance = max(net_total - total_paid, 0.0)
-
-                if balance <= 0:
+                if balance <= 0.005:
                     continue
 
                 total_outstanding += balance
@@ -399,26 +368,8 @@ class PurchasePaymentDialog(QDialog):
             outstanding = []
             total = 0.0
             for p in purchases:
-                paid = float(
-                    s.query(func.coalesce(func.sum(Payment.amount), 0))
-                    .filter(
-                        Payment.entity_type == "purchase",
-                        Payment.entity_id == p.id,
-                        Payment.direction == "out",
-                        Payment.status != "voided",
-                    ).scalar() or 0
-                )
-                returned = abs(float(
-                    s.query(func.coalesce(func.sum(PurchaseReturn.amount), 0))
-                    .filter(PurchaseReturn.purchase_id == p.id).scalar() or 0.0
-                ))
-                adjustment_total = float(
-                    s.query(func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0))
-                    .filter(PurchasePriceAdjustment.purchase_id == p.id).scalar() or 0.0
-                )
-                net_total = max(float(p.total_amount) - returned + adjustment_total, 0.0)
-                balance = max(net_total - paid, 0.0)
-                if balance > 0:
+                balance = PurchaseAdjustmentService._purchase_balance(s, p)["balance"]
+                if balance > 0.005:
                     outstanding.append((int(p.id), balance))
                     total += balance
 

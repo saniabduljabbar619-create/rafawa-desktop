@@ -11,6 +11,7 @@ from database.models.payment import Payment
 from database.models.sale_discount import SaleDiscount
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.party import Party
+from database.services.document_balance import document_balances
 
 
 class SaleAdjustmentService:
@@ -28,64 +29,26 @@ class SaleAdjustmentService:
     @staticmethod
     def _sale_balance(s, sale: Sale) -> Dict[str, float]:
         """
-        The real, current numbers behind one sale's balance - shared by
-        both list_customer_sales (for display) and apply_discount (for
-        the ceiling check), so both always agree with each other.
+        The real, current numbers behind one sale's balance - shared by list_customer_sales (display),
+        apply_discount (ceiling check) and the payment dialogs.
 
-        "paid" and "advance-allocated" are genuinely two separate things
-        in this schema: applying an advance to a sale (AdvanceService.
-        allocate_fifo) never creates a Payment row at all - it's recorded
-        ONLY in AdvanceAllocation. Missing this table entirely (as an
-        earlier version of this method did) meant a sale settled partly
-        by advance and partly by cash would still show most of its total
-        as outstanding, even once genuinely fully paid - matching the
-        established, correct pattern already used in dashboard_service.py's
-        get_sale_payment_snapshot: settled = paid + alloc_total.
+        These come from the ONE shared definition (document_balance.document_balances): cash payments,
+        advance allocations AND offsets/swaps against the party's purchases all count as settled, a
+        voided sale owes nothing, and returns and discounts reduce the total. (This method used to keep
+        its own copy of that arithmetic, which ignored offsets - a sale settled by a swap still showed
+        its full total as outstanding in the payment screens.)
         """
-        raw_total = float(sale.total_amount or 0.0)
-
-        paid = float(
-            s.query(func.coalesce(func.sum(Payment.amount), 0.0))
-            .filter(Payment.entity_type == "sale")
-            .filter(Payment.entity_id == sale.id)
-            .filter(Payment.direction == "in")
-            .filter(Payment.method != "advance")
-            .filter(Payment.status != "voided")
-            .scalar() or 0.0
-        )
-
-        alloc_total = float(
-            s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0.0))
-            .filter(AdvanceAllocation.entity_type == "sale")
-            .filter(AdvanceAllocation.entity_id == sale.id)
-            .scalar() or 0.0
-        )
-        settled = paid + alloc_total
-
-        returned = abs(float(
-            s.query(func.coalesce(func.sum(SaleReturn.amount), 0.0))
-            .filter(SaleReturn.sale_id == sale.id)
-            .scalar() or 0.0
-        ))
-
-        existing_discounts = float(
-            s.query(func.coalesce(func.sum(SaleDiscount.amount), 0.0))
-            .filter(SaleDiscount.sale_id == sale.id)
-            .scalar() or 0.0
-        )
-
-        net_total = max(raw_total - returned - existing_discounts, 0.0)
-        balance = max(net_total - settled, 0.0)
-
+        b = document_balances(s, "sale", [int(sale.id)])[int(sale.id)]
         return {
-            "raw_total": raw_total,
-            "paid": settled,
-            "paid_cash": paid,
-            "paid_via_advance": alloc_total,
-            "returned": returned,
-            "existing_discounts": existing_discounts,
-            "net_total": net_total,
-            "balance": balance,
+            "raw_total": b.gross,
+            "paid": b.settled,
+            "paid_cash": b.cash_paid,
+            "paid_via_advance": b.advance_applied,
+            "paid_via_offset": b.offset_applied,
+            "returned": b.returned,
+            "existing_discounts": b.discount,
+            "net_total": b.net_total,
+            "balance": b.balance,
         }
 
     @staticmethod

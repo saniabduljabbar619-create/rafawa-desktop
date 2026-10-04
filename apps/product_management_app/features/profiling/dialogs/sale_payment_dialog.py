@@ -196,7 +196,7 @@ class SalePaymentDialog(QDialog):
                 total_paid = nums["paid"]
                 balance = nums["balance"]
 
-                if balance <= 0:
+                if balance <= 0.005:
                     continue
 
                 total_outstanding += balance
@@ -388,7 +388,7 @@ class SalePaymentDialog(QDialog):
             total = 0.0
             for sale in sales:
                 nums = SaleAdjustmentService._sale_balance(s, sale)
-                if nums["balance"] > 0:
+                if nums["balance"] > 0.005:
                     outstanding.append((int(sale.id), nums["balance"]))
                     total += nums["balance"]
 

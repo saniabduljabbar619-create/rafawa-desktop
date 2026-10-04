@@ -9,7 +9,7 @@ from database.services.offset_service import SwapService as SW
 from database.session import get_session
 from shared.auth.permissions import PermissionDenied
 from shared.auth.session import UserSession, set_session
-from tests.conftest import CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, make_sale, pay, stock
+from tests.conftest import ADMIN_ID, CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, make_sale, pay, stock
 from tests.test_offsets import _p
 
 
@@ -369,3 +369,73 @@ def test_voided_documents_are_hidden_on_the_tabs_unless_asked_for(qapp):
     assert v.tab_sales.table.rowCount() == 1
     v.tab_sales.chk_voided.setChecked(True)
     assert v.tab_sales.table.rowCount() == 2 and s1
+
+
+# ----------------------------------------------------------------- swaps must show on the payment screens
+class _Party:
+    def __init__(self, pid, name="Customer One"):
+        self.id, self.display_name, self.full_name, self.phone = pid, name, name, ""
+
+
+def _purchase_dialog(pid=CUSTOMER_ID):
+    from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+    return PurchasePaymentDialog(_Party(pid), ADMIN_ID)
+
+
+def _sale_pay_dialog(pid=CUSTOMER_ID):
+    from apps.product_management_app.features.profiling.dialogs.sale_payment_dialog import SalePaymentDialog
+    return SalePaymentDialog(_Party(pid), ADMIN_ID)
+
+
+def _rows(d):
+    return [[d.table.item(r, c).text() for c in range(d.table.columnCount())] for r in range(d.table.rowCount())]
+
+
+def test_purchase_payment_screen_deducts_what_was_swapped(qapp):
+    """A 114,000 purchase swapped for 31,000 of goods: the supplier payment screen owes 83,000, not 114,000."""
+    p = _p(CUSTOMER_ID, 1140, 100)
+    SW.record_from_records(CUSTOMER_ID, [p], [], [], [{"product_id": FERT_ID, "qty_bags": 1, "total_weight_kg": 0,
+                                                       "unit_price": 31000}], "")
+    d = _purchase_dialog()
+    assert _rows(d)[0][2:] == ["114,000.00", "31,000.00", "83,000.00"]
+    assert "83,000.00" in d.total_balance_label.text()
+
+
+def test_sale_payment_screen_does_not_list_sales_settled_by_a_swap_or_voided_ones(qapp):
+    from database.services.sales_service import SaleService
+    from shared.auth.permissions import system_context
+    p = _p(CUSTOMER_ID, 1140, 100)
+    g = [{"product_id": FERT_ID, "qty_bags": 1, "total_weight_kg": 0, "unit_price": 31000}]
+    r1 = SW.record_from_records(CUSTOMER_ID, [p], [], [], g, "")
+    r2 = SW.record_from_records(CUSTOMER_ID, [p], [], [], g, "")             # tested again
+    real = make_sale()["sale_id"]                                              # an ordinary unpaid sale
+    gone = make_sale()["sale_id"]
+    with system_context():
+        SaleService.void_sale(gone, CASHIER_A, "typed twice")
+    d = _sale_pay_dialog()
+    assert [r[0] for r in _rows(d)] == [str(real)] and r1["sale_id"] and r2["sale_id"]
+    assert "20,000.00" in d.total_balance_label.text()
+
+
+def test_every_balance_screen_agrees_after_a_swap(qapp):
+    from database.services.purchase_adjustment_service import PurchaseAdjustmentService as PA
+    from database.services.sale_adjustment_service import SaleAdjustmentService as SA
+    p = _p(CUSTOMER_ID, 1140, 100)
+    r = SW.record_from_records(CUSTOMER_ID, [p], [], [], [{"product_id": FERT_ID, "qty_bags": 1,
+                                                          "total_weight_kg": 0, "unit_price": 31000}], "")
+    with get_session() as s:
+        from database.models.purchase import Purchase
+        from database.models.sale import Sale
+        pb, sb = PA._purchase_balance(s, s.get(Purchase, p)), SA._sale_balance(s, s.get(Sale, r["sale_id"]))
+    assert pb["balance"] == 83000 and pb["paid_via_offset"] == 31000 and pb["paid_cash"] == 0
+    assert sb["balance"] == 0 and sb["paid"] == 31000
+    assert PA.get_purchase_balance(p)["balance"] == 83000
+
+
+def test_receipts_count_what_a_swap_settled(qapp):
+    from apps.product_management_app.features.receipts_v2 import receipt_data as rd
+    p = _p(CUSTOMER_ID, 1140, 100)
+    r = SW.record_from_records(CUSTOMER_ID, [p], [], [], [{"product_id": FERT_ID, "qty_bags": 1,
+                                                          "total_weight_kg": 0, "unit_price": 31000}], "")
+    with get_session() as s:
+        assert rd._sum_paid(s, "purchase", p) == 31000 and rd._sum_paid(s, "sale", r["sale_id"]) == 31000

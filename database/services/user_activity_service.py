@@ -13,6 +13,7 @@ from database.models.sale_return import SaleReturn
 from database.models.purchase_return import PurchaseReturn
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation 
+from database.services.document_balance import offset_totals
 from database.services.user_performance_service import UserPerformanceService
 
 
@@ -72,7 +73,8 @@ class UserActivityService:
                 ) or 0.0
 
                 net_total = max(raw_total - return_total, 0.0)
-                settled = float(paid_total) + float(alloc_total)
+                settled = (float(paid_total) + float(alloc_total)
+                           + offset_totals(s, "purchase", [p.id]).get(p.id, 0.0))
                 balance = max(net_total - settled, 0.0)
 
                 if net_total <= 0:
@@ -145,7 +147,8 @@ class UserActivityService:
                 ) or 0.0
 
                 net_total = max(raw_total - return_total, 0.0)
-                settled = float(paid_total) + float(alloc_total)
+                settled = (float(paid_total) + float(alloc_total)
+                           + offset_totals(s, "sale", [sale.id]).get(sale.id, 0.0))
                 balance = max(net_total - settled, 0.0)
 
                 if net_total <= 0:

@@ -33,6 +33,7 @@ from database.models.sale_return import SaleReturn
 from database.models.purchase_return import PurchaseReturn
 from database.models.sale_discount import SaleDiscount
 from database.models.advance_allocations import AdvanceAllocation
+from database.services.document_balance import offset_totals
 
 from .receipt_models import (
     ReceiptDoc, ReceiptLine, PaymentLine, PartyInfo, ShopInfo,
@@ -78,7 +79,11 @@ def _sum_paid(s, entity_type: str, entity_id: int) -> float:
         .scalar()
     ) or 0.0
 
-    return round(paid + float(alloc_total), 2)
+    # Set off against the party's opposite documents (a swap / settlement): no cash, but it settles the
+    # document exactly like a payment does.
+    offset = offset_totals(s, entity_type, [int(entity_id)]).get(int(entity_id), 0.0)
+
+    return round(paid + float(alloc_total) + offset, 2)
 
 
 def _payment_lines(s, entity_type: str, entity_id: int) -> List[PaymentLine]:
