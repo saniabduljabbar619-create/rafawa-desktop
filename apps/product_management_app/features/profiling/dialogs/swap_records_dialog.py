@@ -181,11 +181,13 @@ class SwapRecordsDialog(QDialog):
     def _doc_box(self, title, docs, key) -> QGroupBox:
         box = QGroupBox(title)
         lay = QVBoxLayout(box)
-        t = QTableWidget(len(docs), 3)
-        t.setHorizontalHeaderLabels(["Reference", "Products", "Balance"])
+        t = QTableWidget(len(docs), 4)
+        t.setHorizontalHeaderLabels(["Reference", "Products", "Counts (still unpaid)", "Flag"])
         style_table(t, 28)
         t.setEditTriggers(QTableWidget.NoEditTriggers)
         t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        t.setColumnWidth(2, 150)
+        t.setColumnWidth(3, 280)
         t.setMaximumHeight(130)
         for i, d in enumerate(docs):
             t.setItem(i, 0, QTableWidgetItem(d["ref"]))
@@ -193,6 +195,9 @@ class SwapRecordsDialog(QDialog):
             it = QTableWidgetItem(money(d[key]))
             it.setTextAlignment(RIGHT)
             t.setItem(i, 2, it)
+            flag = QTableWidgetItem(("⚠ " + d["flag"]) if d.get("flag") else "")
+            flag.setForeground(QColor("#b8792e"))
+            t.setItem(i, 3, flag)
         lay.addWidget(t)
         if not docs:
             hint = QLabel("None ticked - the goods below make up this side.")

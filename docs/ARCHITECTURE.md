@@ -83,8 +83,10 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
 - **Swap.** Cashier Purchase -> *Swap / Exchange*: goods he brings (purchase) and goods we give him
   (sale) are recorded together by `SwapService.record` and set against each other; only the
   difference is left owing either way. If the second document fails the first is voided.
-- **Swap from a customer profile.** Besides Activity/Crops/..., a registered customer's profile has **Sales**,
-  **Purchases** (one row per document, tick box on every row that still has a balance, multi-select),
+- **Swap from a customer profile.** Besides Activity/Crops/..., a registered customer's profile has one two-sided
+  **Sales/Purchases** tab (Purchases on the left, Sales on the right, a line between; one row per document with a
+  tick box on EVERY row - paid or not - and a Flag column/banner saying what ticking it means, e.g. "already paid
+  - adds nothing to set off"; multi-select on both sides, one Swap button),
   **Products** (bought from / sold to him per product) and **Transaction history** (everything in date order
   with a running position) - `services/customer_records_service.py`, read-only. *Swap with ticked ->* opens
   the swap page (`profiling/dialogs/swap_records_dialog.py`), which opens straight onto the right workspace -
@@ -94,8 +96,8 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
   filled in and editable; with none the operator types it, and a line without a price is refused), goods he brings are added line by line; both sides are totalled and
   `SwapService.record_from_records` records the new documents and sets everything off, oldest first; if the two
   sides match it is settled, otherwise the rest stays open on the documents (reported from the real
-  balances afterwards). Voided documents are hidden on the tabs unless *Show voided* is ticked. Only
-  open (unpaid) records can be ticked; nothing is written unless both sides have value, and the documents it
+  balances afterwards). Voided documents are hidden on the tabs unless *Show voided* is ticked. A
+  paid record can be ticked but contributes nothing; nothing is written unless both sides have value, and the documents it
   created are voided if a later step fails.
 - **Net off.** `OffsetService.apply(party_id, kind="net_off")` cancels the overlap for a party we both owe and are owed by (service only; no screen).
 - The payment screens (Purchase Payment / Sale Payment dialogs, price adjustments, receipts, user activity) read
