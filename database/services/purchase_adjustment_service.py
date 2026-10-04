@@ -11,6 +11,7 @@ from database.models.payment import Payment
 from database.models.purchase_price_adjustment import PurchasePriceAdjustment
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.party import Party
+from database.services.document_balance import document_balances
 
 
 class PurchaseAdjustmentService:
@@ -35,57 +36,26 @@ class PurchaseAdjustmentService:
     @staticmethod
     def _purchase_balance(s, purchase: Purchase) -> Dict[str, float]:
         """
-        The real, current numbers behind one purchase's balance - shared
-        by both list_supplier_purchases (for display) and apply_
-        adjustment, so both always agree with each other. Mirrors
-        SaleAdjustmentService._sale_balance's exact settled = paid +
-        alloc_total pattern, plus existing_adjustments folded into the
-        net total the same way existing_discounts is on the sale side.
+        The real, current numbers behind one purchase's balance - shared by list_supplier_purchases,
+        apply_adjustment and the payment dialogs.
+
+        Taken from the ONE shared definition (document_balance.document_balances): cash paid, advance
+        allocations AND offsets/swaps against the party's sales count as settled, a voided purchase owes
+        nothing, and returns and price adjustments change the total. (This method used to keep its own
+        copy of that arithmetic, which ignored offsets - a purchase settled by a swap still showed its
+        full total as outstanding in the payment screens.)
         """
-        raw_total = float(purchase.total_amount or 0.0)
-
-        paid = float(
-            s.query(func.coalesce(func.sum(Payment.amount), 0.0))
-            .filter(Payment.entity_type == "purchase")
-            .filter(Payment.entity_id == purchase.id)
-            .filter(Payment.direction == "out")
-            .filter(Payment.method != "advance")
-            .filter(Payment.status != "voided")
-            .scalar() or 0.0
-        )
-
-        alloc_total = float(
-            s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0.0))
-            .filter(AdvanceAllocation.entity_type == "purchase")
-            .filter(AdvanceAllocation.entity_id == purchase.id)
-            .scalar() or 0.0
-        )
-        settled = paid + alloc_total
-
-        returned = abs(float(
-            s.query(func.coalesce(func.sum(PurchaseReturn.amount), 0.0))
-            .filter(PurchaseReturn.purchase_id == purchase.id)
-            .scalar() or 0.0
-        ))
-
-        existing_adjustments = float(
-            s.query(func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0.0))
-            .filter(PurchasePriceAdjustment.purchase_id == purchase.id)
-            .scalar() or 0.0
-        )
-
-        net_total = max(raw_total - returned + existing_adjustments, 0.0)
-        balance = max(net_total - settled, 0.0)
-
+        b = document_balances(s, "purchase", [int(purchase.id)])[int(purchase.id)]
         return {
-            "raw_total": raw_total,
-            "paid": settled,
-            "paid_cash": paid,
-            "paid_via_advance": alloc_total,
-            "returned": returned,
-            "existing_adjustments": existing_adjustments,
-            "net_total": net_total,
-            "balance": balance,
+            "raw_total": b.gross,
+            "paid": b.settled,
+            "paid_cash": b.cash_paid,
+            "paid_via_advance": b.advance_applied,
+            "paid_via_offset": b.offset_applied,
+            "returned": b.returned,
+            "existing_adjustments": b.adjustment,
+            "net_total": b.net_total,
+            "balance": b.balance,
         }
 
     @staticmethod

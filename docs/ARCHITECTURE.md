@@ -98,6 +98,10 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
   open (unpaid) records can be ticked; nothing is written unless both sides have value, and the documents it
   created are voided if a later step fails.
 - **Net off.** `OffsetService.apply(party_id, kind="net_off")` cancels the overlap for a party we both owe and are owed by (service only; no screen).
+- The payment screens (Purchase Payment / Sale Payment dialogs, price adjustments, receipts, user activity) read
+  "what is still owed" from the same shared definition (`document_balance`), through
+  `SaleAdjustmentService._sale_balance` / `PurchaseAdjustmentService._purchase_balance`, so a swap-settled
+  document shows its reduced balance (or nothing) there and voided documents are never listed.
 - An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
   balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).
 

@@ -26,6 +26,7 @@ from database.models.product import Product
 from database.models.party import Party
 from database.models.user import User
 from database.models.payment import Payment
+from database.services.document_balance import offset_totals
 from database.models.advance import Advance
 from database.models.sale_return import SaleReturn
 from database.models.purchase_return import PurchaseReturn
@@ -62,7 +63,8 @@ def _sum_paid(s, entity_type: str, entity_id: int) -> float:
         .filter(Payment.entity_type == entity_type, Payment.entity_id == int(entity_id))
         .all()
     )
-    return round(sum(_f(p.amount) for p in rows), 2)
+    offset = offset_totals(s, entity_type, [int(entity_id)]).get(int(entity_id), 0.0)   # swap / set-off
+    return round(sum(_f(p.amount) for p in rows) + offset, 2)
 
 
 def _payment_lines(s, entity_type: str, entity_id: int) -> List[PaymentLine]:
