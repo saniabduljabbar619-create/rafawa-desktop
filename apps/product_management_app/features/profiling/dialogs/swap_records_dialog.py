@@ -2,20 +2,23 @@
 """
 The swap page of a customer profile.
 
-Starts from the rows ticked on his Sales / Purchases tabs:
+Opens straight onto the workspace the ticked rows call for:
 
-    purchases ticked  = goods he already brought us (we still owe him for them)
-    sales ticked      = goods we already gave him   (he still owes us for them)
+    purchases ticked  (we owe him)  ->  SALE workspace: pick the goods we give him from the shelf
+    sales ticked      (he owes us)  ->  PURCHASE workspace: add the goods he brings
+    both / nothing    ->  both workspaces
 
-then lets the operator add NEW goods either way - the goods we give him are picked from the shelf by category
-(tick several, set quantity and price), the goods he brings are added line by line - computes both sides and
-finalizes: everything he is owed is set against everything he owes, only the difference is left to settle.
+Goods we give him are ticked by category; each product's selling price is filled in when it has one (still
+editable) and left empty for the operator to type when it has none. Both sides are totalled and finalizing
+sets what he is owed against what he owes: if they match it is settled, otherwise the rest stays open on the
+documents to be paid later (the result message reads the real balances).
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
 from PySide2.QtCore import Qt
+from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -29,7 +32,8 @@ from apps.product_management_app.features.cashier.dialogs.intake_cart_dialog imp
 
 RIGHT = Qt.AlignRight | Qt.AlignVCenter
 ALL = "All categories"
-COLS = ["", "Product", "Category", "In stock", "Bags", "Kg", "Price", "Total"]
+COLS = ["", "Product", "Category / priced per", "In stock", "Bags", "Kg", "Selling price", "Total"]
+AMBER = QColor("#fde9c8")
 
 
 def _num(text: str) -> float:
@@ -56,25 +60,34 @@ class SwapRecordsDialog(QDialog):
         self.owe_docs = [docs[i] for i in self.purchase_ids if i in docs]
         self.recv_docs = [docs_s[i] for i in self.sale_ids if i in docs_s]
 
+        # which workspace(s) the ticked rows call for
+        self.show_give = bool(self.purchase_ids) or not self.sale_ids
+        self.show_recv = bool(self.sale_ids) or not self.purchase_ids
         root = QVBoxLayout(self)
-        title = QLabel(f"Swap with {party_name or 'customer'}")
+        word = ("Sale workspace - goods we give him" if self.show_give and not self.show_recv else
+                "Purchase workspace - goods he brings" if self.show_recv and not self.show_give else "Swap")
+        self.setWindowTitle(word)
+        title = QLabel(f"Swap with {party_name or 'customer'}  -  {word}")
         title.setObjectName("Title")
         root.addWidget(title)
-        sub = QLabel("What he is owed (purchases from him, and goods he brings now) is set against what he owes "
-                     "(sales to him, and goods we give him now). Only the difference is left to pay.")
+        sub = QLabel("What he is owed is set against what he owes. If the two match it is settled; if not, the "
+                     "rest stays open on the documents to be paid later.")
         sub.setWordWrap(True)
         sub.setStyleSheet("color:#6b7280; font-size:12px;")
         root.addWidget(sub)
 
         top = QHBoxLayout()
-        top.addWidget(self._doc_box("Ticked purchases - we owe him", self.owe_docs, "balance"), 1)
-        top.addWidget(self._doc_box("Ticked sales - he owes us", self.recv_docs, "balance"), 1)
+        neither = not (self.owe_docs or self.recv_docs)
+        if self.owe_docs or neither:
+            top.addWidget(self._doc_box("Ticked purchases - we owe him", self.owe_docs, "balance"), 1)
+        if self.recv_docs or neither:
+            top.addWidget(self._doc_box("Ticked sales - he owes us", self.recv_docs, "balance"), 1)
         root.addLayout(top)
 
         mid = QHBoxLayout()
         root.addLayout(mid, 1)
 
-        give = QGroupBox("Goods we give him  (pick from the shelf)")
+        give = QGroupBox("Sale workspace - goods we give him  (pick from the shelf)")
         gl = QVBoxLayout(give)
         filt = QHBoxLayout()
         self.category = QComboBox()
@@ -94,7 +107,7 @@ class SwapRecordsDialog(QDialog):
         style_table(self.tbl_give, 32)
         self.tbl_give.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_give.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        for c, w in ((0, 30), (2, 100), (3, 130), (4, 70), (5, 80), (6, 90), (7, 110)):
+        for c, w in ((0, 30), (2, 230), (3, 130), (4, 70), (5, 80), (6, 100), (7, 110)):
             self.tbl_give.setColumnWidth(c, w)
         self.tbl_give.horizontalHeader().setStretchLastSection(False)
         gl.addWidget(self.tbl_give, 1)
@@ -104,8 +117,9 @@ class SwapRecordsDialog(QDialog):
         hint.setWordWrap(True)
         gl.addWidget(hint)
         mid.addWidget(give, 3)
+        give.setVisible(self.show_give)
 
-        recv = QGroupBox("Goods he brings now  (new purchase)")
+        recv = QGroupBox("Purchase workspace - goods he brings now  (new purchase)")
         rl = QVBoxLayout(recv)
         self.tbl_recv = QTableWidget(0, 4)
         self.tbl_recv.setHorizontalHeaderLabels(["Product", "Qty", "Price", "Total"])
@@ -122,6 +136,7 @@ class SwapRecordsDialog(QDialog):
         row.addStretch(1)
         rl.addLayout(row)
         mid.addWidget(recv, 2)
+        recv.setVisible(self.show_recv)
 
         self.lbl_owe = QLabel("")
         self.lbl_recv = QLabel("")
@@ -205,23 +220,37 @@ class SwapRecordsDialog(QDialog):
             box.setCheckState(Qt.Checked if st["on"] else Qt.Unchecked)
             box.setData(Qt.UserRole, p["id"])
             t.setItem(i, 0, box)
-            for c, text in ((1, p["name"]), (2, p["category"] or p["type"].capitalize()),
+            unit = "per kg" if crops else "per bag"
+            for c, text in ((1, p["name"]), (2, f"{p['category'] or p['type'].capitalize()}  ·  {unit}"
+                                  + ("" if p["price"] else "  ·  NO PRICE SET")),
                             (3, f"{p['bags']:g} bags" + (f" / {p['kg']:,.0f} kg" if crops else ""))):
                 it = QTableWidgetItem(text)
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 t.setItem(i, c, it)
             for c, text, editable in ((4, f"{st['bags']:g}" if st["bags"] else "", True),
                                       (5, f"{st['kg']:g}" if st["kg"] else "", crops),
-                                      (6, f"{st['price']:g}", True)):
+                                      (6, f"{st['price']:g}" if st["price"] else "", True)):
                 it = QTableWidgetItem(text)
                 it.setTextAlignment(RIGHT)
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | (Qt.ItemIsEditable if editable else Qt.NoItemFlags))
+                if c == 6:
+                    self._price_look(it, st["price"])
                 t.setItem(i, c, it)
             tot = QTableWidgetItem(money(self._line_total(p)) if st["on"] else "")
             tot.setTextAlignment(RIGHT)
             tot.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             t.setItem(i, 7, tot)
         t.blockSignals(False)
+
+    @staticmethod
+    def _price_look(item, price) -> None:
+        """A product with a selling price shows it (editable); one without is left empty and flagged."""
+        if price:
+            item.setBackground(QColor("#ffffff"))
+            item.setToolTip("Selling price - change it if this deal is at another price")
+        else:
+            item.setBackground(AMBER)
+            item.setToolTip("This product has no selling price yet - type the price for this swap")
 
     def _edited(self, item) -> None:
         box = self.tbl_give.item(item.row(), 0)
@@ -240,6 +269,9 @@ class SwapRecordsDialog(QDialog):
             st["kg"] = _num(item.text())
         elif c == 6:
             st["price"] = _num(item.text())
+            self.tbl_give.blockSignals(True)
+            self._price_look(item, st["price"])
+            self.tbl_give.blockSignals(False)
         else:
             return
         if c in (4, 5, 6) and (st["bags"] or st["kg"]):
@@ -318,27 +350,40 @@ class SwapRecordsDialog(QDialog):
 
     def _save(self) -> None:
         given = self.given_lines()
-        bad = [p["name"] for p in self.products if self.pick.get(p["id"], {}).get("on")
-               and (self._line_total(p) <= 0)]
+        chosen = [p for p in self.products if self.pick.get(p["id"], {}).get("on")]
+        no_price = [p["name"] for p in chosen if not self.pick[p["id"]]["price"]]
+        if no_price:
+            QMessageBox.warning(self, "Swap", f"No selling price yet for: {', '.join(no_price)}.\n"
+                                              "Type the price in the amber cell for each.")
+            return
+        bad = [p["name"] for p in chosen if self._line_total(p) <= 0]
         if bad:
-            QMessageBox.warning(self, "Swap", f"Enter the quantity and price for: {', '.join(bad)}")
+            QMessageBox.warning(self, "Swap", f"Enter the quantity (bags, and kg for crops) for: {', '.join(bad)}")
             return
         owe, gets = self.totals()
         if owe <= 0 or gets <= 0:
             QMessageBox.warning(self, "Swap", "Both sides need something: tick purchases or add the goods he brings, "
                                               "and tick sales or pick the goods we give him.")
             return
+        self.btn_save.setEnabled(False)                 # one attempt at a time: no double recording
         try:
             self.result_data = SwapService.record_from_records(
                 self.party_id, self.purchase_ids, self.sale_ids, list(self._recv), given, self.note.text())
         except PermissionDenied as e:
+            self.btn_save.setEnabled(True)
             QMessageBox.warning(self, "Not allowed", str(e))
             return
         except Exception as e:
-            QMessageBox.warning(self, "Swap not recorded", str(e))
+            self.btn_save.setEnabled(True)
+            QMessageBox.warning(self, "Swap NOT recorded",
+                                f"{e}\n\nNothing was saved - you can correct it and finalize again.")
             return
         r = self.result_data
-        left = (f"We still owe him {money(r['we_owe_him'])}." if r["we_owe_him"] > 0 else
-                f"He still owes us {money(r['he_owes_us'])}." if r["he_owes_us"] > 0 else "Nothing left to pay.")
-        QMessageBox.information(self, "Swap recorded", f"Swap recorded. {money(r['offset'])} set off.\n{left}")
+        if r["we_owe_him"] > 0.005:
+            left = f"Settled as far as it goes. We still owe him {money(r['we_owe_him'])} - pay it later as usual."
+        elif r["he_owes_us"] > 0.005:
+            left = f"Settled as far as it goes. He still owes us {money(r['he_owes_us'])} - collect it later as usual."
+        else:
+            left = "Fully settled - nothing left to pay either way."
+        QMessageBox.information(self, "Swap recorded", f"{money(r['offset'])} set off.\n{left}")
         self.accept()

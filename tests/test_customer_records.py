@@ -231,3 +231,102 @@ def test_swap_button_on_the_profile_uses_the_ticked_rows(qapp, boxes, monkeypatc
     monkeypatch.setattr(sd, "SwapRecordsDialog", Fake)
     v.tab_purchases.btn_swap.click()
     assert seen["purchase_ids"] == [p] and seen["sale_ids"] == [s1] and seen["party_id"] == CUSTOMER_ID
+
+
+# ----------------------------------------------------------------- review fixes: routing, prices, outcome
+def _dialog(purchase_ids=(), sale_ids=()):
+    from apps.product_management_app.features.profiling.dialogs.swap_records_dialog import SwapRecordsDialog
+    return SwapRecordsDialog(None, CUSTOMER_ID, "Customer One", purchase_ids=purchase_ids, sale_ids=sale_ids)
+
+
+def test_ticked_purchases_open_the_sale_workspace_and_ticked_sales_the_purchase_workspace(qapp):
+    p = _p(CUSTOMER_ID, 500, 100)
+    s1 = make_sale()["sale_id"]
+    d = _dialog(purchase_ids=[p])
+    assert not d.tbl_give.isHidden() or d.show_give
+    assert d.show_give and not d.show_recv and "Sale workspace" in d.windowTitle()
+    d = _dialog(sale_ids=[s1])
+    assert d.show_recv and not d.show_give and "Purchase workspace" in d.windowTitle()
+    d = _dialog(purchase_ids=[p], sale_ids=[s1])
+    assert d.show_give and d.show_recv
+    d = _dialog()
+    assert d.show_give and d.show_recv
+
+
+def test_selling_price_is_filled_when_the_product_has_one_and_left_empty_when_not(qapp, boxes):
+    from database.models.product import Product
+    with get_session() as s:
+        s.get(Product, FERT_ID).default_sale_rate = None         # NPK has no selling price
+    p = _p(CUSTOMER_ID, 500, 100)
+    d = _dialog(purchase_ids=[p])
+    rows = {d.tbl_give.item(i, 1).text(): i for i in range(d.tbl_give.rowCount())}
+    maize, npk = rows["Maize"], rows["NPK"]
+    assert d.tbl_give.item(maize, 6).text() == "100"                 # filled, and editable
+    assert d.tbl_give.item(maize, 6).flags() & Qt.ItemIsEditable
+    assert d.tbl_give.item(npk, 6).text() == "" and "no selling price" in d.tbl_give.item(npk, 6).toolTip()
+    d.tbl_give.item(npk, 4).setText("2")                            # quantity but no price
+    d._save()
+    assert boxes[-1][0] == "warning" and "NPK" in boxes[-1][1] and _bal("purchase", p).balance == 50000
+    d.tbl_give.item(npk, 6).setText("9000")                         # the user types the price
+    assert d.lbl_recv.text() == "He owes us: 18,000.00"
+    d._save()
+    assert d.result_data["offset"] == 18000
+
+
+def test_outcome_is_read_from_the_real_balances(qapp, boxes):
+    """Goods bigger than what we owe: the rest stays OPEN on the new sale (to be collected later)."""
+    p = _p(CUSTOMER_ID, 100, 100)                                    # we owe him 10,000
+    r = SW.record_from_records(CUSTOMER_ID, [p], [], [], _give(kg=300, price=100), "")   # gives 30,000
+    assert r["offset"] == 10000 and r["he_owes_us"] == 20000 and r["we_owe_him"] == 0
+    assert _bal("sale", r["sale_id"]).balance == 20000 and _bal("purchase", p).status == "paid"
+
+
+def test_matching_values_settle_completely():
+    p = _p(CUSTOMER_ID, 300, 100)                                    # 30,000
+    r = SW.record_from_records(CUSTOMER_ID, [p], [], [], _give(kg=300, price=100), "")
+    assert r["offset"] == 30000 and r["we_owe_him"] == 0 and r["he_owes_us"] == 0
+    assert _bal("sale", r["sale_id"]).status == "paid" and _bal("purchase", p).status == "paid"
+
+
+def test_crops_are_totalled_by_kg_and_a_missing_kg_or_price_is_refused_before_writing():
+    p = _p(CUSTOMER_ID, 500, 100)
+    from database.models.sale import Sale
+    with get_session() as s:
+        n = s.query(Sale).count()
+    for line in ({"product_id": CROP_ID, "qty_bags": 5, "total_weight_kg": 0, "unit_price": 100},     # no kg
+                 {"product_id": CROP_ID, "qty_bags": 1, "total_weight_kg": 100, "unit_price": 0}):    # no price
+        with pytest.raises(ValueError):
+            SW.record_from_records(CUSTOMER_ID, [p], [], [], [line], "")
+    with get_session() as s:
+        assert s.query(Sale).count() == n and _bal("purchase", p).balance == 50000
+
+
+def test_a_failed_attempt_then_a_good_one_records_exactly_one_swap(qapp, boxes):
+    from database.models.sale import Sale
+    p = _p(CUSTOMER_ID, 500, 100)
+    d = _dialog(purchase_ids=[p])
+    rows = {d.tbl_give.item(i, 1).text(): i for i in range(d.tbl_give.rowCount())}
+    m = rows["Maize"]
+    d.tbl_give.item(m, 4).setText("1")
+    d.tbl_give.item(m, 5).setText("10000000")                        # far more than the shelf holds
+    d._save()
+    assert boxes[-1][0] == "warning" and "Nothing was saved" in boxes[-1][1] and d.btn_save.isEnabled()
+    d.tbl_give.item(m, 5).setText("100")
+    d._save()
+    assert d.result_data["offset"] == 10000
+    with get_session() as s:
+        assert s.query(Sale).filter(Sale.status != "voided").count() == 1
+    assert _bal("purchase", p).balance == 40000
+
+
+def test_voided_documents_are_hidden_on_the_tabs_unless_asked_for(qapp):
+    from database.services.sales_service import SaleService
+    from shared.auth.permissions import system_context
+    s1 = make_sale()["sale_id"]
+    s2 = make_sale()["sale_id"]
+    with system_context():
+        SaleService.void_sale(s2, CASHIER_A, "typed twice")
+    v = _profile(qapp)
+    assert v.tab_sales.table.rowCount() == 1
+    v.tab_sales.chk_voided.setChecked(True)
+    assert v.tab_sales.table.rowCount() == 2 and s1

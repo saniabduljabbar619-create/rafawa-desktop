@@ -7,7 +7,7 @@ from typing import List
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
-    QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from database.services.customer_records_service import CustomerRecordsService as R
@@ -61,6 +61,7 @@ class DocumentsTab(QWidget):
         bar = QHBoxLayout()
         self.btn_unpaid = QPushButton("Tick all unpaid")
         self.btn_clear = QPushButton("Clear ticks")
+        self.chk_voided = QCheckBox("Show voided")
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#374151; font-weight:600;")
         self.btn_swap = QPushButton("Swap with ticked  →")
@@ -69,6 +70,7 @@ class DocumentsTab(QWidget):
             bar.addWidget(b)
         bar.addWidget(self.lbl)
         bar.addStretch(1)
+        bar.addWidget(self.chk_voided)
         bar.addWidget(self.btn_swap)
         lay.addLayout(bar)
         word = "Sale" if kind == "sale" else "Purchase"
@@ -81,12 +83,13 @@ class DocumentsTab(QWidget):
         self.table.itemChanged.connect(self._ticked)
         self.btn_unpaid.clicked.connect(lambda: self._tick_all(True))
         self.btn_clear.clicked.connect(lambda: self._tick_all(False))
+        self.chk_voided.toggled.connect(lambda _on: self.reload())
         self.btn_swap.clicked.connect(self.swap_requested.emit)
         self.reload()
 
     def reload(self) -> None:
         keep = set(self.ticked_ids())
-        self.rows = R.documents(self.party_id, self.kind)
+        self.rows = [d for d in R.documents(self.party_id, self.kind) if self.chk_voided.isChecked() or not d["voided"]]
         t = self.table
         t.blockSignals(True)
         t.setRowCount(len(self.rows))
