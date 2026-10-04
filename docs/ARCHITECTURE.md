@@ -102,6 +102,11 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
   "what is still owed" from the same shared definition (`document_balance`), through
   `SaleAdjustmentService._sale_balance` / `PurchaseAdjustmentService._purchase_balance`, so a swap-settled
   document shows its reduced balance (or nothing) there and voided documents are never listed.
+- **The walk-in id.** Party id 11 is reserved for the shared anonymous walk-in account, but ids are handed out by
+  the database, so a real customer can end up with id 11. `services/walkin_account.is_shared_walkin` therefore
+  checks the row's type (not just the number): a registered party with that id is a real party (swaps and
+  set-offs work, its documents are not flagged as walk-ins), and an anonymous sale is refused rather than posted
+  to that customer when no real walk-in account exists.
 - An offset moves no cash (drawer untouched). `document_balance` counts it as a settlement, so every
   balance screen agrees; a voided counterpart releases it, and an admin can reverse one (audited).
 

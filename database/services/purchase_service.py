@@ -7,7 +7,7 @@ from sqlalchemy import func
 from database.session import get_session
 from database.services.audit_service import AuditService
 from shared.auth.permissions import require_admin
-from shared.config.constants import WALKIN_PARTY_ID
+from database.services.walkin_account import is_shared_walkin
 from database.models.product import Product
 from database.models.purchase import Purchase
 from database.models.purchase_item import PurchaseItem
@@ -126,7 +126,8 @@ class PurchaseService:
 
             walkin_name = (payload.get("walkin_name") or "").strip()
 
-            if supplier_party_id == WALKIN_PARTY_ID:
+            is_walkin = is_shared_walkin(supplier_party_id, s)
+            if is_walkin:
                 walkin_name = walkin_name or "Unknown"
             else:
                 walkin_name = None
@@ -135,7 +136,7 @@ class PurchaseService:
             # whoever they were before - a longtime customer bought fertilizer
             # from us once, and this is the moment that becomes true too.
             # the walk-in id is the shared anonymous bucket, not a real counterparty.
-            if supplier_party_id != WALKIN_PARTY_ID and auto_flag_supplier:
+            if not is_walkin and auto_flag_supplier:
                 PurchaseService._ensure_role(supplier_party_id, "is_supplier")
 
             purchase = Purchase(

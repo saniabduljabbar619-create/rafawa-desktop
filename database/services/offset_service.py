@@ -31,7 +31,7 @@ from database.services.document_balance import document_balances
 from database.session import get_session
 from shared.auth.permissions import INTAKE_ROLES, require_admin, require_role, system_context
 from shared.auth.session import require_user_id
-from shared.config.constants import WALKIN_PARTY_ID
+from database.services.walkin_account import is_shared_walkin
 
 EPS = 0.005
 
@@ -91,10 +91,10 @@ class OffsetService:
         `amount` caps the total (None = as much as both sides allow).
         """
         party_id = int(party_id)
-        if party_id == WALKIN_PARTY_ID:
-            raise ValueError("Walk-ins cannot be offset - they have no account of their own.")
         user_id = int(require_user_id())
         with get_session() as s:
+            if is_shared_walkin(party_id, s):
+                raise ValueError("Walk-ins cannot be offset - they have no account of their own.")
             if s.query(Party.id).filter(Party.id == party_id).first() is None:
                 raise ValueError("Party not found.")
             pay = OffsetService._pick(_open_docs(s, "creditors", party_id), purchase_ids)
@@ -235,8 +235,9 @@ class SwapService:
         party_id = int(party_id)
         purchase_ids, sale_ids = [int(i) for i in purchase_ids], [int(i) for i in sale_ids]
         received, given = list(received or []), list(given or [])
-        if party_id <= 0 or party_id == WALKIN_PARTY_ID:
-            raise ValueError("Choose a registered customer or supplier for a swap.")
+        if party_id <= 0 or is_shared_walkin(party_id):
+            raise ValueError("A swap needs a registered customer or supplier - this is the shared walk-in "
+                             "account, which has no account of its own.")
         if not (purchase_ids or received):
             raise ValueError("Choose the purchases from him, or add the goods he is bringing us.")
         if not (sale_ids or given):

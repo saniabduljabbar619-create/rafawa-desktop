@@ -1,6 +1,7 @@
 from database.session import get_session
 from sqlalchemy import text
 from shared.config.constants import WALKIN_PARTY_ID
+from database.services.walkin_account import is_shared_walkin
 
 class WalkinService:
 
@@ -10,6 +11,10 @@ class WalkinService:
     def list_traders():
 
         with get_session() as s:
+
+            # no shared walk-in account (its id belongs to a real customer): nobody to list
+            if not is_shared_walkin(WalkinService.WALKIN_PARTY_ID, s):
+                return []
 
             rows = s.execute(text("""
                 SELECT
