@@ -89,9 +89,9 @@ Hub tiles (double-click): **My Creditors**, **My Debtors**, **Expenses & Expendi
   with a running position) - `services/customer_records_service.py`, read-only. *Swap with ticked ->* opens
   the swap page (`profiling/dialogs/swap_records_dialog.py`), which opens straight onto the right workspace -
   purchases ticked -> the Sale workspace, sales ticked -> the Purchase workspace, both -> both: the ticked purchases (we owe him) and sales
-  (he owes us) are the starting point; goods we give him are ticked from the shelf by category with quantity
-  and price (a product's selling price is filled in and editable; with none it is left empty for the
-  operator to type, and a swap without it is refused), goods he brings are added line by line; both sides are totalled and
+  (he owes us) are the starting point; goods we give him are ticked from the shelf by category; ticking (or double-clicking) a product opens the
+  checkout's own `SaleItemDialog` for quantity, by-bag mode, variant and price (the product's selling price is
+  filled in and editable; with none the operator types it, and a line without a price is refused), goods he brings are added line by line; both sides are totalled and
   `SwapService.record_from_records` records the new documents and sets everything off, oldest first; if the two
   sides match it is settled, otherwise the rest stays open on the documents (reported from the real
   balances afterwards). Voided documents are hidden on the tabs unless *Show voided* is ticked. Only

@@ -32,15 +32,8 @@ from apps.product_management_app.features.cashier.dialogs.intake_cart_dialog imp
 
 RIGHT = Qt.AlignRight | Qt.AlignVCenter
 ALL = "All categories"
-COLS = ["", "Product", "Category / priced per", "In stock", "Bags", "Kg", "Selling price", "Total"]
+COLS = ["", "Product", "Category / priced per", "In stock", "Selling price", "In this swap"]
 AMBER = QColor("#fde9c8")
-
-
-def _num(text: str) -> float:
-    try:
-        return float(str(text).replace(",", "").strip() or 0)
-    except ValueError:
-        return 0.0
 
 
 class SwapRecordsDialog(QDialog):
@@ -51,7 +44,7 @@ class SwapRecordsDialog(QDialog):
         self.result_data: Dict[str, Any] = {}
         self._recv: List[Dict[str, Any]] = []
         self.products = SwapService.products_to_give()
-        self.pick: Dict[int, Dict[str, float]] = {}        # product id -> {on, bags, kg, price}
+        self.lines: Dict[int, Dict[str, Any]] = {}         # product id -> the line set in the sale dialog
         self.setWindowTitle("Swap")
         self.resize(1250, 720)
 
@@ -105,17 +98,24 @@ class SwapRecordsDialog(QDialog):
         self.tbl_give = QTableWidget(0, len(COLS))
         self.tbl_give.setHorizontalHeaderLabels(COLS)
         style_table(self.tbl_give, 32)
+        self.tbl_give.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tbl_give.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl_give.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        for c, w in ((0, 30), (2, 230), (3, 130), (4, 70), (5, 80), (6, 100), (7, 110)):
+        for c, w in ((0, 30), (2, 230), (3, 130), (4, 110), (5, 260)):
             self.tbl_give.setColumnWidth(c, w)
         self.tbl_give.horizontalHeader().setStretchLastSection(False)
         gl.addWidget(self.tbl_give, 1)
-        hint = QLabel("Tick the products, then type Bags (and Kg for crops) and the Price. Crops are priced per kg, "
-                      "fertilizer per bag.")
+        row = QHBoxLayout()
+        self.btn_add_give = QPushButton("Add / change selected")
+        self.btn_rm_give = QPushButton("Remove")
+        row.addWidget(self.btn_add_give)
+        row.addWidget(self.btn_rm_give)
+        hint = QLabel("Tick a product (or double-click it): the same sale dialog as the checkout opens for the "
+                      "quantity and price. Its selling price is filled in when it has one.")
         hint.setStyleSheet("color:#6b7280; font-size:11px;")
         hint.setWordWrap(True)
-        gl.addWidget(hint)
+        row.addWidget(hint, 1)
+        gl.addLayout(row)
         mid.addWidget(give, 3)
         give.setVisible(self.show_give)
 
@@ -166,7 +166,10 @@ class SwapRecordsDialog(QDialog):
 
         self.category.currentIndexChanged.connect(self._render_products)
         self.search.textChanged.connect(self._render_products)
-        self.tbl_give.itemChanged.connect(self._edited)
+        self.tbl_give.itemChanged.connect(self._ticked)
+        self.tbl_give.cellDoubleClicked.connect(lambda r, _c: self._open_line(self._pid_at(r)))
+        self.btn_add_give.clicked.connect(lambda: self._open_line(self._pid_at(self.tbl_give.currentRow())))
+        self.btn_rm_give.clicked.connect(self._remove_give)
         self.btn_add_recv.clicked.connect(self._add_recv)
         self.btn_rm_recv.clicked.connect(self._remove_recv)
         self.btn_cancel.clicked.connect(self.reject)
@@ -197,12 +200,9 @@ class SwapRecordsDialog(QDialog):
             lay.addWidget(hint)
         return box
 
-    def _state(self, p) -> Dict[str, float]:
-        return self.pick.setdefault(p["id"], {"on": 0, "bags": 0, "kg": 0.0, "price": p["price"]})
-
-    def _line_total(self, p) -> float:
-        st = self._state(p)
-        return round((st["kg"] if p["type"] == "crops" else st["bags"]) * st["price"], 2)
+    def _pid_at(self, row: int):
+        it = self.tbl_give.item(row, 0) if row >= 0 else None
+        return None if it is None else int(it.data(Qt.UserRole))
 
     def _render_products(self, *_a) -> None:
         cat, term = self.category.currentText(), self.search.text().strip().lower()
@@ -213,77 +213,83 @@ class SwapRecordsDialog(QDialog):
         t.blockSignals(True)
         t.setRowCount(len(shown))
         for i, p in enumerate(shown):
-            st = self._state(p)
             crops = p["type"] == "crops"
+            ln = self.lines.get(p["id"])
             box = QTableWidgetItem()
             box.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            box.setCheckState(Qt.Checked if st["on"] else Qt.Unchecked)
+            box.setCheckState(Qt.Checked if ln else Qt.Unchecked)
             box.setData(Qt.UserRole, p["id"])
             t.setItem(i, 0, box)
             unit = "per kg" if crops else "per bag"
-            for c, text in ((1, p["name"]), (2, f"{p['category'] or p['type'].capitalize()}  ·  {unit}"
-                                  + ("" if p["price"] else "  ·  NO PRICE SET")),
-                            (3, f"{p['bags']:g} bags" + (f" / {p['kg']:,.0f} kg" if crops else ""))):
+            price = QTableWidgetItem(f"{p['price']:,.2f}" if p["price"] else "not set")
+            price.setTextAlignment(RIGHT)
+            if not p["price"]:
+                price.setForeground(QColor("#b8792e"))
+                price.setToolTip("No selling price yet - you type it in the sale dialog")
+            swap = (f"{ln['qty_bags']:g} bags" + (f" / {ln['total_weight_kg']:,.0f} kg" if crops else "")
+                    + f"  =  {money(ln['line_total'])}") if ln else ""
+            for c, text in ((1, p["name"]), (2, f"{p['category'] or p['type'].capitalize()}  ·  {unit}"),
+                            (3, f"{p['bags']:g} bags" + (f" / {p['kg']:,.0f} kg" if crops else "")),
+                            (5, swap)):
                 it = QTableWidgetItem(text)
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if ln and c == 5:
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
                 t.setItem(i, c, it)
-            for c, text, editable in ((4, f"{st['bags']:g}" if st["bags"] else "", True),
-                                      (5, f"{st['kg']:g}" if st["kg"] else "", crops),
-                                      (6, f"{st['price']:g}" if st["price"] else "", True)):
-                it = QTableWidgetItem(text)
-                it.setTextAlignment(RIGHT)
-                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | (Qt.ItemIsEditable if editable else Qt.NoItemFlags))
-                if c == 6:
-                    self._price_look(it, st["price"])
-                t.setItem(i, c, it)
-            tot = QTableWidgetItem(money(self._line_total(p)) if st["on"] else "")
-            tot.setTextAlignment(RIGHT)
-            tot.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            t.setItem(i, 7, tot)
+            price.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            t.setItem(i, 4, price)
         t.blockSignals(False)
 
-    @staticmethod
-    def _price_look(item, price) -> None:
-        """A product with a selling price shows it (editable); one without is left empty and flagged."""
-        if price:
-            item.setBackground(QColor("#ffffff"))
-            item.setToolTip("Selling price - change it if this deal is at another price")
+    def _ticked(self, item) -> None:
+        """Ticking a product opens the sale dialog for it; unticking takes it out of the swap."""
+        if item.column() != 0:
+            return
+        pid = int(item.data(Qt.UserRole))
+        if item.checkState() == Qt.Checked:
+            if pid not in self.lines and not self._open_line(pid):
+                self.tbl_give.blockSignals(True)
+                item.setCheckState(Qt.Unchecked)
+                self.tbl_give.blockSignals(False)
         else:
-            item.setBackground(AMBER)
-            item.setToolTip("This product has no selling price yet - type the price for this swap")
+            self.lines.pop(pid, None)
+            self._render_products()
+            self._summarise()
 
-    def _edited(self, item) -> None:
-        box = self.tbl_give.item(item.row(), 0)
-        if box is None:
-            return
-        p = next((x for x in self.products if x["id"] == box.data(Qt.UserRole)), None)
+    def _open_line(self, pid) -> bool:
+        """The checkout's own sale-item dialog: quantity (bags / kg, or by bag), price, variant."""
+        from database.services.sales_service import SaleService
+        from apps.product_management_app.features.cashier.dialogs.sale_item_dialog import SaleItemDialog
+        if pid is None:
+            QMessageBox.information(self, "Swap", "Select a product first.")
+            return False
+        p = next((x for x in self.products if x["id"] == pid), None)
         if p is None:
-            return
-        st = self._state(p)
-        c = item.column()
-        if c == 0:
-            st["on"] = 1 if item.checkState() == Qt.Checked else 0
-        elif c == 4:
-            st["bags"] = int(_num(item.text()))
-        elif c == 5:
-            st["kg"] = _num(item.text())
-        elif c == 6:
-            st["price"] = _num(item.text())
-            self.tbl_give.blockSignals(True)
-            self._price_look(item, st["price"])
-            self.tbl_give.blockSignals(False)
-        else:
-            return
-        if c in (4, 5, 6) and (st["bags"] or st["kg"]):
-            st["on"] = 1                                   # typing a quantity ticks the product
-            self.tbl_give.blockSignals(True)
-            box.setCheckState(Qt.Checked)
-            self.tbl_give.blockSignals(False)
-        tot = self.tbl_give.item(item.row(), 7)
-        self.tbl_give.blockSignals(True)
-        tot.setText(money(self._line_total(p)) if st["on"] else "")
-        self.tbl_give.blockSignals(False)
+            return False
+        info = SaleService.get_product_for_sale(int(pid)) or {}
+        dlg = SaleItemDialog(self, product_id=int(pid), product_name=p["name"],
+                             product_type="fertilizer" if p["type"] == "fertilizer" else "crops",
+                             unit_price=float(info.get("sale_rate") or p["price"] or 0.0))
+        if dlg.exec_() != dlg.Accepted:
+            return False
+        pay = dlg.payload()
+        if float(pay["unit_price"]) <= 0:
+            QMessageBox.warning(self, "Swap", f"Enter a selling price for {p['name']}.")
+            return False
+        self.lines[int(pid)] = {
+            "product_id": int(pid), "name": p["name"], "qty_bags": int(pay["qty_bags"]),
+            "total_weight_kg": float(pay["total_weight_kg"]), "unit_price": float(pay["unit_price"]),
+            "line_total": round(float(pay["line_total"]), 2), "variant": pay.get("variant", "")}
+        self._render_products()
         self._summarise()
+        return True
+
+    def _remove_give(self) -> None:
+        pid = self._pid_at(self.tbl_give.currentRow())
+        if pid is not None and self.lines.pop(pid, None) is not None:
+            self._render_products()
+            self._summarise()
 
     def _add_recv(self) -> None:
         kind, ok = QInputDialog.getItem(self, "Goods he brings", "Type", ["Crops", "Fertilizer"], 0, False)
@@ -315,20 +321,14 @@ class SwapRecordsDialog(QDialog):
 
     # ------------------------------------------------------------------ the sums
     def given_lines(self) -> List[Dict[str, Any]]:
-        out = []
-        for p in self.products:
-            st = self.pick.get(p["id"])
-            if not st or not st["on"]:
-                continue
-            out.append({"product_id": p["id"], "qty_bags": int(st["bags"]),
-                        "total_weight_kg": st["kg"] if p["type"] == "crops" else 0.0, "unit_price": st["price"]})
-        return out
+        return [{"product_id": ln["product_id"], "qty_bags": ln["qty_bags"],
+                 "total_weight_kg": ln["total_weight_kg"], "unit_price": ln["unit_price"]}
+                for ln in self.lines.values()]
 
     def totals(self):
         """(we owe him, he owes us) over the ticked records plus the new goods on each side."""
         owe = sum(d["balance"] for d in self.owe_docs) + sum(_buy_total(i) for i in self._recv)
-        gets = sum(d["balance"] for d in self.recv_docs) + sum(
-            self._line_total(p) for p in self.products if self.pick.get(p["id"], {}).get("on"))
+        gets = sum(d["balance"] for d in self.recv_docs) + sum(ln["line_total"] for ln in self.lines.values())
         return round(owe, 2), round(gets, 2)
 
     def _summarise(self) -> None:
@@ -350,16 +350,6 @@ class SwapRecordsDialog(QDialog):
 
     def _save(self) -> None:
         given = self.given_lines()
-        chosen = [p for p in self.products if self.pick.get(p["id"], {}).get("on")]
-        no_price = [p["name"] for p in chosen if not self.pick[p["id"]]["price"]]
-        if no_price:
-            QMessageBox.warning(self, "Swap", f"No selling price yet for: {', '.join(no_price)}.\n"
-                                              "Type the price in the amber cell for each.")
-            return
-        bad = [p["name"] for p in chosen if self._line_total(p) <= 0]
-        if bad:
-            QMessageBox.warning(self, "Swap", f"Enter the quantity (bags, and kg for crops) for: {', '.join(bad)}")
-            return
         owe, gets = self.totals()
         if owe <= 0 or gets <= 0:
             QMessageBox.warning(self, "Swap", "Both sides need something: tick purchases or add the goods he brings, "

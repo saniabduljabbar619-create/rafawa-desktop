@@ -176,23 +176,41 @@ def test_walkin_profile_has_no_record_tabs(qapp):
     assert v.tab_sales is None and "Sales" not in [v.tabs.tabText(i) for i in range(v.tabs.count())]
 
 
-def test_swap_page_picks_products_by_category_and_finalizes(qapp, boxes):
-    from apps.product_management_app.features.profiling.dialogs.swap_records_dialog import SwapRecordsDialog
+def _sale_dialog(monkeypatch, **by_product):
+    """Drive the checkout's own SaleItemDialog: {product name: (bags, kg, price or None to keep the default)}."""
+    from apps.product_management_app.features.cashier.dialogs.sale_item_dialog import SaleItemDialog
+    opened = []
+
+    def fake_exec(self):
+        bags, kg, price = by_product[self.product_name]
+        opened.append((self.product_name, self.price.value()))      # the price it was opened with
+        self.qty_bags.setValue(bags)
+        if not self.is_fert:
+            self.total_weight_kg.setValue(kg)
+        if price is not None:
+            self.price.setValue(price)
+        self._confirm()
+        return self.result()
+    monkeypatch.setattr(SaleItemDialog, "exec_", fake_exec)
+    return opened
+
+
+def _row(d, name):
+    return next(i for i in range(d.tbl_give.rowCount()) if d.tbl_give.item(i, 1).text() == name)
+
+
+def test_swap_page_picks_products_by_category_and_finalizes(qapp, boxes, monkeypatch):
     p = _p(CUSTOMER_ID, 500, 100)                            # we owe him 50,000
-    d = SwapRecordsDialog(None, CUSTOMER_ID, "Customer One", purchase_ids=[p], sale_ids=[])
+    opened = _sale_dialog(monkeypatch, NPK=(10, 0, 2000), Maize=(1, 100, None))
+    d = _dialog(purchase_ids=[p])
     assert d.lbl_owe.text() == "We owe him: 50,000.00" and d.tbl_give.rowCount() == 2
     d.category.setCurrentText("Fertilizer")                  # filter by category
     assert d.tbl_give.rowCount() == 1 and d.tbl_give.item(0, 1).text() == "NPK"
     d.category.setCurrentText("All categories")
-    rows = {d.tbl_give.item(i, 1).text(): i for i in range(d.tbl_give.rowCount())}
-    # tick NPK (10 bags @ its price) and Maize (100 kg), by typing quantities
-    npk, maize = rows["NPK"], rows["Maize"]
-    d.tbl_give.item(npk, 4).setText("10")
-    d.tbl_give.item(npk, 6).setText("2000")
-    d.tbl_give.item(maize, 4).setText("1")
-    d.tbl_give.item(maize, 5).setText("100")
-    d.tbl_give.item(maize, 6).setText("100")
-    assert d.tbl_give.item(npk, 0).checkState() == Qt.Checked          # typing a quantity ticks the row
+    d.tbl_give.item(_row(d, "NPK"), 0).setCheckState(Qt.Checked)        # ticking opens the sale dialog
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Checked)
+    assert [o[0] for o in opened] == ["NPK", "Maize"] and opened[1][1] == 100     # Maize opened at its price
+    assert d.tbl_give.item(_row(d, "NPK"), 5).text() == "10 bags  =  20,000.00"
     assert d.lbl_recv.text() == "He owes us: 30,000.00"
     assert d.lbl_result.text() == "After the swap we still owe him 20,000.00"
     d.note.setText("goods back")
@@ -202,11 +220,34 @@ def test_swap_page_picks_products_by_category_and_finalizes(qapp, boxes):
     assert stock(FERT_ID)[0] == 40
 
 
-def test_swap_page_warns_when_a_ticked_product_has_no_quantity(qapp, boxes):
-    from apps.product_management_app.features.profiling.dialogs.swap_records_dialog import SwapRecordsDialog
+def test_cancelling_the_sale_dialog_unticks_and_unticking_removes_the_line(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.dialogs.sale_item_dialog import SaleItemDialog
     p = _p(CUSTOMER_ID, 500, 100)
-    d = SwapRecordsDialog(None, CUSTOMER_ID, "Customer One", purchase_ids=[p], sale_ids=[])
-    d.tbl_give.item(0, 0).setCheckState(Qt.Checked)
+    d = _dialog(purchase_ids=[p])
+    monkeypatch.setattr(SaleItemDialog, "exec_", lambda self: 0)         # cancelled
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Checked)
+    assert d.tbl_give.item(_row(d, "Maize"), 0).checkState() == Qt.Unchecked and not d.lines
+    _sale_dialog(monkeypatch, Maize=(1, 100, None))
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Checked)
+    assert len(d.lines) == 1
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Unchecked)
+    assert not d.lines and d.lbl_recv.text() == "He owes us: 0.00"
+
+
+def test_double_click_changes_a_line_and_the_totals_follow(qapp, boxes, monkeypatch):
+    p = _p(CUSTOMER_ID, 500, 100)
+    d = _dialog(purchase_ids=[p])
+    _sale_dialog(monkeypatch, Maize=(1, 100, None))
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Checked)
+    assert d.lbl_recv.text() == "He owes us: 10,000.00"
+    _sale_dialog(monkeypatch, Maize=(2, 300, 120))
+    d.tbl_give.cellDoubleClicked.emit(_row(d, "Maize"), 1)
+    assert d.lbl_recv.text() == "He owes us: 36,000.00" and len(d.lines) == 1
+
+
+def test_saving_with_nothing_picked_asks_for_the_goods(qapp, boxes):
+    p = _p(CUSTOMER_ID, 500, 100)
+    d = _dialog(purchase_ids=[p])
     d._save()
     assert boxes[-1][0] == "warning" and _bal("purchase", p).balance == 50000
 
@@ -253,21 +294,20 @@ def test_ticked_purchases_open_the_sale_workspace_and_ticked_sales_the_purchase_
     assert d.show_give and d.show_recv
 
 
-def test_selling_price_is_filled_when_the_product_has_one_and_left_empty_when_not(qapp, boxes):
+def test_selling_price_is_filled_when_the_product_has_one_and_must_be_typed_when_not(qapp, boxes, monkeypatch):
     from database.models.product import Product
     with get_session() as s:
         s.get(Product, FERT_ID).default_sale_rate = None         # NPK has no selling price
     p = _p(CUSTOMER_ID, 500, 100)
     d = _dialog(purchase_ids=[p])
-    rows = {d.tbl_give.item(i, 1).text(): i for i in range(d.tbl_give.rowCount())}
-    maize, npk = rows["Maize"], rows["NPK"]
-    assert d.tbl_give.item(maize, 6).text() == "100"                 # filled, and editable
-    assert d.tbl_give.item(maize, 6).flags() & Qt.ItemIsEditable
-    assert d.tbl_give.item(npk, 6).text() == "" and "no selling price" in d.tbl_give.item(npk, 6).toolTip()
-    d.tbl_give.item(npk, 4).setText("2")                            # quantity but no price
-    d._save()
-    assert boxes[-1][0] == "warning" and "NPK" in boxes[-1][1] and _bal("purchase", p).balance == 50000
-    d.tbl_give.item(npk, 6).setText("9000")                         # the user types the price
+    assert d.tbl_give.item(_row(d, "Maize"), 4).text() == "100.00"
+    assert d.tbl_give.item(_row(d, "NPK"), 4).text() == "not set"
+    opened = _sale_dialog(monkeypatch, NPK=(2, 0, None), Maize=(1, 100, None))      # NPK: price left at 0
+    d.tbl_give.item(_row(d, "NPK"), 0).setCheckState(Qt.Checked)
+    assert opened == [("NPK", 0)] and not d.lines and boxes[-1][0] == "warning" and "selling price" in boxes[-1][1]
+    assert d.tbl_give.item(_row(d, "NPK"), 0).checkState() == Qt.Unchecked
+    _sale_dialog(monkeypatch, NPK=(2, 0, 9000))                                       # the user types it
+    d.tbl_give.item(_row(d, "NPK"), 0).setCheckState(Qt.Checked)
     assert d.lbl_recv.text() == "He owes us: 18,000.00"
     d._save()
     assert d.result_data["offset"] == 18000
@@ -301,17 +341,16 @@ def test_crops_are_totalled_by_kg_and_a_missing_kg_or_price_is_refused_before_wr
         assert s.query(Sale).count() == n and _bal("purchase", p).balance == 50000
 
 
-def test_a_failed_attempt_then_a_good_one_records_exactly_one_swap(qapp, boxes):
+def test_a_failed_attempt_then_a_good_one_records_exactly_one_swap(qapp, boxes, monkeypatch):
     from database.models.sale import Sale
     p = _p(CUSTOMER_ID, 500, 100)
     d = _dialog(purchase_ids=[p])
-    rows = {d.tbl_give.item(i, 1).text(): i for i in range(d.tbl_give.rowCount())}
-    m = rows["Maize"]
-    d.tbl_give.item(m, 4).setText("1")
-    d.tbl_give.item(m, 5).setText("10000000")                        # far more than the shelf holds
+    _sale_dialog(monkeypatch, Maize=(1, 10_000_000, None))           # far more than the shelf holds
+    d.tbl_give.item(_row(d, "Maize"), 0).setCheckState(Qt.Checked)
     d._save()
     assert boxes[-1][0] == "warning" and "Nothing was saved" in boxes[-1][1] and d.btn_save.isEnabled()
-    d.tbl_give.item(m, 5).setText("100")
+    _sale_dialog(monkeypatch, Maize=(1, 100, None))
+    d.tbl_give.cellDoubleClicked.emit(_row(d, "Maize"), 1)           # correct the same line
     d._save()
     assert d.result_data["offset"] == 10000
     with get_session() as s:
