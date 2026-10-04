@@ -439,3 +439,59 @@ def test_receipts_count_what_a_swap_settled(qapp):
                                                           "total_weight_kg": 0, "unit_price": 31000}], "")
     with get_session() as s:
         assert rd._sum_paid(s, "purchase", p) == 31000 and rd._sum_paid(s, "sale", r["sale_id"]) == 31000
+
+
+# ----------------------------------------------------------------- a real customer who got the walk-in id
+@pytest.fixture
+def customer_with_walkin_id(qapp):
+    """A DB where party id 11 (the number reserved for the shared walk-in account) is a REAL customer."""
+    from database.models.party import Party
+    from shared.config.constants import WALKIN_PARTY_ID
+    with get_session() as s:
+        s.query(Party).filter(Party.id == WALKIN_PARTY_ID).delete()
+        s.add(Party(id=WALKIN_PARTY_ID, party_type="customer", display_name="habibu rafawa",
+                    is_customer=True, is_active=True))
+    return WALKIN_PARTY_ID
+
+
+def test_a_real_customer_with_the_walkin_id_can_swap(customer_with_walkin_id):
+    cid = customer_with_walkin_id
+    p = _p(cid, 350, 175)                                            # 61,250 we owe him
+    r = SW.record_from_records(cid, [p], [], [], [{"product_id": FERT_ID, "qty_bags": 1, "total_weight_kg": 0,
+                                                   "unit_price": 31000}], "")
+    assert r["offset"] == 31000 and r["we_owe_him"] == 30250
+    assert _bal("purchase", p).balance == 30250
+    from database.models.sale import Sale
+    with get_session() as s:
+        assert s.get(Sale, r["sale_id"]).walkin_name is None          # a customer's sale, not an anonymous one
+
+
+def test_the_real_shared_walkin_account_still_cannot_swap(qapp):
+    from shared.config.constants import WALKIN_PARTY_ID
+    with pytest.raises(ValueError, match="walk-in"):
+        SW.record_from_records(WALKIN_PARTY_ID, [], [], [], [], "")
+    from database.services.offset_service import OffsetService as O
+    with pytest.raises(ValueError, match="Walk-ins"):
+        O.apply(WALKIN_PARTY_ID)
+
+
+def test_anonymous_sale_is_refused_when_the_walkin_id_belongs_to_a_customer(customer_with_walkin_id):
+    from database.services.sales_service import SaleService
+    with pytest.raises(ValueError, match="walk-in account"):
+        SaleService.record({"buyer_party_id": 0, "walkin_name": "someone", "created_by_user_id": CASHIER_A,
+                            "items": [{"product_id": CROP_ID, "qty_bags": 1, "total_weight_kg": 10,
+                                       "unit_price": 100}]})
+
+
+def test_walkin_traders_list_is_empty_when_there_is_no_walkin_account(customer_with_walkin_id):
+    from database.services.walkin_service import WalkinService
+    assert WalkinService.list_traders() == []
+
+
+def test_the_walkin_account_still_works_normally(qapp):
+    from database.services.sales_service import SaleService
+    from database.services.walkin_service import WalkinService
+    r = SaleService.record({"buyer_party_id": 0, "walkin_name": "Musa", "created_by_user_id": CASHIER_A,
+                            "items": [{"product_id": CROP_ID, "qty_bags": 1, "total_weight_kg": 10,
+                                       "unit_price": 100}]})
+    assert r["sale_id"] and [t["name"] for t in WalkinService.list_traders()] == ["Musa"]
