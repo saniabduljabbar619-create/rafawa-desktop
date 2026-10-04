@@ -32,6 +32,17 @@ def _f(v) -> float:
         return 0.0
 
 
+def _flag(b) -> str:
+    """What ticking this document means for a swap (empty = nothing to warn about)."""
+    if b is None or b.voided:
+        return "Voided - cannot be used"
+    if b.balance <= 0.005:
+        return "Already paid - adds nothing to set off"
+    if b.status == "partial":
+        return f"Partly paid - only {b.balance:,.2f} still counts"
+    return ""
+
+
 def _qty(item, kind: str) -> str:
     bags = int(item.qty_bags or 0)
     kg = _f(item.total_weight_kg)
@@ -68,7 +79,10 @@ class CustomerRecordsService:
                     "summary": _summary(d, kind), "total": b.net_total if b else _f(d.total_amount),
                     "paid": b.settled if b else 0.0, "balance": b.balance if b else 0.0,
                     "status": b.status if b else "", "voided": bool(b and b.voided),
-                    "selectable": bool(b and not b.voided and b.balance > 0.005),
+                    # any recorded document can be ticked for a swap, whatever its payment status; the flag
+                    # tells the operator what that means (a paid one has nothing left to set against)
+                    "selectable": bool(b and not b.voided),
+                    "flag": _flag(b),
                 })
         return out
 

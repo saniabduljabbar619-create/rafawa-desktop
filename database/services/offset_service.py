@@ -245,13 +245,18 @@ class SwapService:
         user_id = int(require_user_id())
         label = ("Swap" + (f": {note.strip()}" if (note or "").strip() else ""))[:200]
 
-        with get_session() as s:                      # every chosen record must be an open one of his
+        with get_session() as s:                      # every chosen record must be a (non-voided) one of his
             open_p = {d["doc_id"]: d["balance"] for d in _open_docs(s, "creditors", party_id)}
             open_s = {d["doc_id"]: d["balance"] for d in _open_docs(s, "debtors", party_id)}
-        for ids, open_, word in ((purchase_ids, open_p, "purchase"), (sale_ids, open_s, "sale")):
-            bad = [i for i in ids if i not in open_]
+            mine_p = {int(i) for (i,) in s.query(Purchase.id).filter(
+                Purchase.supplier_party_id == party_id, Purchase.status != "voided").all()}
+            mine_s = {int(i) for (i,) in s.query(Sale.id).filter(
+                Sale.buyer_party_id == party_id, Sale.status != "voided").all()}
+        for ids, mine, word in ((purchase_ids, mine_p, "purchase"), (sale_ids, mine_s, "sale")):
+            bad = [i for i in ids if i not in mine]
             if bad:
-                raise ValueError(f"{word.title()} {bad[0]} is not an open (unpaid) record of this customer.")
+                raise ValueError(f"{word.title()} {bad[0]} is not a (non-voided) record of this customer.")
+        # A document already paid is allowed: it simply has nothing left to set against (balance 0).
         with get_session() as s:
             ptype = {int(i): str(t or "").lower() for i, t in s.query(Product.id, Product.product_type).all()}
             pname = {int(i): n for i, n in s.query(Product.id, Product.name).all()}
@@ -263,10 +268,11 @@ class SwapService:
                 raise ValueError(f"Enter the quantity and a price for {ln.get('product_name', 'the goods he brings')}.")
         new_in = round(sum(_buy_total(i) for i in received), 2)
         new_out = round(sum(_sell_total(i, ptype) for i in given), 2)
-        we_owe = round(sum(open_p[i] for i in purchase_ids) + new_in, 2)
-        they_owe = round(sum(open_s[i] for i in sale_ids) + new_out, 2)
+        we_owe = round(sum(open_p.get(i, 0.0) for i in purchase_ids) + new_in, 2)
+        they_owe = round(sum(open_s.get(i, 0.0) for i in sale_ids) + new_out, 2)
         if we_owe <= EPS or they_owe <= EPS:
-            raise ValueError("Nothing to set against: both sides need a value above zero.")
+            raise ValueError("Nothing to set against: both sides need something still unpaid or new goods "
+                             "(a ticked record that is already paid has nothing left to set off).")
 
         purchase_payload = {"supplier_party_id": party_id, "created_by_user_id": user_id, "items": received,
                             "note": label, "auto_flag_supplier": True}

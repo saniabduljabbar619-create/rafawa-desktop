@@ -9,7 +9,7 @@ from database.services.offset_service import SwapService as SW
 from database.session import get_session
 from shared.auth.permissions import PermissionDenied
 from shared.auth.session import UserSession, set_session
-from tests.conftest import ADMIN_ID, CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, make_sale, pay, stock
+from tests.conftest import ADMIN_ID, CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, SUPPLIER_ID, make_sale, pay, stock
 from tests.test_offsets import _p
 
 
@@ -34,7 +34,8 @@ def test_sales_and_purchases_lists_have_balances_and_selectable_flags():
     p = _p(CUSTOMER_ID, 500, 100)                            # 50,000 purchase from him
     sales = {d["id"]: d for d in R.sales(CUSTOMER_ID)}
     assert sales[s1]["balance"] == 20000 and sales[s1]["selectable"] and sales[s1]["ref"] == f"SAL-{s1}"
-    assert sales[s2]["status"] == "paid" and not sales[s2]["selectable"]
+    assert sales[s2]["status"] == "paid" and sales[s2]["selectable"]       # any recorded sale can be ticked ...
+    assert "Already paid" in sales[s2]["flag"] and sales[s1]["flag"] == ""  # ... the flag says what that means
     assert "Maize" in sales[s1]["summary"]
     purchases = R.purchases(CUSTOMER_ID)
     assert [d["id"] for d in purchases] == [p] and purchases[0]["balance"] == 50000
@@ -148,32 +149,38 @@ def _profile(qapp, mode="admin"):
     return v
 
 
-def test_profile_has_the_new_tabs_and_rows_can_be_ticked(qapp, boxes):
+def test_profile_has_one_sales_purchases_tab_two_sided_and_every_row_can_be_ticked(qapp, boxes):
     s1 = make_sale()["sale_id"]
     s2 = make_sale()["sale_id"]
-    pay("sale", s2, CUSTOMER_ID, "in", 20000)
+    pay("sale", s2, CUSTOMER_ID, "in", 20000)                # fully paid
     p = _p(CUSTOMER_ID, 500, 100)
     v = _profile(qapp)
     names = [v.tabs.tabText(i) for i in range(v.tabs.count())]
-    assert names[:5] == ["Activity", "Sales", "Purchases", "Products", "Transaction history"]
-    assert v.tab_sales.table.rowCount() == 2 and v.tab_purchases.table.rowCount() == 1
+    assert names[:4] == ["Activity", "Sales/Purchases", "Products", "Transaction history"]
+    assert "Sales" not in names and "Purchases" not in names
+    docs = v.tab_docs
+    assert docs.split.count() == 2 and docs.split.widget(0) is docs.purchases and docs.split.widget(1) is docs.sales
+    assert docs.sales.table.rowCount() == 2 and docs.purchases.table.rowCount() == 1
     assert v.tab_products.table.rowCount() >= 1 and v.tab_history.table.rowCount() >= 3
-    flags = {v.tab_sales.table.item(i, 0).data(Qt.UserRole): bool(v.tab_sales.table.item(i, 0).flags() & Qt.ItemIsUserCheckable)
+    ticks = {docs.sales.table.item(i, 0).data(Qt.UserRole): bool(docs.sales.table.item(i, 0).flags() & Qt.ItemIsUserCheckable)
              for i in range(2)}
-    assert flags == {s1: True, s2: False}                      # the paid sale cannot be ticked
-    v.tab_sales.btn_unpaid.click()
-    v.tab_purchases.btn_unpaid.click()
-    assert v.tab_sales.ticked_ids() == [s1] and v.tab_purchases.ticked_ids() == [p]
-    assert "1 ticked" in v.tab_sales.lbl.text()
-    v.tab_sales.btn_clear.click()
-    assert v.tab_sales.ticked_ids() == []
+    assert ticks == {s1: True, s2: True}                       # paid or unpaid: both can be ticked
+    docs.sales.btn_all.click()
+    docs.purchases.btn_unpaid.click()
+    assert sorted(docs.sales.ticked_ids()) == sorted([s1, s2]) and docs.purchases.ticked_ids() == [p]
+    assert "Ticked: 1 purchase(s), we owe 50,000.00" in docs.lbl_sum.text() and "he owes 20,000.00" in docs.lbl_sum.text()
+    assert not docs.lbl_flags.isHidden() and f"SAL-{s2}: Already paid" in docs.lbl_flags.text()     # flagged, not blocked
+    docs.sales.btn_clear.click()
+    assert docs.sales.ticked_ids() == [] and docs.lbl_flags.isHidden()
+    docs.sales.btn_unpaid.click()
+    assert docs.sales.ticked_ids() == [s1]
 
 
 def test_walkin_profile_has_no_record_tabs(qapp):
     from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
     make_sale(buyer=0, walkin_name="Musa")
     v = CustomerProfileView(customer=None, mode="admin", walkin_name="Musa")
-    assert v.tab_sales is None and "Sales" not in [v.tabs.tabText(i) for i in range(v.tabs.count())]
+    assert v.tab_docs is None and "Sales/Purchases" not in [v.tabs.tabText(i) for i in range(v.tabs.count())]
 
 
 def _sale_dialog(monkeypatch, **by_product):
@@ -270,7 +277,7 @@ def test_swap_button_on_the_profile_uses_the_ticked_rows(qapp, boxes, monkeypatc
         def exec_(self):
             return 1
     monkeypatch.setattr(sd, "SwapRecordsDialog", Fake)
-    v.tab_purchases.btn_swap.click()
+    v.tab_docs.btn_swap.click()
     assert seen["purchase_ids"] == [p] and seen["sale_ids"] == [s1] and seen["party_id"] == CUSTOMER_ID
 
 
@@ -495,3 +502,36 @@ def test_the_walkin_account_still_works_normally(qapp):
                             "items": [{"product_id": CROP_ID, "qty_bags": 1, "total_weight_kg": 10,
                                        "unit_price": 100}]})
     assert r["sale_id"] and [t["name"] for t in WalkinService.list_traders()] == ["Musa"]
+
+
+# ----------------------------------------------------------------- ticking by status: paid rows are flagged, not blocked
+def test_a_paid_record_can_be_ticked_but_adds_nothing(qapp):
+    paid = _p(CUSTOMER_ID, 100, 100)
+    pay("purchase", paid, CUSTOMER_ID, "out", 10000)                 # we already paid him in cash
+    owing = _p(CUSTOMER_ID, 200, 100)                                # 20,000 still owed to him
+    s1 = make_sale()["sale_id"]                                      # he owes 20,000
+    # both purchases ticked: only the unpaid one counts; nothing else is needed
+    r = SW.record_from_records(CUSTOMER_ID, [paid, owing], [s1], [], [], "")
+    assert r["offset"] == 20000 and _bal("purchase", owing).balance == 0 and _bal("purchase", paid).balance == 0
+    # a ticked paid record alone has nothing to set against, and nothing is written
+    paid2 = _p(CUSTOMER_ID, 100, 100)
+    pay("purchase", paid2, CUSTOMER_ID, "out", 10000)
+    with pytest.raises(ValueError, match="already paid"):
+        SW.record_from_records(CUSTOMER_ID, [paid2], [], [], _give(kg=100, price=100), "")
+
+
+def test_the_swap_page_lists_the_flags_and_counts_only_what_is_unpaid(qapp):
+    paid = _p(CUSTOMER_ID, 100, 100)
+    pay("purchase", paid, CUSTOMER_ID, "out", 10000)
+    owing = _p(CUSTOMER_ID, 200, 100)
+    d = _dialog(purchase_ids=[paid, owing])
+    assert d.lbl_owe.text() == "We owe him: 20,000.00"
+    t = d.findChildren(__import__("PySide2.QtWidgets", fromlist=["QTableWidget"]).QTableWidget)[0]
+    flags = [t.item(i, 3).text() for i in range(t.rowCount())]
+    assert any("Already paid" in f for f in flags)
+
+
+def test_someone_elses_or_voided_records_are_still_refused():
+    other = _p(SUPPLIER_ID, 100, 100)
+    with pytest.raises(ValueError, match="not a"):
+        SW.record_from_records(CUSTOMER_ID, [other], [], [], _give(), "")

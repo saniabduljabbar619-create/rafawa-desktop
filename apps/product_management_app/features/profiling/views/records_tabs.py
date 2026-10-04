@@ -1,5 +1,5 @@
 # apps/product_management_app/features/profiling/views/records_tabs.py
-"""The record-by-record tabs of a customer profile: Sales, Purchases, Products, Transaction history."""
+"""The record-by-record tabs of a customer profile: Sales/Purchases, Products, Transaction history."""
 from __future__ import annotations
 
 from typing import List
@@ -7,7 +7,8 @@ from typing import List
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
-    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from database.services.customer_records_service import CustomerRecordsService as R
@@ -48,9 +49,9 @@ def _item(text, align=None, color=None, bold=False) -> QTableWidgetItem:
 
 
 class DocumentsTab(QWidget):
-    """Every sale to him / purchase from him, one row each, with a tick box to select several."""
+    """One side of the Sales/Purchases tab: every sale to him or purchase from him, one row each, with a tick box
+    on every row (whatever its payment status - the Flag column says what that means for a swap)."""
 
-    swap_requested = Signal()
     selection_changed = Signal()
 
     def __init__(self, party_id: int, kind: str):
@@ -58,33 +59,36 @@ class DocumentsTab(QWidget):
         self.party_id, self.kind = int(party_id), kind
         self.rows = []
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        self.title = QLabel("PURCHASES from him  -  we owe him" if kind == "purchase"
+                            else "SALES to him  -  he owes us")
+        self.title.setStyleSheet(f"font-weight:800; font-size:13px; color:{'#b91c1c' if kind == 'purchase' else '#047857'};")
+        lay.addWidget(self.title)
         bar = QHBoxLayout()
-        self.btn_unpaid = QPushButton("Tick all unpaid")
-        self.btn_clear = QPushButton("Clear ticks")
+        self.btn_all = QPushButton("Tick all")
+        self.btn_unpaid = QPushButton("Tick unpaid")
+        self.btn_clear = QPushButton("Clear")
         self.chk_voided = QCheckBox("Show voided")
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#374151; font-weight:600;")
-        self.btn_swap = QPushButton("Swap with ticked  →")
-        self.btn_swap.setObjectName("PrimaryButton")
-        for b in (self.btn_unpaid, self.btn_clear):
+        for b in (self.btn_all, self.btn_unpaid, self.btn_clear):
             bar.addWidget(b)
         bar.addWidget(self.lbl)
         bar.addStretch(1)
         bar.addWidget(self.chk_voided)
-        bar.addWidget(self.btn_swap)
         lay.addLayout(bar)
         word = "Sale" if kind == "sale" else "Purchase"
-        self.table = _table(["", f"{word}", "Date", "Products", "Total", "Paid / set off", "Balance", "Status"])
+        self.table = _table(["", f"{word}", "Date", "Products", "Total", "Paid / set off", "Balance", "Status", "Flag"])
         self.table.setColumnWidth(0, 34)
         hh = self.table.horizontalHeader()
         hh.setStretchLastSection(False)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         lay.addWidget(self.table, 1)
         self.table.itemChanged.connect(self._ticked)
-        self.btn_unpaid.clicked.connect(lambda: self._tick_all(True))
+        self.btn_all.clicked.connect(lambda: self._tick_all(True))
+        self.btn_unpaid.clicked.connect(self.tick_unpaid)
         self.btn_clear.clicked.connect(lambda: self._tick_all(False))
         self.chk_voided.toggled.connect(lambda _on: self.reload())
-        self.btn_swap.clicked.connect(self.swap_requested.emit)
         self.reload()
 
     def reload(self) -> None:
@@ -100,7 +104,7 @@ class DocumentsTab(QWidget):
                 box.setCheckState(Qt.Checked if d["id"] in keep else Qt.Unchecked)
             else:
                 box.setFlags(Qt.NoItemFlags)
-                box.setToolTip("Voided" if d["voided"] else "Fully settled - nothing left to swap against")
+            box.setToolTip(d["flag"])
             box.setData(Qt.UserRole, d["id"])
             t.setItem(i, 0, box)
             t.setItem(i, 1, _item(d["ref"], bold=True))
@@ -110,8 +114,12 @@ class DocumentsTab(QWidget):
             t.setItem(i, 5, _item(_money(d["paid"]), RIGHT))
             t.setItem(i, 6, _item(_money(d["balance"]), RIGHT, "#c83c3c" if d["balance"] > 0.005 else None))
             t.setItem(i, 7, _item(d["status"].capitalize(), color=STATUS_TONE.get(d["status"])))
+            flag = _item(("⚠ " + d["flag"]) if d["flag"] else "", color="#b8792e")
+            flag.setToolTip(d["flag"])
+            t.setItem(i, 8, flag)
         t.resizeColumnToContents(1)
         t.resizeColumnToContents(2)
+        t.resizeColumnToContents(8)
         t.blockSignals(False)
         self._ticked()
 
@@ -123,20 +131,94 @@ class DocumentsTab(QWidget):
                 out.append(int(it.data(Qt.UserRole)))
         return out
 
-    def _tick_all(self, on: bool) -> None:
+    def ticked_rows(self) -> List[dict]:
+        ids = set(self.ticked_ids())
+        return [d for d in self.rows if d["id"] in ids]
+
+    def _tick_all(self, on: bool, only_unpaid: bool = False) -> None:
         self.table.blockSignals(True)
-        for i in range(self.table.rowCount()):
+        for i, d in enumerate(self.rows):
             it = self.table.item(i, 0)
             if it is not None and it.flags() & Qt.ItemIsUserCheckable:
-                it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+                it.setCheckState(Qt.Checked if on and (not only_unpaid or d["balance"] > 0.005) else Qt.Unchecked)
         self.table.blockSignals(False)
         self._ticked()
 
+    def tick_unpaid(self) -> None:
+        self._tick_all(True, only_unpaid=True)
+
     def _ticked(self, *_a) -> None:
-        ids = set(self.ticked_ids())
-        bal = sum(d["balance"] for d in self.rows if d["id"] in ids)
-        self.lbl.setText(f"{len(ids)} ticked  -  balance {_money(bal)}" if ids else "Tick rows to swap them")
+        rows = self.ticked_rows()
+        bal = sum(d["balance"] for d in rows)
+        self.lbl.setText(f"{len(rows)} ticked  -  balance {_money(bal)}" if rows else "Tick rows to swap them")
         self.selection_changed.emit()
+
+
+class SalesPurchasesTab(QWidget):
+    """Purchases on the left, Sales on the right, a line between them: tick from either side (or both) and
+    swap straight from here. Any recorded document can be ticked; the flags say what that means."""
+
+    swap_requested = Signal()
+
+    def __init__(self, party_id: int):
+        super().__init__()
+        self.party_id = int(party_id)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        bar = QHBoxLayout()
+        self.lbl_sum = QLabel("")
+        self.lbl_sum.setStyleSheet("font-weight:700; color:#111827;")
+        self.btn_swap = QPushButton("Swap with ticked  →")
+        self.btn_swap.setObjectName("PrimaryButton")
+        bar.addWidget(self.lbl_sum)
+        bar.addStretch(1)
+        bar.addWidget(self.btn_swap)
+        lay.addLayout(bar)
+        self.lbl_flags = QLabel("")
+        self.lbl_flags.setWordWrap(True)
+        self.lbl_flags.setStyleSheet("color:#92400e; background:#fef3c7; border-radius:6px; padding:6px 10px;")
+        self.lbl_flags.setVisible(False)
+        lay.addWidget(self.lbl_flags)
+
+        self.purchases = DocumentsTab(self.party_id, "purchase")
+        self.sales = DocumentsTab(self.party_id, "sale")
+        self.split = QSplitter(Qt.Horizontal)
+        self.split.addWidget(self.purchases)
+        self.split.addWidget(self.sales)
+        self.split.setHandleWidth(4)
+        self.split.setChildrenCollapsible(False)
+        self.split.setStyleSheet("QSplitter::handle { background:#cbd5e1; }")
+        lay.addWidget(self.split, 1)
+
+        self.btn_swap.clicked.connect(self.swap_requested.emit)
+        self.purchases.selection_changed.connect(self._summarise)
+        self.sales.selection_changed.connect(self._summarise)
+        self._summarise()
+
+    def reload(self) -> None:
+        self.purchases.reload()
+        self.sales.reload()
+        self._summarise()
+
+    def flags(self) -> List[str]:
+        """One line per ticked document that needs the operator's attention."""
+        out = []
+        for d in self.purchases.ticked_rows() + self.sales.ticked_rows():
+            if d["flag"]:
+                out.append(f"{d['ref']}: {d['flag']}")
+        return out
+
+    def _summarise(self, *_a) -> None:
+        p, s = self.purchases.ticked_rows(), self.sales.ticked_rows()
+        owe, gets = sum(d["balance"] for d in p), sum(d["balance"] for d in s)
+        if p or s:
+            self.lbl_sum.setText(f"Ticked: {len(p)} purchase(s), we owe {_money(owe)}   |   "
+                                 f"{len(s)} sale(s), he owes {_money(gets)}")
+        else:
+            self.lbl_sum.setText("Tick purchases on the left and/or sales on the right, then swap")
+        flags = self.flags()
+        self.lbl_flags.setVisible(bool(flags))
+        self.lbl_flags.setText("⚠ " + "     ⚠ ".join(flags) if flags else "")
 
 
 class ProductsTab(QWidget):

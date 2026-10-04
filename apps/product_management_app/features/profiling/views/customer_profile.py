@@ -138,6 +138,11 @@ class CustomerProfileView(QWidget):
         tabs = QTabWidget()
         tabs.setObjectName("ProfileTabs")
         tabs.setDocumentMode(True)
+        # the tab bar sizes its tabs with its own font, not the stylesheet's bold one - give it the same weight
+        # or long labels ("Sales/Purchases", "Transaction history") are clipped at both ends
+        _f = tabs.tabBar().font()
+        _f.setWeight(QFont.DemiBold)
+        tabs.tabBar().setFont(_f)
         self.tabs = tabs
         layout.addWidget(tabs, 1)
 
@@ -242,21 +247,21 @@ class CustomerProfileView(QWidget):
         if self.mode != "cashier":
             self._build_revert_tab(tabs)
 
-        # Record-by-record tabs (registered customers only): Sales, Purchases, Products, Transaction history
-        self.tab_sales = self.tab_purchases = self.tab_products = self.tab_history = None
+        # Record-by-record tabs (registered customers only): Sales/Purchases (two sides, tick to swap),
+        # Products, Transaction history
+        self.tab_docs = self.tab_sales = self.tab_purchases = self.tab_products = self.tab_history = None
         if self.customer:
             from apps.product_management_app.features.profiling.views.records_tabs import (
-                DocumentsTab, HistoryTab, ProductsTab)
+                HistoryTab, ProductsTab, SalesPurchasesTab)
             pid = int(self.customer.id)
-            self.tab_sales, self.tab_purchases = DocumentsTab(pid, "sale"), DocumentsTab(pid, "purchase")
+            self.tab_docs = SalesPurchasesTab(pid)
+            self.tab_purchases, self.tab_sales = self.tab_docs.purchases, self.tab_docs.sales
             self.tab_products, self.tab_history = ProductsTab(pid), HistoryTab(pid)
             tabs.setElideMode(Qt.ElideNone)
-            for i, (w, label) in enumerate(((self.tab_sales, "Sales"), (self.tab_purchases, "Purchases"),
-                                            (self.tab_products, "Products"),
+            for i, (w, label) in enumerate(((self.tab_docs, "Sales/Purchases"), (self.tab_products, "Products"),
                                             (self.tab_history, "Transaction history")), start=1):
                 tabs.insertTab(i, w, label)
-            self.tab_sales.swap_requested.connect(self.open_swap)
-            self.tab_purchases.swap_requested.connect(self.open_swap)
+            self.tab_docs.swap_requested.connect(self.open_swap)
 
         # Connect Signal Slots
         self.btn_make_payment.clicked.connect(self.open_payment_router)
@@ -1347,7 +1352,7 @@ class CustomerProfileView(QWidget):
         self.load_advances_table()
         if hasattr(self, "revert_table"):
             self.load_revert_table()
-        for tab in (self.tab_sales, self.tab_purchases, self.tab_products, self.tab_history):
+        for tab in (self.tab_docs, self.tab_products, self.tab_history):
             if tab is not None:
                 tab.reload()
 
