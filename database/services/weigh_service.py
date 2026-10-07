@@ -3,15 +3,17 @@
 Weighing tickets - the Weigher workspace's backend.
 
 WEIGHER   registers/selects a customer or supplier, picks product / area / grade, records each
-          round (1-3 or partial bags + kg), and submits the ticket. Auto totals; prints a slip
-          (no prices).
-ADMIN /   open the submitted ticket, verify and correct the rounds, confirm the price, and
+          round (1-3 or partial bags + kg), SETS THE PRICE PER KG after weighing, and submits the
+          ticket (a ticket cannot be submitted without a price on every line). Auto totals; prints a
+          slip with the amounts. Until the cashier finalizes it, the weigher can still edit (rounds,
+          prices) or remove (cancel) their own tickets - every change after submitting is audited.
+ADMIN /   open the submitted ticket, verify and correct the rounds, confirm (or change) the price, and
 CASHIER   finalize - which creates the purchase (stock, payable, receipt) through the normal
           PurchaseService. Payment then follows the normal purchase payment flow.
 
-THE RULE this module enforces (not just the screens): the weigher has no authority over price,
-payment or finalization - those calls are refused for that role, and ticket data returned to a
-weigher carries no prices at all.
+THE RULE this module enforces (not just the screens): the weigher has no authority over payment or
+finalization - those calls are refused for that role. The price they set is a proposal the cashier
+confirms at finalization.
 """
 from __future__ import annotations
 
@@ -132,7 +134,8 @@ class WeighService:
         with get_session() as s:
             rows = (s.query(Product).filter(Product.product_type == "crops", Product.is_active.is_(True))
                     .order_by(Product.name.asc()).all())
-            return [{"id": int(p.id), "name": p.name, "sku": p.sku or ""} for p in rows]
+            return [{"id": int(p.id), "name": p.name, "sku": p.sku or "",
+                     "price": _f(p.default_cost_rate)} for p in rows]          # usual price per kg, 0 = none set
 
     @staticmethod
     @require_role(*ANY_STAFF)
@@ -165,8 +168,7 @@ class WeighService:
         if _is_weigher():
             if int(t.weigher_user_id) != _uid():
                 raise PermissionDenied("This is another weigher's ticket.")
-            if t.status != "open":
-                raise PermissionDenied("This ticket was already submitted - ask the cashier/admin to change it.")
+            # their own ticket stays correctable until the cashier finalizes it (open, or awaiting the cashier)
             return
         if t.status == "open" and current_role() == "cashier":
             raise PermissionDenied("The weigher is still weighing this ticket - wait until it is submitted.")
@@ -336,6 +338,10 @@ class WeighService:
             s.flush()
             if len(empties) == len(t.lines) or not t.lines:
                 raise ValueError("Record at least one round before finishing.")
+            unpriced = [ln.product.name if ln.product else "a product" for ln in t.lines
+                        if ln.rounds and _f(ln.unit_price) <= 0]
+            if unpriced:
+                raise ValueError("Set the price per kg before submitting: " + ", ".join(unpriced) + ".")
             t.status = "submitted"
             t.submitted_at = datetime.now()
             t.receipt_type = receipt_type
@@ -352,9 +358,8 @@ class WeighService:
             t = WeighService._load_ticket(s, ticket_id, lock=True)
             if t.status in ("finalized", "cancelled"):
                 raise ValueError(f"This ticket is already {t.status}.")
-            if _is_weigher():
-                if int(t.weigher_user_id) != _uid() or t.status != "open":
-                    raise PermissionDenied("Only your own, not-yet-submitted tickets can be cancelled.")
+            if _is_weigher() and int(t.weigher_user_id) != _uid():
+                raise PermissionDenied("Only your own tickets can be removed.")
             t.status = "cancelled"
             t.cancelled_by_user_id = _uid()
             t.cancel_reason = (reason or "").strip()[:255] or None
@@ -423,14 +428,13 @@ class WeighService:
             t = WeighService._load_ticket(s, ticket_id)
             if _is_weigher() and int(t.weigher_user_id) != _uid():
                 raise PermissionDenied("This is another weigher's ticket.")
-            # a weigher never receives a price, even if one has been confirmed since
-            return WeighService._ticket_dict(s, t, with_prices=not _is_weigher())
+            return WeighService._ticket_dict(s, t, with_prices=True)
 
     @staticmethod
     @require_role(*ANY_STAFF)
     def list_tickets(status: Optional[Iterable[str]] = None, mine_only: bool = False,
                      limit: int = 300) -> List[Dict[str, Any]]:
-        """Summaries, newest first. A weigher only ever sees their own tickets."""
+        """Summaries, newest first (with amounts). A weigher only ever sees their own tickets."""
         statuses = [x for x in ([status] if isinstance(status, str) else list(status or [])) if x in STATUSES]
         with get_session() as s:
             q = s.query(WeighTicket)
@@ -441,7 +445,7 @@ class WeighService:
             tickets = q.order_by(WeighTicket.id.desc()).limit(int(limit)).all()
             out = []
             for t in tickets:
-                d = WeighService._ticket_dict(s, t, with_prices=not _is_weigher())
+                d = WeighService._ticket_dict(s, t, with_prices=True)
                 d.pop("lines", None)
                 d["products"] = ", ".join(sorted({ln.product.name for ln in t.lines if ln.product}))
                 out.append(d)
@@ -455,8 +459,22 @@ class WeighService:
 
     # ------------------------------------------------------------------ admin / cashier: price + finalize
     @staticmethod
-    @require_role(*INTAKE_ROLES)
+    def _price_line(s, line: WeighTicketLine, price: float) -> None:
+        t = WeighService._load_ticket(s, line.ticket_id)
+        if t.status in ("finalized", "cancelled"):
+            raise ValueError(f"This ticket is {t.status}.")
+        if _is_weigher():
+            WeighService._assert_can_edit(t)               # their own ticket only
+        if _f(line.unit_price) != price:
+            AuditService.record("weigh.price", "weigh_ticket", int(t.id),
+                                f"{t.ticket_no}: {line.product.name if line.product else 'line'} priced at {price:,.2f}/kg",
+                                session=s)
+        line.unit_price = price
+
+    @staticmethod
+    @require_role(*ANY_STAFF)
     def set_line_price(line_id: int, unit_price: float) -> None:
+        """Price per kg for one line: the weigher after weighing (own ticket), or admin/cashier at review."""
         price = _f(unit_price)
         if price <= 0:
             raise ValueError("Price per kg must be more than zero.")
@@ -464,14 +482,23 @@ class WeighService:
             line = s.get(WeighTicketLine, int(line_id))
             if line is None:
                 raise ValueError("Line not found.")
-            t = WeighService._load_ticket(s, line.ticket_id)
-            if t.status in ("finalized", "cancelled"):
-                raise ValueError(f"This ticket is {t.status}.")
-            if _f(line.unit_price) != price:
-                AuditService.record("weigh.price", "weigh_ticket", int(t.id),
-                                    f"{t.ticket_no}: {line.product.name if line.product else 'line'} priced at {price:,.2f}/kg",
-                                    session=s)
-            line.unit_price = price
+            WeighService._price_line(s, line, price)
+            s.commit()
+
+    @staticmethod
+    @require_role(*ANY_STAFF)
+    def set_ticket_prices(ticket_id: int, prices: Dict[int, float]) -> None:
+        """Price every line of a ticket at once ({line_id: price per kg}); nothing is saved unless all are valid."""
+        prices = {int(k): _f(v) for k, v in (prices or {}).items()}
+        with get_session() as s:
+            t = WeighService._load_ticket(s, ticket_id)
+            lines = [ln for ln in t.lines if ln.rounds]
+            missing = [ln.product.name if ln.product else "a product" for ln in lines
+                       if prices.get(int(ln.id), 0) <= 0]
+            if missing:
+                raise ValueError("Enter a price per kg for: " + ", ".join(missing) + ".")
+            for ln in lines:
+                WeighService._price_line(s, ln, prices[int(ln.id)])
             s.commit()
 
     @staticmethod

@@ -1,15 +1,18 @@
 # apps/product_management_app/features/weigher/views/weigher_station.py
 """
-Weighing Station - the weigher's whole job on one screen, in three steps:
+Weighing Station - the weigher's whole job on one screen, in four steps:
 
     1  Party    register or select the customer / supplier
     2  Weigh    pick product / area / grade, then type each round straight into the
                 rounds table (Bags Round + Weight kg, a new row appears as you go - the same flow as
                 the purchase intake); totals are automatic
-    3  Receipt  choose the slip type, submit to the cashier, print and sign
+    3  Price    after the weighing, the price per kg for each product (the usual price is filled in
+                where the product has one; type it where it has none) - the amount is kg x price
+    4  Receipt  choose the slip type, submit to the cashier, print and sign
 
-Nothing here shows or asks for a price: that, payment and finalization belong to admin/cashier.
-Every round is saved the moment its row is complete, so a power cut loses nothing.
+Payment and finalization belong to admin/cashier, who also confirm the price. Every round is saved the
+moment its row is complete, so a power cut loses nothing. (Edit or remove an earlier weighing from the
+Finalize List.)
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ from PySide2.QtCore import QTimer, Qt
 from PySide2.QtGui import QColor, QFont
 from PySide2.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
+    QDoubleSpinBox, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -29,7 +32,7 @@ from shared.uix.widgets.cards import Segmented, avatar, style_table
 from shared.uix.widgets.product_select import add_select_placeholder
 from apps.product_management_app.features.weigher.dialogs.register_party_dialog import RegisterPartyDialog
 
-STEPS = ["1  Party", "2  Weigh", "3  Receipt"]
+STEPS = ["1  Party", "2  Weigh", "3  Price", "4  Receipt"]
 
 
 def _card() -> QFrame:
@@ -99,6 +102,7 @@ class WeigherStationView(QWidget):
         root.addWidget(self.stack, 1)
         self.stack.addWidget(self._build_party_page())
         self.stack.addWidget(self._build_weigh_page())
+        self.stack.addWidget(self._build_price_page())
         self.stack.addWidget(self._build_receipt_page())
 
         self._go(0)
@@ -118,6 +122,7 @@ class WeigherStationView(QWidget):
         self.subtitle.setText([
             "Register or select who is delivering, then weigh",
             f"{self.party['name'] if self.party else ''} - record each round as it comes off the scale",
+            "Set the price per kg for each product - the amount follows",
             "Choose the slip, submit to the cashier, print and sign",
         ][index])
 
@@ -373,14 +378,14 @@ class WeigherStationView(QWidget):
         self.lbl_rounds_count = QLabel("")
         self.lbl_rounds_count.setStyleSheet("color:#6b7280;")
         rl.addWidget(self.lbl_rounds_count)
-        note = QLabel("Price and payment are handled by the cashier.")
+        note = QLabel("Next you set the price per kg; the cashier confirms it and takes payment.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#9ca3af; font-size:11px; margin-top:10px;")
         rl.addWidget(note)
         rl.addStretch(1)
         self.btn_cancel_ticket = QPushButton("Cancel Ticket")
         self.btn_cancel_ticket.setProperty("role", "danger")
-        self.btn_finish = QPushButton("Finish  →  Receipt")
+        self.btn_finish = QPushButton("Finish  →  Price")
         self.btn_finish.setObjectName("PrimaryButton")
         self.btn_finish.setMinimumHeight(44)
         rl.addWidget(self.btn_cancel_ticket)
@@ -394,7 +399,7 @@ class WeigherStationView(QWidget):
         self.lines_list.currentRowChanged.connect(self._on_line_selected)
         self.rounds_table.itemChanged.connect(self._on_round_cell)
         self.btn_remove_round.clicked.connect(self.remove_round)
-        self.btn_finish.clicked.connect(self._to_receipt)
+        self.btn_finish.clicked.connect(self._to_price)
         self.btn_cancel_ticket.clicked.connect(self.cancel_ticket)
         return page
 
@@ -614,7 +619,132 @@ class WeigherStationView(QWidget):
             return
         self.new_weighing()
 
-    # ------------------------------------------------------------------ step 3: receipt
+    # ------------------------------------------------------------------ step 3: price
+    def _build_price_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+        card = _card()
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(8)
+        cap = QLabel("PRICE PER KG - for each product weighed")
+        cap.setObjectName("SectionLabel")
+        cl.addWidget(cap)
+        self.lbl_price_party = QLabel("")
+        self.lbl_price_party.setStyleSheet("font-size:15px; font-weight:700;")
+        cl.addWidget(self.lbl_price_party)
+        self.price_table = QTableWidget(0, 6)
+        self.price_table.setHorizontalHeaderLabels(["Product", "Area / Grade", "Bags", "Weight (kg)",
+                                                    "Price per kg", "Amount"])
+        self.price_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.price_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.price_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        style_table(self.price_table, 52)
+        cl.addWidget(self.price_table, 1)
+        hint = QLabel("The usual price is filled in where the product has one - change it if today's price is "
+                      "different. Where there is none (amber), type it. The cashier confirms the price before paying.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6b7280; font-size:11px;")
+        cl.addWidget(hint)
+        tot = QHBoxLayout()
+        self.lbl_price_totals = QLabel("")
+        self.lbl_price_totals.setStyleSheet("font-size:13px; color:#374151;")
+        tot.addWidget(self.lbl_price_totals, 1)
+        self.lbl_price_amount = QLabel("₦0.00")
+        self.lbl_price_amount.setStyleSheet("font-size:26px; font-weight:800; color:#0f766e;")
+        tot.addWidget(self.lbl_price_amount)
+        cl.addLayout(tot)
+        lay.addWidget(card, 1)
+        row = QHBoxLayout()
+        self.btn_price_back = QPushButton("←  Back to Weighing")
+        self.btn_price_next = QPushButton("Next  →  Receipt")
+        self.btn_price_next.setObjectName("PrimaryButton")
+        self.btn_price_next.setMinimumHeight(44)
+        row.addWidget(self.btn_price_back)
+        row.addStretch(1)
+        row.addWidget(self.btn_price_next)
+        lay.addLayout(row)
+        self._price_spins = {}
+        self.btn_price_back.clicked.connect(lambda: self._go(1))
+        self.btn_price_next.clicked.connect(self._price_next)
+        return page
+
+    def _to_price(self):
+        self._refresh_ticket()
+        t = self._ticket
+        if not any(ln["rounds"] for ln in t["lines"]):
+            self._msg("Record at least one round before finishing.")
+            return
+        try:
+            usual = {p["id"]: p["price"] for p in WeighService.crop_products()}
+        except Exception:
+            usual = {}
+        self.lbl_price_party.setText(f"{t['party_name']}   -   {t['ticket_no']}")
+        self.price_table.setRowCount(0)
+        self._price_spins = {}
+        for ln in (x for x in t["lines"] if x["rounds"]):
+            r = self.price_table.rowCount()
+            self.price_table.insertRow(r)
+            tag = " / ".join(x for x in (ln["area"], ln["grade"] and f"Grade {ln['grade']}") if x)
+            for c, v in enumerate((ln["product_name"], tag, _fmt_bags(ln["bags"]), f"{ln['kg']:,.2f}")):
+                it = QTableWidgetItem(v)
+                if c >= 2:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.price_table.setItem(r, c, it)
+            spin = QDoubleSpinBox()
+            spin.setDecimals(2)
+            spin.setRange(0, 10_000_000)
+            spin.setPrefix("₦")
+            have = float(ln["unit_price"] or 0) or float(usual.get(int(ln["product_id"]), 0) or 0)
+            spin.setValue(have)
+            spin.setProperty("line_id", int(ln["id"]))
+            spin.setToolTip("Usual price - change it if today's is different" if have else
+                            "No usual price for this product - type today's price")
+            spin.setStyleSheet("" if have else "QDoubleSpinBox { background:#fff7ed; }")
+            spin.valueChanged.connect(self._price_changed)
+            self.price_table.setCellWidget(r, 4, spin)
+            amt = QTableWidgetItem("")
+            amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.price_table.setItem(r, 5, amt)
+            self._price_spins[int(ln["id"])] = spin
+        self.lbl_price_totals.setText(f"{_fmt_bags(t['total_bags'])} bags   -   {t['total_kg']:,.2f} kg")
+        self._price_changed()
+        self._go(2)
+
+    def _price_changed(self, *_a):
+        total = 0.0
+        lines = [ln for ln in self._ticket.get("lines", []) if ln["rounds"]]
+        for r, ln in enumerate(lines):
+            spin = self._price_spins.get(int(ln["id"]))
+            if spin is None:
+                continue
+            price = spin.value()
+            amount = round(ln["kg"] * price, 2)
+            total += amount
+            self.price_table.item(r, 5).setText(f"₦{amount:,.2f}" if price > 0 else "-")
+            if price > 0:
+                spin.setStyleSheet("")
+        self.lbl_price_amount.setText(f"₦{total:,.2f}")
+
+    def _price_next(self):
+        prices = {lid: spin.value() for lid, spin in self._price_spins.items()}
+        lines = {int(ln["id"]): ln for ln in self._ticket.get("lines", [])}
+        missing = [lines[lid]["product_name"] for lid, p in prices.items() if p <= 0 and lid in lines]
+        if missing:
+            for lid, spin in self._price_spins.items():
+                if spin.value() <= 0:
+                    spin.setStyleSheet("QDoubleSpinBox { background:#fde9c8; }")
+            self._msg("Enter the price per kg for: " + ", ".join(missing), "Price")
+            return
+        try:
+            WeighService.set_ticket_prices(self.ticket_id, prices)
+        except Exception as e:
+            self._msg(str(e), "Price")
+            return
+        self._to_receipt()
+
+    # ------------------------------------------------------------------ step 4: receipt
     def _build_receipt_page(self) -> QWidget:
         page = QWidget()
         lay = QHBoxLayout(page)
@@ -638,7 +768,7 @@ class WeigherStationView(QWidget):
         self.lbl_status.setStyleSheet("color:#6b7280;")
         ll.addWidget(self.lbl_status)
         ll.addStretch(1)
-        self.btn_back = QPushButton("←  Back to Weighing")
+        self.btn_back = QPushButton("←  Back to Price")
         self.btn_submit = QPushButton("Submit && Print Slip")
         self.btn_submit.setObjectName("PrimaryButton")
         self.btn_submit.setMinimumHeight(44)
@@ -669,7 +799,7 @@ class WeigherStationView(QWidget):
         lay.addWidget(right, 3)
 
         self.receipt_seg.changed.connect(lambda _k: self._render_preview())
-        self.btn_back.clicked.connect(lambda: self._go(1))
+        self.btn_back.clicked.connect(lambda: self._go(2))
         self.btn_submit.clicked.connect(self.submit_and_print)
         self.btn_print.clicked.connect(self._print_current)
         self.btn_new.clicked.connect(self.new_weighing)
@@ -690,7 +820,8 @@ class WeigherStationView(QWidget):
             self._msg("Record at least one round before finishing.")
             return
         self.lbl_receipt_totals.setText(
-            f"{t['party_name']}\n{_fmt_bags(t['total_bags'])} bags  -  {t['total_kg']:,.2f} kg")
+            f"{t['party_name']}\n{_fmt_bags(t['total_bags'])} bags  -  {t['total_kg']:,.2f} kg"
+            + (f"  -  ₦{t['total_amount']:,.2f}" if t.get("total_amount") else ""))
         self.lbl_status.setText("Submitting sends this ticket to the cashier, who confirms the price and pays.")
         self._submitted = False
         self.btn_submit.setVisible(True)
@@ -700,7 +831,7 @@ class WeigherStationView(QWidget):
         self.btn_new.setVisible(False)
         self.receipt_seg.setEnabled(True)
         self._render_preview()
-        self._go(2)
+        self._go(3)
 
     def submit_and_print(self):
         try:

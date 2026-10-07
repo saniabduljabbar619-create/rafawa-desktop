@@ -5,7 +5,11 @@ Open Intake - where admin/cashier take over a ticket the weigher submitted:
     Verify & edit the rounds → Confirm price per kg → amount is calculated → Finalize Intake
     → Process payment → Print the payment receipt
 
-The weigher has no say in price, payment or finalization; this dialog is where those happen.
+The weigher has no say in payment or finalization; this dialog is where those happen.
+
+The same dialog, opened with mode="weigher" from the weigher's Finalize List, is the weigher's EDIT screen:
+correct the rounds, change the prices, save - or remove the ticket. No finalize, no payment. A weigher can
+do this for their own tickets until the cashier finalizes them.
 """
 from __future__ import annotations
 
@@ -29,13 +33,14 @@ def _fmt_bags(v) -> str:
 
 
 class WeighTicketReviewDialog(QDialog):
-    def __init__(self, ticket_id: int, parent=None):
+    def __init__(self, ticket_id: int, parent=None, mode: str = "intake"):
         super().__init__(parent)
         self.ticket_id = int(ticket_id)
+        self.mode = "weigher" if mode == "weigher" else "intake"
         self.result_purchase_id = 0
         self._busy = False
         self._price_spins = {}
-        self.setWindowTitle("Open Intake")
+        self.setWindowTitle("Edit Weighing" if self.mode == "weigher" else "Open Intake")
         self.setModal(True)
         self.resize(980, 720)
 
@@ -63,7 +68,7 @@ class WeighTicketReviewDialog(QDialog):
         hl.addLayout(self.status_holder)
         root.addWidget(head)
 
-        cap = QLabel("PRODUCTS - confirm the price per kg")
+        cap = QLabel("PRODUCTS - set the price per kg" if self.mode == "weigher" else "PRODUCTS - confirm the price per kg")
         cap.setObjectName("SectionLabel")
         root.addWidget(cap)
         self.lines_table = QTableWidget(0, len(LINE_COLS))
@@ -123,11 +128,11 @@ class WeighTicketReviewDialog(QDialog):
         root.addLayout(foot)
 
         btns = QHBoxLayout()
-        self.btn_reject = QPushButton("Cancel Ticket")
+        self.btn_reject = QPushButton("Remove Ticket" if self.mode == "weigher" else "Cancel Ticket")
         self.btn_reject.setProperty("role", "danger")
         self.btn_print = QPushButton("Print Weigh Slip")
         self.btn_close = QPushButton("Close")
-        self.btn_finalize = QPushButton("Finalize Intake  →  Payment")
+        self.btn_finalize = QPushButton("Save Changes" if self.mode == "weigher" else "Finalize Intake  →  Payment")
         self.btn_finalize.setObjectName("PrimaryButton")
         self.btn_finalize.setMinimumHeight(42)
         btns.addWidget(self.btn_reject)
@@ -141,7 +146,7 @@ class WeighTicketReviewDialog(QDialog):
         self.rounds_table.itemChanged.connect(self._on_round_edited)
         self.btn_add_round.clicked.connect(self._add_round)
         self.btn_remove_round.clicked.connect(self._remove_round)
-        self.btn_finalize.clicked.connect(self.finalize)
+        self.btn_finalize.clicked.connect(self.save_changes if self.mode == "weigher" else self.finalize)
         self.btn_reject.clicked.connect(self._cancel_ticket)
         self.btn_print.clicked.connect(self._print_slip)
         self.btn_close.clicked.connect(self.reject)
@@ -152,7 +157,9 @@ class WeighTicketReviewDialog(QDialog):
     # ------------------------------------------------------------------ data
     @property
     def editable(self) -> bool:
-        return getattr(self, "_t", {}).get("status") == "submitted"
+        status = getattr(self, "_t", {}).get("status")
+        # intake: the cashier/admin work on a submitted ticket; weigher: their own, until it is finalized
+        return status in (("open", "submitted") if self.mode == "weigher" else ("submitted",))
 
     def reload(self, keep_line: int = 0):
         try:
@@ -231,7 +238,7 @@ class WeighTicketReviewDialog(QDialog):
             w.setEnabled(ed)
         self.btn_print.setEnabled(self._t["status"] != "open")
         self.btn_close.setText("Close")
-        self.btn_finalize.setVisible(self._t["status"] != "finalized")
+        self.btn_finalize.setVisible(ed if self.mode == "weigher" else self._t["status"] != "finalized")
         self.rounds_table.setEditTriggers(QTableWidget.AllEditTriggers if ed else QTableWidget.NoEditTriggers)
 
     def _line(self, line_id: int):
@@ -313,6 +320,21 @@ class WeighTicketReviewDialog(QDialog):
             return
         self.reload(self._active_line)
 
+    # ------------------------------------------------------------------ weigher: save the corrections
+    def save_changes(self):
+        prices = {lid: spin.value() for lid, spin in self._price_spins.items()}
+        missing = [self._line(lid)["product_name"] for lid, p in prices.items() if p <= 0]
+        if missing:
+            QMessageBox.warning(self, "Price", "Enter the price per kg for: " + ", ".join(missing))
+            return
+        try:
+            WeighService.set_ticket_prices(self.ticket_id, prices)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Changes", str(e))
+            self.reload(self._active_line)
+            return
+        self.accept()
+
     # ------------------------------------------------------------------ finalize + payment
     def finalize(self):
         prices = {lid: spin.value() for lid, spin in self._price_spins.items()}
@@ -361,12 +383,16 @@ class WeighTicketReviewDialog(QDialog):
         print_full_then_optional_delivery(self, PURCHASE, int(res["purchase_id"]))
 
     def _cancel_ticket(self):
-        ok = QMessageBox.question(self, "Cancel Ticket", f"Cancel {self._t['ticket_no']}? Nothing will be booked.",
-                                  QMessageBox.Yes | QMessageBox.No)
+        weigher = self.mode == "weigher"
+        ok = QMessageBox.question(
+            self, "Remove Ticket" if weigher else "Cancel Ticket",
+            f"Remove {self._t['ticket_no']}? It is cancelled and kept in the history; nothing will be booked."
+            if weigher else f"Cancel {self._t['ticket_no']}? Nothing will be booked.",
+            QMessageBox.Yes | QMessageBox.No)
         if ok != QMessageBox.Yes:
             return
         try:
-            WeighService.cancel_ticket(self.ticket_id, "Rejected at intake")
+            WeighService.cancel_ticket(self.ticket_id, "Removed by the weigher" if weigher else "Rejected at intake")
         except Exception as e:
             QMessageBox.warning(self, "Cancel Ticket", str(e))
             return
