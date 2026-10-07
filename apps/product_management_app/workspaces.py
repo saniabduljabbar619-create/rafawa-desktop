@@ -183,16 +183,16 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
         sidebar_title="Weigher",
         menu=[
             SidebarItem(label="Weighing Station", route="weigher.station"),
-            SidebarItem(label="My Tickets", route="weigher.tickets"),
+            SidebarItem(label="Finalize List", route="weigher.finalize_list"),
         ],
         routes={
             "weigher.station": lambda: WeigherStationView(),
-            "weigher.tickets": lambda: WeigherTicketsView(),
+            "weigher.finalize_list": lambda: WeigherTicketsView(),
         },
         default_route="weigher.station",
         title_map={
             "weigher.station": "Weighing Station",
-            "weigher.tickets": "My Tickets",
+            "weigher.finalize_list": "Finalize List",
         },
     )
 

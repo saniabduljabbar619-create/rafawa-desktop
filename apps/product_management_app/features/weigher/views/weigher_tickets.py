@@ -1,5 +1,5 @@
 # apps/product_management_app/features/weigher/views/weigher_tickets.py
-"""The weigher's own tickets: what they weighed, where each one stands, reprint a slip. No prices."""
+"""The weigher's Finalize List: every weighing they did, where each stands - edit, remove or reprint it."""
 from __future__ import annotations
 
 from PySide2.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
@@ -11,7 +11,9 @@ from apps.product_management_app.features.weigher.views.ticket_table import (
     fill_ticket_table, make_ticket_table, selected_ticket_id,
 )
 
-FILTERS = [("all", "All"), ("open", "Weighing"), ("submitted", "Awaiting cashier"), ("finalized", "Finalized")]
+FILTERS = [("all", "All"), ("open", "Weighing"), ("submitted", "Awaiting cashier"), ("finalized", "Finalized"),
+           ("cancelled", "Removed")]
+EDITABLE = ("open", "submitted")           # until the cashier finalizes it
 
 
 class WeigherTicketsView(QWidget):
@@ -22,7 +24,7 @@ class WeigherTicketsView(QWidget):
 
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        title = QLabel("My Tickets")
+        title = QLabel("Finalize List")
         title.setObjectName("Title")
         self.subtitle = QLabel("")
         self.subtitle.setStyleSheet("color:#6b7280; font-size:12px;")
@@ -33,7 +35,7 @@ class WeigherTicketsView(QWidget):
         kp = QHBoxLayout()
         kp.setSpacing(12)
         self.kpi_open = KpiCard("Still weighing", "0", "unfinished tickets", "amber")
-        self.kpi_wait = KpiCard("Awaiting cashier", "0", "submitted, not yet priced", "blue")
+        self.kpi_wait = KpiCard("Awaiting cashier", "0", "submitted, can still be edited", "blue")
         self.kpi_done = KpiCard("Finalized", "0", "paid into the books", "green")
         for k in (self.kpi_open, self.kpi_wait, self.kpi_done):
             kp.addWidget(k, 1)
@@ -45,23 +47,31 @@ class WeigherTicketsView(QWidget):
         bar.addStretch(1)
         self.btn_refresh = QPushButton("Refresh")
         self.btn_print = QPushButton("Print Slip")
-        bar.addWidget(self.btn_print)
-        bar.addWidget(self.btn_refresh)
+        self.btn_edit = QPushButton("Edit")
+        self.btn_edit.setObjectName("PrimaryButton")
+        self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setProperty("role", "danger")
+        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_refresh):
+            bar.addWidget(b)
         root.addLayout(bar)
 
-        self.table = make_ticket_table(show_amount=False, show_weigher=False)
+        self.table = make_ticket_table(show_amount=True, show_weigher=False)
         root.addWidget(self.table, 1)
 
         self.filter_seg.changed.connect(lambda _k: self.refresh())
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_print.clicked.connect(self.print_selected)
+        self.btn_edit.clicked.connect(self.edit_selected)
+        self.btn_remove.clicked.connect(self.remove_selected)
+        self.table.cellDoubleClicked.connect(lambda *_a: self.edit_selected())
+        self.table.itemSelectionChanged.connect(self._buttons)
         self.refresh()
 
     def refresh(self):
         try:
             allrows = WeighService.list_tickets()
         except Exception as e:
-            QMessageBox.warning(self, "My Tickets", str(e))
+            QMessageBox.warning(self, "Finalize List", str(e))
             return
         count = lambda s: sum(1 for t in allrows if t["status"] == s)       # noqa: E731
         self.kpi_open.set(str(count("open")))
@@ -70,7 +80,52 @@ class WeigherTicketsView(QWidget):
         key = self.filter_seg.key()
         rows = allrows if key == "all" else [t for t in allrows if t["status"] == key]
         self.subtitle.setText(f"{len(rows)} of {len(allrows)} tickets")
+        self._rows = {int(t["id"]): t for t in rows}
         fill_ticket_table(self.table, rows)
+        self._buttons()
+
+    def _selected(self):
+        tid = selected_ticket_id(self.table)
+        return (tid, self._rows.get(tid)) if tid else (None, None)
+
+    def _buttons(self):
+        _tid, t = self._selected()
+        ok = bool(t and t["status"] in EDITABLE)
+        self.btn_edit.setEnabled(ok)
+        self.btn_remove.setEnabled(ok)
+        self.btn_print.setEnabled(bool(t and t["status"] != "open"))
+
+    def edit_selected(self):
+        """Correct a weighing: its rounds and prices (a finalized one opens read-only)."""
+        tid, t = self._selected()
+        if not tid:
+            QMessageBox.information(self, "Edit", "Select a weighing first.")
+            return
+        from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import (
+            WeighTicketReviewDialog)
+        WeighTicketReviewDialog(tid, parent=self, mode="weigher").exec_()
+        self.refresh()
+
+    def remove_selected(self):
+        tid, t = self._selected()
+        if not tid:
+            QMessageBox.information(self, "Remove", "Select a weighing first.")
+            return
+        if t["status"] not in EDITABLE:
+            QMessageBox.information(self, "Remove", f"This ticket is {t['status']} and can no longer be removed.")
+            return
+        ok = QMessageBox.question(
+            self, "Remove Weighing",
+            f"Remove {t['ticket_no']} ({t['party_name']}, {t['total_kg']:,.2f} kg)?\n\n"
+            "It is cancelled and kept in the history (filter: Removed); nothing is booked.",
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        try:
+            WeighService.cancel_ticket(tid, "Removed by the weigher")
+        except Exception as e:
+            QMessageBox.warning(self, "Remove", str(e))
+        self.refresh()
 
     def print_selected(self):
         tid = selected_ticket_id(self.table)

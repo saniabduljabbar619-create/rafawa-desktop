@@ -27,6 +27,15 @@ def test_summary_slip_hides_individual_rounds():
     assert "245.50" not in t and "426.75" in t and "Subtotal (3 rounds)" in t
 
 
-def test_slip_never_prints_a_price():
-    t = render_weigh_slip(TICKET, SHOP, "full")
-    assert "450" not in t and "192" not in t and "Price" not in t.replace("Price and payment", "")
+def test_slip_shows_the_price_and_amounts_the_weigher_set():
+    t = render_weigh_slip(dict(TICKET, total_amount=192037.5), SHOP, "full")
+    for needle in ("Price per kg", "450.00", "Amount", "192,037.50", "TOTAL AMOUNT:", "not a payment receipt"):
+        assert needle in t, needle
+    assert all(len(line) <= WIDTH for line in t.splitlines())
+    assert "192,037.50" in render_weigh_slip(dict(TICKET, total_amount=192037.5), SHOP, "summary")
+
+
+def test_slip_without_a_price_prints_none():
+    bare = dict(TICKET, lines=[dict(TICKET["lines"][0], unit_price=None, amount=None)], total_amount=None)
+    t = render_weigh_slip(bare, SHOP, "full")
+    assert "Price per kg" not in t and "TOTAL AMOUNT" not in t

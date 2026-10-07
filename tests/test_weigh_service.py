@@ -26,6 +26,12 @@ def _ticket(party=SUPPLIER_ID, role="supplier"):
     return tid, line
 
 
+def _submit(tid, line, price=450, receipt="full"):
+    """The weigher's normal ending: price the line after weighing, then submit."""
+    W.set_line_price(line, price)
+    return W.submit_ticket(tid, receipt)
+
+
 def test_weigher_records_rounds_and_totals_are_automatic():
     tid, line = _ticket()
     W.record_round(line, 3, 245.5)
@@ -44,33 +50,98 @@ def test_round_validation_for_the_weigher():
             W.record_round(line, bags, kg)
 
 
-def test_weigher_never_sees_prices_and_cannot_price_or_finalize():
+def test_weigher_sets_the_price_and_sees_the_amount_but_cannot_finalize():
     tid, line = _ticket()
     W.record_round(line, 3, 100)
-    W.submit_ticket(tid, "full")
-    as_role("cashier", CASHIER)
+    with pytest.raises(ValueError):
+        W.set_line_price(line, 0)
     W.set_line_price(line, 450)
-    as_role("weigher", WEIGHER)
     t = W.get_ticket(tid)
-    assert t["total_amount"] is None and t["lines"][0]["unit_price"] is None and t["lines"][0]["amount"] is None
-    assert all(r["total_amount"] is None for r in W.list_tickets())
+    assert t["lines"][0]["unit_price"] == 450 and t["lines"][0]["amount"] == 45000 and t["total_amount"] == 45000
+    assert W.list_tickets()[0]["total_amount"] == 45000
     with pytest.raises(PermissionDenied):
-        W.set_line_price(line, 1)
+        W.finalize_ticket(tid, {line: 450})                    # finalizing and payment stay with the cashier
+    as_role("weigher", WEIGHER_2)
     with pytest.raises(PermissionDenied):
-        W.finalize_ticket(tid, {line: 450})
+        W.set_line_price(line, 1)                              # nobody else's ticket
+    as_role("cashier", CASHIER)
+    as_role("weigher", WEIGHER)
+    W.submit_ticket(tid)
+    as_role("cashier", CASHIER)
+    W.set_line_price(line, 460)
+    assert W.get_ticket(tid)["total_amount"] == 46000
 
 
-def test_submit_locks_the_ticket_for_the_weigher():
+def test_set_ticket_prices_is_all_or_nothing_and_audited():
+    tid, line = _ticket()
+    line2 = W.add_line(tid, CROP_ID, area="Other")
+    W.record_round(line, 1, 100)
+    W.record_round(line2, 1, 50)
+    with pytest.raises(ValueError, match="price per kg"):
+        W.set_ticket_prices(tid, {line: 400})                  # the second line has none
+    assert W.get_ticket(tid)["lines"][0]["unit_price"] is None
+    W.set_ticket_prices(tid, {line: 400, line2: 500})
+    t = W.get_ticket(tid)
+    assert t["total_amount"] == 100 * 400 + 50 * 500
+    with get_session() as s:
+        assert s.query(AuditLog).filter(AuditLog.action == "weigh.price").count() == 2
+
+
+def test_crop_products_carry_the_usual_price():
+    from database.models.product import Product
+    with get_session() as s:
+        s.get(Product, CROP_ID).default_cost_rate = 420
+    as_role("weigher", WEIGHER)
+    assert {p["id"]: p["price"] for p in W.crop_products()}[CROP_ID] == 420
+
+
+def test_submitting_needs_a_price_on_every_line():
+    tid, line = _ticket()
+    W.record_round(line, 1, 50)
+    with pytest.raises(ValueError, match="Set the price per kg"):
+        W.submit_ticket(tid, "summary")
+    t = _submit(tid, line, receipt="summary")
+    assert t["status"] == "submitted" and t["receipt_type"] == "summary"
+    with pytest.raises(ValueError, match="already submitted"):
+        W.submit_ticket(tid)
+
+
+def test_weigher_can_edit_and_remove_own_ticket_until_the_cashier_finalizes_it():
     tid, line = _ticket()
     rnd = W.record_round(line, 1, 50)
-    W.submit_ticket(tid, "summary")
-    assert W.get_ticket(tid)["status"] == "submitted" and W.get_ticket(tid)["receipt_type"] == "summary"
+    _submit(tid, line)
+    # awaiting the cashier: still the weigher's to correct
+    W.update_round(rnd["id"], weight_kg=60)
+    extra = W.record_round(line, 2, 80)
+    W.remove_round(extra["id"])
+    W.set_line_price(line, 470)
+    t = W.get_ticket(tid)
+    assert t["status"] == "submitted" and t["total_kg"] == 60 and t["total_amount"] == 60 * 470
+    with get_session() as s:
+        actions = {a.action for a in s.query(AuditLog).all()}
+        assert {"weigh.round_edited", "weigh.round_added", "weigh.round_removed", "weigh.price"} <= actions
+    as_role("weigher", WEIGHER_2)
     with pytest.raises(PermissionDenied):
-        W.record_round(line, 1, 50)
+        W.update_round(rnd["id"], weight_kg=1)                # never another weigher's
     with pytest.raises(PermissionDenied):
-        W.remove_round(rnd["id"])
-    with pytest.raises(PermissionDenied):
-        W.submit_ticket(tid)                                  # already submitted
+        W.cancel_ticket(tid)
+    as_role("admin", ADMIN_ID)
+    W.finalize_ticket(tid, {line: 470})
+    as_role("weigher", WEIGHER)
+    with pytest.raises(ValueError):
+        W.update_round(rnd["id"], weight_kg=1)                # finalized: frozen
+    with pytest.raises(ValueError):
+        W.cancel_ticket(tid)
+
+
+def test_weigher_can_remove_a_submitted_ticket_before_it_is_finalized():
+    tid, line = _ticket()
+    W.record_round(line, 1, 50)
+    _submit(tid, line)
+    W.cancel_ticket(tid, "weighed the wrong delivery")
+    t = W.get_ticket(tid)
+    assert t["status"] == "cancelled" and t["cancel_reason"] == "weighed the wrong delivery"
+    assert W.count_awaiting() == 0
 
 
 def test_cannot_submit_without_rounds_and_empty_lines_are_dropped():
@@ -79,7 +150,7 @@ def test_cannot_submit_without_rounds_and_empty_lines_are_dropped():
         W.submit_ticket(tid)
     W.record_round(line, 1, 50)
     W.add_line(tid, CROP_ID, area="Other")         # never weighed
-    t = W.submit_ticket(tid)
+    t = _submit(tid, line)
     assert len(t["lines"]) == 1
 
 
@@ -125,7 +196,7 @@ def test_cashier_verifies_edits_prices_and_finalizes_into_a_purchase():
     tid, line = _ticket()
     r1 = W.record_round(line, 3, 245)
     W.record_round(line, 2, 100)
-    W.submit_ticket(tid)
+    _submit(tid, line, price=400)                           # the weigher's price ...
     before = stock(CROP_ID)
 
     as_role("cashier", CASHIER)
@@ -133,9 +204,8 @@ def test_cashier_verifies_edits_prices_and_finalizes_into_a_purchase():
     extra = W.record_round(line, 1, 50)                     # a missed round
     t = W.get_ticket(tid)
     assert t["total_kg"] == 400 and t["total_bags"] == 6
-    with pytest.raises(ValueError):
-        W.finalize_ticket(tid)                              # price not confirmed yet
-    res = W.finalize_ticket(tid, {line: 450})
+    assert W.get_ticket(tid)["lines"][0]["unit_price"] == 400
+    res = W.finalize_ticket(tid, {line: 450})                # ... which the cashier confirms (here: changes)
     assert res["total_amount"] == 400 * 450
 
     t = W.get_ticket(tid)
@@ -171,14 +241,14 @@ def test_cashier_cannot_edit_a_ticket_still_being_weighed_but_admin_can_cancel()
 def test_party_role_decides_whether_a_customer_becomes_a_supplier():
     tid, line = _ticket(CUSTOMER_ID, "customer")
     W.record_round(line, 1, 100)
-    W.submit_ticket(tid)
+    _submit(tid, line, 100)
     as_role("admin", ADMIN_ID)
     W.finalize_ticket(tid, {line: 100})
     with get_session() as s:
         assert not s.get(Party, CUSTOMER_ID).is_supplier       # a customer selling to us stays a customer
     tid, line = _ticket(SUPPLIER_ID, "supplier")
     W.record_round(line, 1, 100)
-    W.submit_ticket(tid)
+    _submit(tid, line, 100)
     as_role("admin", ADMIN_ID)
     W.finalize_ticket(tid, {line: 100})
     with get_session() as s:
@@ -189,24 +259,24 @@ def test_awaiting_count_and_status_filters():
     tid, line = _ticket()
     W.record_round(line, 1, 10)
     assert W.count_awaiting() == 0
-    W.submit_ticket(tid)
+    _submit(tid, line, 100)
     assert W.count_awaiting() == 1
     as_role("cashier", CASHIER)
     assert [t["id"] for t in W.list_tickets(status="submitted")] == [tid]
     assert W.list_tickets(status=["open"]) == []
-    assert W.list_tickets(status="submitted")[0]["total_amount"] == 0
+    assert W.list_tickets(status="submitted")[0]["total_amount"] == 1000
 
 
-def test_weigher_can_correct_own_round_while_open_but_not_after_submitting():
+def test_weigher_can_correct_own_round_and_the_round_limits_still_apply():
     tid, line = _ticket()
     rnd = W.record_round(line, 2, 100)
     W.update_round(rnd["id"], weight_kg=105)
     assert W.get_ticket(tid)["total_kg"] == 105
     with pytest.raises(ValueError):
         W.update_round(rnd["id"], bags=4)                       # still the 3-bag limit
-    W.submit_ticket(tid)
-    with pytest.raises(PermissionDenied):
-        W.update_round(rnd["id"], weight_kg=1)
+    _submit(tid, line)
+    W.update_round(rnd["id"], weight_kg=106)                    # awaiting the cashier: still correctable
+    assert W.get_ticket(tid)["total_kg"] == 106
     as_role("weigher", WEIGHER_2)
     with pytest.raises(PermissionDenied):
         W.update_round(rnd["id"], weight_kg=1)                  # and never another weigher's

@@ -32,7 +32,7 @@ Drawer engine (`services/drawer/`): `compute.py` (per-cashier drawer), `ledger.p
 |---|---|---|
 | `admin` / `pm` | Product Management, Cashier, Weigher | everything |
 | `cashier` | Cashier only | sales, payments, **Weigh Tickets** (verify, price, finalize) |
-| `weigher` | Weigher only | register/select a party, weigh rounds, print the slip |
+| `weigher` | Weigher only | register/select a party, weigh rounds, set the price per kg, print the slip, edit/remove their own weighings (Finalize List) |
 
 `shared/auth/permissions.py` holds the role sets (`WEIGH_ROLES`, `INTAKE_ROLES`) and
 `workspace_allowed()`; the launcher and `main.open_workspace` both use it.
@@ -42,14 +42,19 @@ Drawer engine (`services/drawer/`): `compute.py` (per-cashier drawer), `ledger.p
 
 ```
 weigher:        register/select party -> product/area/grade -> record rounds (1-3 or partial bags + kg)
-                -> auto totals -> choose slip (full/summary) -> submit -> print & sign   [no prices]
-admin/cashier:  Weigh Tickets -> Open Intake -> verify & edit rounds -> confirm price per kg
+                -> auto totals -> PRICE per kg for each product (usual price filled in, editable; typed
+                where there is none) -> choose slip (full/summary) -> submit -> print & sign
+admin/cashier:  Weigh Tickets -> Open Intake -> verify & edit rounds -> confirm (or change) the price per kg
                 -> amount = kg x price -> Finalize (creates the Purchase) -> payment -> receipt
+weigher later:  Finalize List -> every weighing with its amount and status -> Edit (rounds, prices) /
+                Remove (cancel, kept in the history) / Print Slip - until the cashier finalizes it
 ```
 
-The weigher has **no authority over price, payment or finalization** - the service refuses those
-calls for the role and never returns a price to a weigher. A ticket is `open` (being weighed) ->
-`submitted` (locked for the weigher) -> `finalized` (a `Purchase` exists) or `cancelled`.
+The weigher has **no authority over payment or finalization** - the service refuses those calls for the
+role. The price they set is a proposal: a ticket cannot be submitted without a price on every weighed line,
+the slip shows it, and the cashier confirms or changes it at finalization. A weigher may edit or remove
+their own ticket while it is `open` or `submitted`; edits after submitting are audited. A ticket is `open`
+(being weighed) -> `submitted` (awaiting the cashier) -> `finalized` (a `Purchase` exists; frozen) or `cancelled`.
 Finalizing takes a row lock on the ticket so two terminals cannot book it twice. Corrections made
 at intake are written to `audit_logs`.
 

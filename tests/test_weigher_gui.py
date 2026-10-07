@@ -86,19 +86,65 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     v.remove_round()
     assert v.lbl_total_kg.text() == "405.50 kg"
 
-    v.btn_finish.click()
-    assert v.stack.currentIndex() == 2
+    v.btn_finish.click()                                           # weighing done -> the PRICE step
+    assert v.stack.currentIndex() == 2 and v.price_table.rowCount() == 1
+    assert v.price_table.item(0, 0).text() == "Maize" and v.price_table.item(0, 3).text() == "405.50"
+    spin = next(iter(v._price_spins.values()))
+    assert spin.value() == 80 and "Usual price" in spin.toolTip()       # Maize's usual price is filled in
+    spin.setValue(0)
+    v.btn_price_next.click()                                       # price cleared: refused, stays on the step
+    assert v.stack.currentIndex() == 2 and any("price per kg for: Maize" in m for _k, m in boxes)
+    spin.setValue(450)
+    assert v.lbl_price_amount.text() == f"₦{405.5 * 450:,.2f}" and v.price_table.item(0, 5).text() == f"₦{405.5 * 450:,.2f}"
+    v.btn_price_next.click()                                       # price saved on the ticket -> the receipt step
+    assert v.stack.currentIndex() == 3 and W.get_ticket(v.ticket_id)["total_amount"] == 405.5 * 450
     assert "TOTAL WEIGHT" in v.preview.toPlainText() and "245.50" in v.preview.toPlainText()
+    assert "TOTAL AMOUNT" in v.preview.toPlainText() and f"{405.5 * 450:,.2f}" in v.preview.toPlainText()
     v.receipt_seg.set_key("summary"); v._render_preview()
     assert "245.50" not in v.preview.toPlainText()
 
     v.btn_submit.click()
     t = W.get_ticket(v.ticket_id)
     assert t["status"] == "submitted" and t["receipt_type"] == "summary" and len(printed) == 1
-    assert "Weigher: ____" in printed[0]
+    assert "Weigher: ____" in printed[0] and f"{405.5 * 450:,.2f}" in printed[0]
     assert v.btn_submit.isHidden() and not v.btn_new.isHidden() and not v.btn_print.isHidden()
     v.btn_new.click()
     assert v.stack.currentIndex() == 0 and v.ticket_id == 0
+
+
+def test_price_step_leaves_a_product_without_a_usual_price_empty_and_amber(qapp, boxes):
+    from database.models.product import Product
+    with get_session() as sess:
+        sess.get(Product, CROP_ID).default_cost_rate = None
+    v = _station()
+    _pick(v, "Supplier One"); v.start_ticket()
+    v.product_cb.setCurrentIndex(1); v.add_line()
+    _type_round(v, "1", "100")
+    v.btn_finish.click()
+    spin = next(iter(v._price_spins.values()))
+    assert spin.value() == 0 and "No usual price" in spin.toolTip() and "fff7ed" in spin.styleSheet()
+    spin.setValue(300)
+    assert spin.styleSheet() == "" and v.lbl_price_amount.text() == "₦30,000.00"
+
+
+def test_price_step_fills_the_usual_price_and_back_returns_to_weighing(qapp, boxes):
+    from database.models.product import Product
+    with get_session() as sess:
+        sess.get(Product, CROP_ID).default_cost_rate = 420
+    v = _station()
+    _pick(v, "Supplier One"); v.start_ticket()
+    v.product_cb.setCurrentIndex(1); v.add_line()
+    _type_round(v, "2", "100")
+    v.btn_finish.click()
+    spin = next(iter(v._price_spins.values()))
+    assert spin.value() == 420 and v.lbl_price_amount.text() == "₦42,000.00"      # filled, and editable
+    v.btn_price_back.click()
+    assert v.stack.currentIndex() == 1
+    v.btn_finish.click()                                                          # a saved price is kept
+    next(iter(v._price_spins.values())).setValue(430)
+    v.btn_price_next.click()
+    v.btn_back.click()                                                            # receipt -> back to the price step
+    assert v.stack.currentIndex() == 2 and next(iter(v._price_spins.values())).value() == 430
 
 
 def test_station_resume_and_cancel(qapp, boxes):
@@ -143,18 +189,31 @@ def test_register_new_supplier_from_the_station(qapp, boxes):
     assert d2.party is None and any("already registered" in m for _k, m in boxes)
 
 
-def test_weigher_history_shows_no_money_and_admin_queue_does(qapp, boxes, printed):
+def _priced_ticket(kg=100, price=450, bags=2):
+    tid = W.create_ticket(SUPPLIER_ID, "supplier"); line = W.add_line(tid, CROP_ID, "Gwarzo", "A")
+    W.record_round(line, bags, kg)
+    W.set_line_price(line, price)
+    return tid, line
+
+
+def test_finalize_list_shows_every_weighing_with_amounts_and_the_admin_queue_does_too(qapp, boxes, printed):
     from apps.product_management_app.features.weigher.views.weigh_tickets_admin import WeighTicketsAdminView
     from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
     as_role("weigher", CASHIER_A)
-    tid = W.create_ticket(SUPPLIER_ID, "supplier"); line = W.add_line(tid, CROP_ID)
-    W.record_round(line, 2, 100); W.submit_ticket(tid)
+    tid, _line = _priced_ticket()
+    W.submit_ticket(tid)
+    open_tid = W.create_ticket(SUPPLIER_ID, "supplier")                          # a second one, still weighing
 
     mine = WeigherTicketsView()
     headers = [mine.table.horizontalHeaderItem(i).text() for i in range(mine.table.columnCount())]
-    assert "Amount" not in headers and mine.table.rowCount() == 1 and mine.kpi_wait.value.text() == "1"
-    mine.table.selectRow(0); mine.print_selected()
-    assert len(printed) == 1 and "WEIGHING SLIP" in printed[0]
+    assert "Amount" in headers and mine.table.rowCount() == 2 and mine.kpi_wait.value.text() == "1"
+    assert mine.kpi_open.value.text() == "1"
+    mine.table.selectRow(1)                                                      # the submitted one (oldest last)
+    assert mine.btn_edit.isEnabled() and mine.btn_remove.isEnabled() and mine.btn_print.isEnabled()
+    mine.print_selected()
+    assert len(printed) == 1 and "WEIGHING SLIP" in printed[0] and "TOTAL AMOUNT" in printed[0]
+    mine.table.selectRow(0)                                                      # the open one: nothing to print yet
+    assert not mine.btn_print.isEnabled() and open_tid
 
     as_role("cashier", CASHIER)
     q = WeighTicketsAdminView(mode="cashier")
@@ -165,12 +224,78 @@ def test_weigher_history_shows_no_money_and_admin_queue_does(qapp, boxes, printe
     assert q.table.rowCount() == 0
 
 
+def test_finalize_list_remove_keeps_the_ticket_in_the_removed_filter(qapp, boxes):
+    from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
+    as_role("weigher", CASHIER_A)
+    tid, _line = _priced_ticket()
+    W.submit_ticket(tid)
+    v = WeigherTicketsView()
+    v.table.selectRow(0)
+    v.remove_selected()                                                          # the stub answers Yes
+    assert W.get_ticket(tid)["status"] == "cancelled"
+    v.filter_seg.set_key("cancelled"); v.refresh()
+    assert v.table.rowCount() == 1
+    v.table.selectRow(0)
+    assert not v.btn_edit.isEnabled() and not v.btn_remove.isEnabled()          # a removed ticket is closed
+
+
+def test_finalize_list_edit_opens_the_weigher_dialog_and_saves_rounds_and_prices(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
+    from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
+    from PySide2.QtWidgets import QApplication
+    as_role("weigher", CASHIER_A)
+    tid, line = _priced_ticket(kg=100, price=400, bags=2)
+    W.submit_ticket(tid)
+
+    opened = []
+    monkeypatch.setattr(WeighTicketReviewDialog, "exec_", lambda self: opened.append(self) or 1)
+    v = WeigherTicketsView()
+    v.table.selectRow(0)
+    v.edit_selected()
+    d = opened[0]
+    assert d.mode == "weigher" and d.windowTitle() == "Edit Weighing" and d.editable
+    assert d.btn_finalize.text() == "Save Changes" and d.btn_reject.text() == "Remove Ticket"
+    assert d._price_spins[line].value() == 400
+
+    d.rounds_table.item(0, 2).setText("120")                                      # correct a weight
+    QApplication.processEvents()
+    d.add_bags.setText("1"); d.add_kg.setText("50"); d._add_round()
+    d._price_spins[line].setValue(410)
+    d.btn_finalize.click()                                                        # Save Changes
+    t = W.get_ticket(tid)
+    assert t["status"] == "submitted" and t["total_kg"] == 170 and t["total_amount"] == 170 * 410
+    assert d.result() == d.Accepted
+
+    d._price_spins[line].setValue(0)
+    d.save_changes()
+    assert any("price per kg" in m for _k, m in boxes)                            # a price is always required
+
+
+def test_weigher_dialog_removes_a_ticket_and_is_read_only_once_finalized(qapp, boxes):
+    from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
+    as_role("weigher", CASHIER_A)
+    tid, _l = _priced_ticket()
+    W.submit_ticket(tid)
+    d = WeighTicketReviewDialog(tid, mode="weigher")
+    d._cancel_ticket()
+    assert W.get_ticket(tid)["status"] == "cancelled" and "Removed by the weigher" in W.get_ticket(tid)["cancel_reason"]
+
+    tid2, line2 = _priced_ticket()
+    W.submit_ticket(tid2)
+    as_role("admin", ADMIN_ID)
+    W.finalize_ticket(tid2, {line2: 450})
+    as_role("weigher", CASHIER_A)
+    d2 = WeighTicketReviewDialog(tid2, mode="weigher")
+    assert not d2.editable and not d2.btn_finalize.isVisible() and not d2.btn_reject.isEnabled()
+
+
 def test_cashier_opens_intake_corrects_prices_finalizes_and_payment_flow_runs(qapp, boxes, monkeypatch):
     from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
     from PySide2.QtWidgets import QApplication
     as_role("weigher", CASHIER_A)
     tid = W.create_ticket(SUPPLIER_ID, "supplier"); line = W.add_line(tid, CROP_ID, "Gwarzo", "A")
     W.record_round(line, 3, 245); W.record_round(line, 2, 100)
+    W.set_line_price(line, 400)                                   # the weigher's price
     W.submit_ticket(tid)
     before = stock(CROP_ID)
 
@@ -180,7 +305,9 @@ def test_cashier_opens_intake_corrects_prices_finalizes_and_payment_flow_runs(qa
     d = WeighTicketReviewDialog(tid)
     assert d.editable and d.lines_table.rowCount() == 1 and d.rounds_table.rowCount() == 2
 
-    d.finalize()                                                  # no price yet -> refused
+    assert d._price_spins[line].value() == 400                   # the weigher's price arrives pre-filled
+    d._price_spins[line].setValue(0)
+    d.finalize()                                                  # price cleared -> refused
     assert any("Confirm the price" in m for _k, m in boxes) and W.get_ticket(tid)["status"] == "submitted"
 
     d.rounds_table.item(0, 2).setText("250")                      # verify & edit a weight
@@ -207,7 +334,7 @@ def test_reject_at_intake_cancels_the_ticket(qapp, boxes):
     from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
     as_role("weigher", CASHIER_A)
     tid = W.create_ticket(SUPPLIER_ID, "supplier"); line = W.add_line(tid, CROP_ID)
-    W.record_round(line, 1, 10); W.submit_ticket(tid)
+    W.record_round(line, 1, 10); W.set_line_price(line, 100); W.submit_ticket(tid)
     as_role("cashier", CASHIER)
     d = WeighTicketReviewDialog(tid)
     d._cancel_ticket()

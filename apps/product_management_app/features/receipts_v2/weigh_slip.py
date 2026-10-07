@@ -3,9 +3,10 @@
 """
 The weigher's slip: what was weighed, signed by the weigher and the customer/supplier.
 
-It carries NO prices and NO payment - the weigher has no authority over either - and says so, so
-nobody mistakes it for a payment receipt. Pure Python (80mm text, same layout family as the
-other receipts), no Qt or database.
+It shows what was weighed and, when the weigher has set one, the price per kg and the amount per product
+(the cashier still confirms the price before paying). It carries NO payment and says so, so nobody
+mistakes it for a payment receipt. Pure Python (80mm text, same layout family as the other receipts),
+no Qt or database.
 """
 from __future__ import annotations
 
@@ -70,14 +71,19 @@ def render_weigh_slip(ticket: Dict[str, Any], shop: ShopInfo, receipt_type: str 
             out.append("  " + "-" * (WIDTH - 2))
         out.append(_two(f"  Subtotal ({len(line.get('rounds', []))} rounds)",
                         f"{_bags(line.get('bags'))} bags  {_kg(line.get('kg'))} kg"))
+        if line.get("unit_price"):
+            out.append(_two("  Price per kg", _kg(line["unit_price"])))
+            out.append(_two("  Amount", _kg(line.get("amount") or float(line["unit_price"]) * float(line.get("kg") or 0))))
         out.append("")
 
     out.append(_rule())
     out.append(_two("TOTAL BAGS:", _bags(ticket.get("total_bags"))))
     out.append(_two("TOTAL WEIGHT:", f"{_kg(ticket.get('total_kg'))} kg"))
+    if ticket.get("total_amount"):
+        out.append(_two("TOTAL AMOUNT:", _kg(ticket["total_amount"])))
     out.append(_rule())
-    out.append(_center("Price and payment are confirmed"))
-    out.append(_center("by the cashier."))
+    out.append(_center("Price is confirmed and payment"))
+    out.append(_center("made by the cashier."))
     out += ["", "", "Weigher: ______________________", "", "",
             f"{role}: ______________________", "", _rule(), _center(shop.footer_note or ""), "", ""]
     return "\n".join(out)
