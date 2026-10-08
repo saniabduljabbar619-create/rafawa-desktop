@@ -46,6 +46,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.cashier.views.cashier_payments import CashierPaymentsView
     from apps.product_management_app.features.cashier.views.cashier_sales import CashierSalesView
     from apps.product_management_app.features.cashier.views.cashier_intake import CashierIntakeView
+    from apps.product_management_app.features.cashier.views.quick_purchases import QuickPurchasesView
     from apps.product_management_app.features.profiling.views.admin_returns import AdminReturnsView
     from apps.product_management_app.features.admin_users.views.users_list import UsersListView
     from apps.product_management_app.features.admin_dashboard.views.admin_dashboard import AdminDashboardView
@@ -139,6 +140,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             SidebarItem(label="Sales (Checkout)", route="cashier.sales"),
             SidebarItem(label="Weigh Tickets", route="cashier.weigh_tickets"),
             SidebarItem(label="Cashier Purchase", route="cashier.intake"),
+            SidebarItem(label="Quick Purchases", route="cashier.quick_purchases"),
             SidebarItem(label="Payments", route="cashier.payments"),
             SidebarItem(label="Profiles", children=[
                 SidebarItem(label="Customers", route="cashier.customers"),
@@ -154,6 +156,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.sales": lambda: CashierSalesView(),
             "cashier.weigh_tickets": lambda: WeighTicketsAdminView(mode="cashier"),
             "cashier.intake": lambda: CashierIntakeView(),
+            "cashier.quick_purchases": lambda: QuickPurchasesView(),
             "cashier.payments": lambda: CashierPaymentsView(),
             "cashier.customers": lambda: CustomersListView(mode="cashier"),
             "cashier.suppliers": lambda: SuppliersListPage(),
@@ -167,6 +170,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.sales": "Sales (Checkout)",
             "cashier.weigh_tickets": "Weigh Tickets",
             "cashier.intake": "Cashier Purchase",
+            "cashier.quick_purchases": "Quick Purchases",
             "cashier.payments": "Payments",
             "cashier.customers": "Customers",
             "cashier.suppliers": "Suppliers",

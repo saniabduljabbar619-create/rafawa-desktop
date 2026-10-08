@@ -23,7 +23,7 @@ from apps.product_management_app.features.receipts_v2 import (
 from database.services.sales_service import SaleService
 from database.services.quick_purchase_service import QuickPurchaseService
 from apps.product_management_app.features.cashier.dialogs.quick_purchase_dialog import (
-    QuickPurchaseDialog, DECISION_QUICK, DECISION_BACKORDER, DECISION_AVAILABLE,
+    QuickPurchaseDialog, DECISION_QUICK, DECISION_BACKORDER, DECISION_AVAILABLE, DECISION_SAVE,
 )
 from database.models import Party
 from database.session import get_session
@@ -601,6 +601,33 @@ class CashierSalesView(QWidget):
             return False
         choice = dlg.decision()
         decision = choice["decision"]
+
+        if decision == DECISION_SAVE:
+            # The supplier has not delivered: keep the shortfall as a PENDING Quick Purchase (no stock or
+            # money change until the goods are received - see QuickPurchaseOrderService) and leave the
+            # cart as it is so the sale can be finished once they arrive.
+            from database.services.quick_purchase_order_service import QuickPurchaseOrderService
+            dealer = choice["dealer_cost_by_pid"]
+            lines = []
+            for ln in choice["selected_short"]:
+                fert = str(ln.get("product_type") or "").lower() in ("fertilizer", "fertilizers")
+                lines.append({"product_id": int(ln["product_id"]),
+                              "qty_bags": int(ln.get("short_qty_bags") or 0),
+                              "total_weight_kg": 0.0 if fert else float(ln.get("short_weight_kg") or 0),
+                              "unit_cost": float(dealer.get(int(ln["product_id"]), 0)),
+                              "supplier_id": int(choice["supplier_party_id"])})
+            cust = self.walkin_name.text().strip() or (self.customer_cb.currentText() if self.customer_cb.currentData()
+                                                       else "")
+            try:
+                oid = QuickPurchaseOrderService.create(lines, customer_name=cust, send=True)
+            except Exception as e:
+                QMessageBox.warning(self, "Quick Purchase", f"Could not save it:\n{e}")
+                return False
+            QMessageBox.information(
+                self, "Quick Purchase saved",
+                f"Saved as pending (QP-{oid:05d}). Open Quick Purchases when the goods arrive - or route it to "
+                "another supplier if they do not have them. The cart is kept so you can finish the sale.")
+            return False
 
         if decision == DECISION_AVAILABLE:
             # sell only the in-stock lines; drop the short ones from the cart

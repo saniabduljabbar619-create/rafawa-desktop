@@ -40,6 +40,7 @@ from .sales_order_item import SalesOrderItem        # must be imported here so S
                                                      # relationship("SalesOrderItem") string
                                                      # reference at first-query time
 from .weigh_ticket import WeighTicket, WeighTicketLine, WeighRound   # weigher workspace: delivery weighing tickets
+from .quick_purchase_order import QuickPurchaseOrder, QuickPurchaseLine, QuickPurchaseRoute   # saved Quick Purchase orders (draft/pending/completed + routing)
 from .expense import Expense                          # Debt Center: business expenses
 from .document_offset import DocumentOffset           # purchase <-> sale offsets (swap / settle with goods)
 from .expenditure import Expenditure                  # Debt Center: larger outlays, separate from Expenses
