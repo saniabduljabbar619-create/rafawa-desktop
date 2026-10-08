@@ -21,8 +21,10 @@ COLS = ["No.", "Status", "For", "Products", "Supplier(s)", "Total", "Created"]
 
 
 class QuickPurchasesView(QWidget):
-    def __init__(self):
+    def __init__(self, load_callback=None):
+        """load_callback(order): given when opened from the Sales Console - brings the order's cart back."""
         super().__init__()
+        self._load_callback = load_callback
         root = make_scrollable_page(self, margins=(16, 14, 16, 14))
         root.setSpacing(12)
         titles = QVBoxLayout()
@@ -65,8 +67,11 @@ class QuickPurchasesView(QWidget):
         self.btn_cancel = QPushButton("Cancel order")
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.setProperty("role", "danger")
+        self.btn_load = QPushButton("Load cart into Sales")
+        self.btn_load.setObjectName("PrimaryButton")
+        self.btn_load.setVisible(load_callback is not None)
         for b in (self.btn_edit, self.btn_send, self.btn_receive, self.btn_route, self.btn_stock, self.btn_cancel,
-                  self.btn_delete):
+                  self.btn_delete, self.btn_load):
             act.addWidget(b)
         act.addStretch(1)
         root.addLayout(act)
@@ -98,6 +103,7 @@ class QuickPurchasesView(QWidget):
         self.btn_stock.clicked.connect(self.sell_available)
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_delete.clicked.connect(self.delete)
+        self.btn_load.clicked.connect(self.load_cart)
         self.table.itemSelectionChanged.connect(self._selection)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit())
         self._rows = {}
@@ -158,6 +164,7 @@ class QuickPurchasesView(QWidget):
         self.btn_stock.setEnabled(st in ("draft", "pending") and waiting)
         self.btn_cancel.setEnabled(st in ("draft", "pending") and not got)
         self.btn_delete.setEnabled(bool(o) and st != "completed" and not got)
+        self.btn_load.setEnabled(bool(o and o["cart"]) and st in ("completed", "cancelled"))
         self.detail.setRowCount(0)
         if not o:
             return
@@ -257,6 +264,11 @@ class QuickPurchasesView(QWidget):
                                   "the books stay as they are.", QMessageBox.Yes | QMessageBox.No)
         if ok == QMessageBox.Yes:
             self._run(lambda: Q.cancel(oid, "Cancelled"), "Cancel")
+
+    def load_cart(self):
+        _oid, o = self._order()
+        if o and self._load_callback:
+            self._load_callback(o)
 
     def delete(self):
         oid, o = self._order()

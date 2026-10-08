@@ -138,3 +138,57 @@ def test_checkout_interlude_can_save_the_shortfall_as_pending(qapp, boxes):
     ch = dlg.decision()
     assert ch["decision"] == DECISION_SAVE and ch["supplier_party_id"] == SUPPLIER_ID
     assert ch["selected_short"][0]["short_qty_bags"] == 30
+
+
+def _sales_view():
+    from apps.product_management_app.features.cashier.views.cashier_sales import CashierSalesView
+    return CashierSalesView()
+
+
+def test_saving_the_shortfall_keeps_the_cart_and_the_order_rebuilds_it(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.views import cashier_sales as cs
+    v = _sales_view()
+    v.cart = [cs.CartItem(product_id=FERT_ID, product_type="fertilizer", name="NPK", unit_price=10000,
+                          unit_cost_at_sale=9000, qty_bags=80, total_weight_kg=0)]
+    short = {"product_id": FERT_ID, "product_type": "fertilizer", "short_qty_bags": 30, "short_weight_kg": 0}
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            pass
+        Accepted = 1
+
+        def exec_(self):
+            return 1
+
+        def decision(self):
+            return {"decision": cs.DECISION_SAVE, "supplier_party_id": SUPPLIER_ID, "selected_short": [short],
+                    "unselected_short": [], "dealer_cost_by_pid": {FERT_ID: 9300}, "payment_intention": "credit"}
+
+    monkeypatch.setattr(cs, "QuickPurchaseDialog", FakeDialog)
+    assert v._maybe_quick_purchase() is False                 # checkout stops, the cart stays
+    assert len(v.cart) == 1
+    (o,) = Q.list_orders("pending")
+    assert o["cart"][0]["qty_bags"] == 80 and o["lines"][0]["qty_bags"] == 30 and o["lines"][0]["unit_cost"] == 9300
+
+    # goods arrive; a fresh Sales Console brings the whole sale back
+    Q.receive(o["id"])
+    v2 = _sales_view()
+    assert v2._load_quick_purchase_cart(Q.get(o["id"])) is True
+    assert [(c.product_id, c.qty_bags, c.unit_price) for c in v2.cart] == [(FERT_ID, 80, 10000)]
+    assert v2.total_lbl.text().endswith("800,000.00")
+
+
+def test_load_button_only_for_finished_orders_with_a_cart(qapp, boxes):
+    loaded = []
+    cart = [{"product_id": FERT_ID, "product_type": "fertilizer", "name": "NPK", "unit_price": 1,
+             "unit_cost_at_sale": 1, "qty_bags": 2, "total_weight_kg": 0}]
+    oid = Q.create(_lines(), send=True, cart=cart)
+    from apps.product_management_app.features.cashier.views.quick_purchases import QuickPurchasesView
+    v = QuickPurchasesView(load_callback=loaded.append)
+    _select(v, oid)
+    assert not v.btn_load.isEnabled()                         # still pending: receive or close it first
+    v.btn_receive.click()
+    _select(v, oid)
+    assert v.btn_load.isEnabled()
+    v.btn_load.click()
+    assert loaded and loaded[0]["id"] == oid

@@ -12,6 +12,7 @@ existing QuickPurchaseService.buy_shortfall - this module owns no money or stock
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -101,13 +102,20 @@ class QuickPurchaseOrderService:
     @staticmethod
     @require_role(*INTAKE_ROLES)
     def create(lines: List[Dict[str, Any]], customer_name: str = "", notes: str = "",
-               send: bool = False) -> int:
-        """Save a new Quick Purchase as a draft (or straight to pending with send=True)."""
+               send: bool = False, buyer_party_id: Optional[int] = None,
+               cart: Optional[List[Dict[str, Any]]] = None) -> int:
+        """
+        Save a new Quick Purchase as a draft (or straight to pending with send=True).
+        cart: the checkout cart it was raised for (plain dicts) - kept so the sale can be rebuilt once the
+        goods arrive. buyer_party_id: the registered customer, if the sale was for one.
+        """
         if not lines:
             raise ValueError("Add at least one product.")
         with get_session() as s:
             o = QuickPurchaseOrder(status="draft", customer_name=(customer_name or "").strip() or None,
-                                   notes=(notes or "").strip() or None, created_by_user_id=_uid())
+                                   notes=(notes or "").strip() or None, created_by_user_id=_uid(),
+                                   buyer_party_id=int(buyer_party_id) if buyer_party_id else None,
+                                   cart_json=json.dumps(cart, default=str) if cart else None)
             s.add(o)
             s.flush()
             o.order_no = f"QP-{int(o.id):05d}"
@@ -320,7 +328,8 @@ class QuickPurchaseOrderService:
                             "at": r.created_at} for r in ln.routes],
             })
         return {"id": int(o.id), "order_no": o.order_no, "status": o.status,
-                "customer_name": o.customer_name or "", "notes": o.notes or "",
+                "customer_name": o.customer_name or "", "buyer_party_id": o.buyer_party_id,
+                "cart": json.loads(o.cart_json) if o.cart_json else [], "notes": o.notes or "",
                 "close_reason": o.close_reason or "", "created_at": o.created_at, "sent_at": o.sent_at,
                 "completed_at": o.completed_at, "lines": lines,
                 "total": round(sum(x["amount"] for x in lines if x["state"] != "dropped"), 2)}

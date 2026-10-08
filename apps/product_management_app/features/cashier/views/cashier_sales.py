@@ -87,6 +87,12 @@ class CashierSalesView(QWidget):
         self.btn_quick_purchase.setMinimumHeight(38)
         header.addWidget(self.btn_quick_purchase)
 
+        # Quick Purchases raised by the checkout shortfall dialog and saved as pending: route them to another
+        # supplier, record the goods as received, then bring the cart back here to finish the sale.
+        self.btn_pending_qp = QPushButton("Pending Quick Purchases")
+        self.btn_pending_qp.setMinimumHeight(38)
+        header.addWidget(self.btn_pending_qp)
+
         total_box = QVBoxLayout()
         total_box.setSpacing(0)
         cap = QLabel("CART TOTAL")
@@ -284,6 +290,7 @@ class CashierSalesView(QWidget):
         self.customer_cb.currentIndexChanged.connect(self._sync_customer_ui)
         self.walkin_name.textChanged.connect(self._sync_customer_ui)
         self.btn_quick_purchase.clicked.connect(self._open_standalone_quick_purchase)
+        self.btn_pending_qp.clicked.connect(self._open_pending_quick_purchases)
 
         # Initialize combobox dataset lists
         self._refresh_customer_combobox()
@@ -458,6 +465,48 @@ class CashierSalesView(QWidget):
 
         self._refresh_cart()
 
+    def _open_pending_quick_purchases(self):
+        from PySide2.QtWidgets import QDialog
+        from apps.product_management_app.features.cashier.views.quick_purchases import QuickPurchasesView
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Pending Quick Purchases")
+        dlg.resize(1100, 700)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        def load(order):
+            if self._load_quick_purchase_cart(order):
+                dlg.accept()
+
+        lay.addWidget(QuickPurchasesView(load_callback=load))
+        dlg.exec_()
+
+    def _load_quick_purchase_cart(self, order) -> bool:
+        """Rebuild the sale a Quick Purchase was raised for: its buyer and its whole cart."""
+        cart = order.get("cart") or []
+        if not cart:
+            QMessageBox.information(self, "Quick Purchase", "This Quick Purchase was not raised from a sale, "
+                                    "so there is no cart to bring back.")
+            return False
+        if self.cart and QMessageBox.question(
+                self, "Replace the cart?", "The cart already has items. Replace it with the one from "
+                f"{order['order_no']}?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return False
+        idx = self.customer_cb.findData(int(order["buyer_party_id"])) if order.get("buyer_party_id") else -1
+        if idx >= 0:
+            self.customer_cb.setCurrentIndex(idx)
+        else:
+            self.customer_cb.setCurrentIndex(max(self.customer_cb.findData(None), 0))
+            self.walkin_name.setText(order.get("customer_name") or "")
+        self._sync_customer_ui()
+        self.cart = [CartItem(
+            product_id=int(x["product_id"]), product_type=str(x["product_type"]), name=str(x["name"]),
+            unit_price=float(x["unit_price"]), unit_cost_at_sale=float(x.get("unit_cost_at_sale") or 0),
+            qty_bags=int(x["qty_bags"]), total_weight_kg=float(x["total_weight_kg"])) for x in cart]
+        self._pending_standalone_qp = []
+        self._refresh_cart()
+        return True
+
     def _open_standalone_quick_purchase(self):
         from apps.product_management_app.features.cashier.dialogs.standalone_quick_purchase_dialog import (
             StandaloneQuickPurchaseDialog,
@@ -618,15 +667,21 @@ class CashierSalesView(QWidget):
                               "supplier_id": int(choice["supplier_party_id"])})
             cust = self.walkin_name.text().strip() or (self.customer_cb.currentText() if self.customer_cb.currentData()
                                                        else "")
+            cart = [{"product_id": x.product_id, "product_type": x.product_type, "name": x.name,
+                     "unit_price": x.unit_price, "unit_cost_at_sale": x.unit_cost_at_sale,
+                     "qty_bags": x.qty_bags, "total_weight_kg": x.total_weight_kg} for x in self.cart]
             try:
-                oid = QuickPurchaseOrderService.create(lines, customer_name=cust, send=True)
+                oid = QuickPurchaseOrderService.create(
+                    lines, customer_name=cust, send=True, cart=cart,
+                    buyer_party_id=self.customer_cb.currentData())
             except Exception as e:
                 QMessageBox.warning(self, "Quick Purchase", f"Could not save it:\n{e}")
                 return False
             QMessageBox.information(
                 self, "Quick Purchase saved",
-                f"Saved as pending (QP-{oid:05d}). Open Quick Purchases when the goods arrive - or route it to "
-                "another supplier if they do not have them. The cart is kept so you can finish the sale.")
+                f"Saved as pending (QP-{oid:05d}). When the goods arrive, open Pending Quick Purchases here - "
+                "or route it to another supplier if they do not have them - then load the cart back to finish "
+                "the sale. The cart is kept as it is.")
             return False
 
         if decision == DECISION_AVAILABLE:
