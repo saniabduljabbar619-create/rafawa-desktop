@@ -166,3 +166,8 @@ supplier's lines through `QuickPurchaseService.buy_shortfall` (one real Purchase
 **routed** to another supplier (history kept per line); the remaining exits are cancel, *sell what's in stock* (gives up the
 unsourced lines; completes the order if part was already received) and delete (refused once goods were received).
 Screens: Cashier > Quick Purchases; the checkout shortfall dialog also offers "save as a pending Quick Purchase".
+
+A Quick Purchase raised from the checkout shortfall dialog ("save as pending") also stores the buyer and the whole cart
+(`buyer_party_id`, `cart_json`, migration 0011). Sales Console > Pending Quick Purchases opens the same list; once an order is
+completed (or closed with what is in stock) "Load cart into Sales" rebuilds the customer and cart so the sale can be finished
+(checkout re-checks stock as usual). The standalone Sales Console "Quick Purchase" button is unchanged.
