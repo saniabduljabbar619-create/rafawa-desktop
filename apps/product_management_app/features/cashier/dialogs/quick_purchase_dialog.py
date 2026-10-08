@@ -38,6 +38,7 @@ GREY = "#6b7280"
 DECISION_QUICK = "quick_purchase"
 DECISION_BACKORDER = "backorder"
 DECISION_AVAILABLE = "sell_available"
+DECISION_SAVE = "save_pending"
 
 
 class QuickPurchaseDialog(QDialog):
@@ -71,7 +72,8 @@ class QuickPurchaseDialog(QDialog):
         self.rb_quick = QRadioButton("Buy the missing items now (Quick Purchase)")
         self.rb_back = QRadioButton("Take payment now, owe the customer the rest (Backorder)")
         self.rb_avail = QRadioButton("Sell only what is in stock")
-        for i, rb in enumerate((self.rb_quick, self.rb_back, self.rb_avail)):
+        self.rb_save = QRadioButton("Supplier has not delivered yet - save as a pending Quick Purchase")
+        for i, rb in enumerate((self.rb_quick, self.rb_save, self.rb_back, self.rb_avail)):
             rb.setStyleSheet("font-size:14px; font-weight:600;")
             self.grp.addButton(rb, i)
             root.addWidget(rb)
@@ -253,7 +255,7 @@ class QuickPurchaseDialog(QDialog):
         return False  # should not happen, but never leave the sentinel selected
 
     def _sync_quick_panel(self):
-        self.panel.setVisible(self.rb_quick.isChecked())
+        self.panel.setVisible(self.rb_quick.isChecked() or self.rb_save.isChecked())
 
     # ------------------------------------------------------------------
     def _accept(self):
@@ -328,7 +330,7 @@ class QuickPurchaseDialog(QDialog):
         unselected = [ln for ln in self.short
                      if not self._select_checks[int(ln["product_id"])].isChecked()]
         return {
-            "decision": DECISION_QUICK,
+            "decision": DECISION_SAVE if self.rb_save.isChecked() else DECISION_QUICK,
             "supplier_party_id": int(self.supplier_cb.currentData()),
             # only SELECTED products are being bought this round
             "selected_short": selected,

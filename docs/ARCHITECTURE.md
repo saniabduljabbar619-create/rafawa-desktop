@@ -156,3 +156,13 @@ opened from Orders -> partner profile -> order, in the same style as the Debt Ce
   rejected quantity and/or price with a required reason. The line, the order total and (optionally, with a stock
   check first) one stock movement are updated together and logged with before/after. Payments are not touched: an
   overpayment is shown ("Overpaid - refund or void a payment"), never hidden.
+
+
+## Quick Purchase orders (status + routing)
+`QuickPurchaseOrderService` (`quick_purchase_orders`, `quick_purchase_lines`, `quick_purchase_routes`, migration 0010) keeps a
+shortfall as a saved order: **draft** (editable, nothing sent) -> **pending** (sent to a supplier per line) -> **completed**
+(every line received or given up) or **cancelled**. Nothing touches stock or the books until *Goods received*, which buys each
+supplier's lines through `QuickPurchaseService.buy_shortfall` (one real Purchase per supplier). If a supplier lacks a line it is
+**routed** to another supplier (history kept per line); the remaining exits are cancel, *sell what's in stock* (gives up the
+unsourced lines; completes the order if part was already received) and delete (refused once goods were received).
+Screens: Cashier > Quick Purchases; the checkout shortfall dialog also offers "save as a pending Quick Purchase".
