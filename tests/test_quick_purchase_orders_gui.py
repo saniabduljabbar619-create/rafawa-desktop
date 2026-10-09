@@ -192,3 +192,64 @@ def test_load_button_only_for_finished_orders_with_a_cart(qapp, boxes):
     assert v.btn_load.isEnabled()
     v.btn_load.click()
     assert loaded and loaded[0]["id"] == oid
+
+
+def _standalone(qapp, product_id, qty, bags=0, cost=9300, supplier=SUPPLIER_ID):
+    from apps.product_management_app.features.cashier.dialogs.standalone_quick_purchase_dialog import (
+        StandaloneQuickPurchaseDialog)
+    dlg = StandaloneQuickPurchaseDialog()
+    meta = next(m for m in dlg._row_meta.values() if m["product_id"] == product_id)
+    meta["chk"].setChecked(True)
+    meta["qty_spin"].setValue(qty)
+    if bags:
+        meta["bags_spin"].setValue(bags)
+    meta["cost_spin"].setValue(cost)
+    assert meta["supplier_cb"].currentData() == supplier or supplier is None   # a real supplier is pre-picked
+    return dlg
+
+
+def test_standalone_dialog_adds_to_cart_with_a_preselected_supplier_and_crop_bags(qapp, boxes):
+    dlg = _standalone(qapp, CROP_ID, 300)
+    assert dlg.btn_ok.text() == "Add to Cart"
+    dlg.btn_ok.click()
+    assert boxes[-1][0] == "warning" and "bags" in boxes[-1][1]       # a crop needs its bag count
+    dlg.table.cellWidget(0, 0)  # (rows exist)
+    meta = next(m for m in dlg._row_meta.values() if m["product_id"] == CROP_ID)
+    meta["bags_spin"].setValue(6)
+    dlg.btn_ok.click()
+    assert dlg.result() == dlg.Accepted
+    assert dlg.new_cart_lines == [{"product_id": CROP_ID, "product_type": "crops", "name": "Maize", "qty": 300.0,
+                                   "bags": 6, "unit_cost": 9300.0}]
+    assert dlg.pending_quick_purchases[0]["short_lines"][0]["qty_bags"] == 6
+
+
+def _cart_with_planned_fertilizer(qapp, monkeypatch):
+    from apps.product_management_app.features.cashier.views import cashier_sales as cs
+    v = _sales_view()
+    v.cart = [cs.CartItem(product_id=FERT_ID, product_type="fertilizer", name="NPK", unit_price=10000,
+                          unit_cost_at_sale=9000, qty_bags=20, total_weight_kg=0)]     # from our own stock
+    v._pending_standalone_qp = [{"supplier_party_id": SUPPLIER_ID, "short_lines": [
+        {"product_id": FERT_ID, "product_type": "fertilizer", "qty_bags": 30, "total_weight_kg": 0.0,
+         "unit_cost": 9300}]}]
+    v.cart.append(cs.CartItem(product_id=FERT_ID, product_type="fertilizer", name="NPK", unit_price=10000,
+                              unit_cost_at_sale=9300, qty_bags=30, total_weight_kg=0))
+    return v
+
+
+@pytest.mark.parametrize("choice,status", [("pending", "pending"), ("draft", "draft")])
+def test_checkout_can_save_standalone_quick_purchase_as_pending_or_draft(qapp, boxes, monkeypatch, choice, status):
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: choice)
+    v._checkout()
+    (o,) = Q.list_orders(status)
+    assert o["lines"][0]["qty_bags"] == 30 and o["lines"][0]["supplier_id"] == SUPPLIER_ID
+    assert [(c["product_id"], c["qty_bags"]) for c in o["cart"]] == [(FERT_ID, 20), (FERT_ID, 30)]   # stock + quick purchase
+    assert v.cart == [] and v._pending_standalone_qp == []
+    assert stock(FERT_ID)[0] == 50                                           # nothing bought yet
+
+
+def test_checkout_back_to_cart_changes_nothing(qapp, boxes, monkeypatch):
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: None)
+    v._checkout()
+    assert Q.list_orders() == [] and len(v.cart) == 2 and v._pending_standalone_qp

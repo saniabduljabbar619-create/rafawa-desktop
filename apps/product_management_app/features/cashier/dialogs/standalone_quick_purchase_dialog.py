@@ -77,9 +77,9 @@ class StandaloneQuickPurchaseDialog(QDialog):
         search_row.addWidget(self.search, 1)
         root.addLayout(search_row)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Buy?", "Product", "Current Stock", "Qty to Buy",
+            ["Buy?", "Product", "Current Stock", "Qty to Buy (bags / kg)", "Bags (crops)",
              "Dealer Cost Each", "Supplier"])
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
@@ -87,9 +87,11 @@ class StandaloneQuickPurchaseDialog(QDialog):
         root.addWidget(self.table, 1)
 
         note = QLabel(
-            "Check the products you want to buy, enter how many and from "
-            "which supplier. Different rows can go to different suppliers - "
-            "each supplier used creates its own purchase record.")
+            "Check the products you want, enter how many and from which "
+            "supplier, then Add to Cart. Nothing is bought yet: you finish at "
+            "checkout - complete the sale, or keep it as a draft or pending "
+            "Quick Purchase. Add what you already have in stock from the "
+            "Sales Console as usual.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#6b7280; font-size:11px;")
         root.addWidget(note)
@@ -97,7 +99,7 @@ class StandaloneQuickPurchaseDialog(QDialog):
         btns = QHBoxLayout()
         btns.addStretch(1)
         self.btn_cancel = QPushButton("Cancel")
-        self.btn_ok = QPushButton("Buy Selected")
+        self.btn_ok = QPushButton("Add to Cart")
         self.btn_ok.setStyleSheet(
             "QPushButton { background:#27ae60; color:#fff; border:none;"
             " border-radius:8px; padding:8px 20px; font-weight:800; }")
@@ -111,6 +113,15 @@ class StandaloneQuickPurchaseDialog(QDialog):
         self._refresh_products()
 
     # ------------------------------------------------------------------
+    def _suppliers(self):
+        """Loaded once per dialog - every row's picker shares it (one query, not one per row)."""
+        if not hasattr(self, "_supplier_cache"):
+            try:
+                self._supplier_cache = list(SupplierProfileService.active_suppliers())
+            except Exception:
+                self._supplier_cache = []
+        return self._supplier_cache
+
     def _refresh_products(self):
         self.table.setRowCount(0)
         self._row_meta.clear()
@@ -165,31 +176,37 @@ class StandaloneQuickPurchaseDialog(QDialog):
             self.table.setCellWidget(i, 3, qty_spin)
             self._row_meta[i]["qty_spin"] = qty_spin
 
+            # Crops are sold by kg but still counted in bags (a purchase / sale line needs both).
+            bags_spin = QSpinBox()
+            bags_spin.setRange(0, 1_000_000)
+            bags_spin.setEnabled(not is_fert)
+            self.table.setCellWidget(i, 4, bags_spin)
+            self._row_meta[i]["bags_spin"] = bags_spin
+
             cost_spin = QDoubleSpinBox()
             cost_spin.setDecimals(2)
             cost_spin.setRange(0.0, 1_000_000_000.0)
             cost_spin.setPrefix(NAIRA)
-            self.table.setCellWidget(i, 4, cost_spin)
+            self.table.setCellWidget(i, 5, cost_spin)
             self._row_meta[i]["cost_spin"] = cost_spin
 
             supplier_cb = QComboBox()
             self._populate_supplier_combo(supplier_cb)
             supplier_cb.currentIndexChanged.connect(
                 lambda idx, cb=supplier_cb: self._on_supplier_pick(cb))
-            self.table.setCellWidget(i, 5, supplier_cb)
+            self.table.setCellWidget(i, 6, supplier_cb)
             self._row_meta[i]["supplier_cb"] = supplier_cb
 
     def _populate_supplier_combo(self, combo: QComboBox):
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("+ New supplier...", NEW_SUPPLIER)
-        try:
-            for sup in SupplierProfileService.active_suppliers():
-                label = f"{sup['name']} ({sup['phone']})" if sup.get("phone") \
-                    else sup["name"]
-                combo.addItem(label, int(sup["id"]))
-        except Exception:
-            pass
+        for sup in self._suppliers():
+            label = f"{sup['name']} ({sup['phone']})" if sup.get("phone") \
+                else sup["name"]
+            combo.addItem(label, int(sup["id"]))
+        if combo.count() > 1:
+            combo.setCurrentIndex(1)       # most recently used supplier first - no hunting through the list
         combo.blockSignals(False)
 
     def _on_supplier_pick(self, combo: QComboBox):
@@ -209,6 +226,7 @@ class StandaloneQuickPurchaseDialog(QDialog):
             QMessageBox.critical(self, "New Supplier", str(e))
             combo.setCurrentIndex(0)
             return
+        self._supplier_cache = list(SupplierProfileService.active_suppliers())
         self._populate_supplier_combo(combo)
         for i in range(combo.count()):
             if combo.itemData(i) == sid:
@@ -231,6 +249,10 @@ class StandaloneQuickPurchaseDialog(QDialog):
             if qty <= 0:
                 QMessageBox.warning(self, "Quick Purchase",
                                     f"Enter a quantity to buy for {meta['name']}.")
+                return
+            if not meta["is_fert"] and meta["bags_spin"].value() <= 0:
+                QMessageBox.warning(self, "Quick Purchase",
+                                    f"Enter the number of bags for {meta['name']}.")
                 return
             if meta["cost_spin"].value() <= 0:
                 QMessageBox.warning(self, "Quick Purchase",
@@ -266,10 +288,11 @@ class StandaloneQuickPurchaseDialog(QDialog):
                 meta = self._row_meta[i]
                 is_fert = meta["is_fert"]
                 qty = meta["qty_spin"].value()
+                bags = int(qty) if is_fert else int(meta["bags_spin"].value())
                 short_lines.append({
                     "product_id": meta["product_id"],
                     "product_type": meta["product_type"],
-                    "qty_bags": int(qty) if is_fert else 0,
+                    "qty_bags": bags,
                     "total_weight_kg": 0.0 if is_fert else float(qty),
                     "unit_cost": float(meta["cost_spin"].value()),
                 })
@@ -286,15 +309,9 @@ class StandaloneQuickPurchaseDialog(QDialog):
                     "product_type": meta["product_type"],
                     "name": meta["name"],
                     "qty": meta["qty_spin"].value(),
+                    "bags": int(meta["qty_spin"].value()) if meta["is_fert"] else int(meta["bags_spin"].value()),
                     "unit_cost": float(meta["cost_spin"].value()),
                 })
 
         self.new_cart_lines = purchased_lines
-        QMessageBox.information(
-            self, "Quick Purchase",
-            f"Added {len(purchased_lines)} item(s) across "
-            f"{len(by_supplier)} supplier(s) to the cart below. They'll "
-            f"actually be bought - and enter stock - only once this sale "
-            f"is completed at checkout.")
-
         self.accept()
