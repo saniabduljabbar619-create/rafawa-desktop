@@ -539,7 +539,7 @@ class CashierSalesView(QWidget):
                 name=str(line["name"]),
                 unit_price=sale_rate,
                 unit_cost_at_sale=float(line["unit_cost"]),
-                qty_bags=int(qty) if is_fert else 0,
+                qty_bags=int(qty) if is_fert else int(line.get("bags") or 0),
                 total_weight_kg=0.0 if is_fert else qty,
             ))
 
@@ -758,6 +758,56 @@ class CashierSalesView(QWidget):
             "sale_lines": QuickPurchaseService.build_sale_lines(av_for_sale, dealer),
         }
 
+    def _ask_quick_purchase_status(self) -> Optional[str]:
+        """The cart holds Quick Purchase items that are not bought yet: how should this be finished?"""
+        n = sum(len(p.get("short_lines", [])) for p in self._pending_standalone_qp)
+        box = QMessageBox(self)
+        box.setWindowTitle("Quick Purchase")
+        box.setText(f"This cart has {n} Quick Purchase item(s) that are not bought yet.\n\nHow do you want to finish?")
+        box.setInformativeText(
+            "Complete now: the suppliers have the goods - buy them and complete the sale.\n"
+            "Save as pending: the order is with the supplier; finish the sale when the goods arrive "
+            "(or route it to another supplier if they do not have them).\n"
+            "Save as draft: keep the plan, send it to the supplier later.")
+        b_now = box.addButton("Complete now", QMessageBox.AcceptRole)
+        b_pend = box.addButton("Save as pending", QMessageBox.ActionRole)
+        b_draft = box.addButton("Save as draft", QMessageBox.ActionRole)
+        box.addButton("Back to cart", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        return {b_now: "complete", b_pend: "pending", b_draft: "draft"}.get(clicked)
+
+    def _save_quick_purchase_order(self, status: str) -> bool:
+        """Keep the planned Quick Purchase (and the whole cart) as a draft / pending order, then clear the cart."""
+        from database.services.quick_purchase_order_service import QuickPurchaseOrderService
+        lines = []
+        for plan in self._pending_standalone_qp:
+            for ln in plan.get("short_lines", []):
+                lines.append({"product_id": int(ln["product_id"]), "qty_bags": int(ln.get("qty_bags") or 0),
+                              "total_weight_kg": float(ln.get("total_weight_kg") or 0),
+                              "unit_cost": float(ln.get("unit_cost") or 0),
+                              "supplier_id": int(plan["supplier_party_id"])})
+        cart = [{"product_id": x.product_id, "product_type": x.product_type, "name": x.name,
+                 "unit_price": x.unit_price, "unit_cost_at_sale": x.unit_cost_at_sale,
+                 "qty_bags": x.qty_bags, "total_weight_kg": x.total_weight_kg} for x in self.cart]
+        walkin = self.walkin_name.text().strip()
+        cust = walkin or (self.customer_cb.currentText() if self.customer_cb.currentData() is not None else "")
+        try:
+            oid = QuickPurchaseOrderService.create(
+                lines, customer_name=cust, send=(status == "pending"), cart=cart,
+                buyer_party_id=self.customer_cb.currentData())
+        except Exception as e:
+            QMessageBox.warning(self, "Quick Purchase", f"Could not save it:\n{e}")
+            return False
+        self.cart = []
+        self._pending_standalone_qp = []
+        self._refresh_cart()
+        QMessageBox.information(
+            self, "Quick Purchase saved",
+            f"Saved as {status} (QP-{oid:05d}). Open Pending Quick Purchases to route it, record the goods as "
+            "received or send it - then load the cart back here to complete the sale.")
+        return True
+
     def _checkout(self):
         if not self.cart:
             QMessageBox.information(self, "Checkout", "Cart is empty.")
@@ -782,6 +832,15 @@ class CashierSalesView(QWidget):
         buyer_party_id = int(cid) if cid is not None else 0
 
         total_revenue = sum(x.subtotal for x in self.cart)
+
+        # Quick Purchase items added with the standalone button: say how this will be finished.
+        if getattr(self, "_pending_standalone_qp", None):
+            status = self._ask_quick_purchase_status()
+            if status is None:
+                return
+            if status in ("pending", "draft"):
+                self._save_quick_purchase_order(status)
+                return
 
         # ---------------------------------------------------------------
         # QUICK PURCHASE INTERLUDE
