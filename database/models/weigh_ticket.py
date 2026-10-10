@@ -29,6 +29,7 @@ class WeighTicket(Base):
 
     party_id = Column(Integer, ForeignKey("parties.id"), nullable=False)
     party_role = Column(String(20), nullable=False, default="supplier")  # customer | supplier
+    walkin_name = Column(String(120), nullable=True)                   # set when the party is the shared walk-in
 
     status = Column(WeighStatusEnum, nullable=False, default="open")
     receipt_type = Column(String(20), nullable=True)                   # full | summary (weigher's choice)

@@ -28,6 +28,7 @@ from database.models.product import Product
 from database.models.user import User
 from database.models.weigh_ticket import WeighRound, WeighTicket, WeighTicketLine
 from database.services.audit_service import AuditService
+from database.services.walkin_account import is_shared_walkin
 from database.session import get_session
 from shared.auth.permissions import (
     INTAKE_ROLES, WEIGH_ROLES, PermissionDenied, current_role, require_role,
@@ -111,12 +112,13 @@ class WeighService:
 
     @staticmethod
     @require_role(*ANY_STAFF)
-    def search_parties(q: str = "", limit: int = 60) -> List[Dict[str, Any]]:
-        """Customers and suppliers, matched on name or phone."""
+    def search_parties(q: str = "", limit: int = 60, customers_only: bool = False) -> List[Dict[str, Any]]:
+        """Customers and suppliers (customers only when asked), matched on name or phone."""
         q = (q or "").strip().lower()
         with get_session() as s:
             query = s.query(Party).filter(Party.is_active.is_(True),
-                                          or_(Party.is_customer.is_(True), Party.is_supplier.is_(True)))
+                                          Party.is_customer.is_(True) if customers_only
+                                          else or_(Party.is_customer.is_(True), Party.is_supplier.is_(True)))
             if q:
                 like = f"%{q}%"
                 query = query.filter(or_(func.lower(Party.display_name).like(like),
@@ -190,21 +192,28 @@ class WeighService:
     # ------------------------------------------------------------------ weigher: ticket + rounds
     @staticmethod
     @require_role(*WEIGH_ROLES)
-    def create_ticket(party_id: int, party_role: str = "supplier") -> int:
+    def create_ticket(party_id: int, party_role: str = "supplier", walkin_name: str = "") -> int:
         party_role = (party_role or "supplier").strip().lower()
         if party_role not in ("customer", "supplier"):
             raise ValueError("party_role must be customer or supplier.")
+        walkin_name = (walkin_name or "").strip()
         with get_session() as s:
-            p = s.get(Party, int(party_id))
-            if p is None or not p.is_active:
-                raise ValueError("Select a registered customer or supplier first.")
+            if is_shared_walkin(party_id, s):                        # the shared walk-in: told apart by name
+                if len(walkin_name) < 2:
+                    raise ValueError("Type the walk-in's name first.")
+                who = walkin_name
+            else:
+                p = s.get(Party, int(party_id))
+                if p is None or not p.is_active:
+                    raise ValueError("Select a registered customer or a walk-in first.")
+                walkin_name, who = None, p.display_name
             t = WeighTicket(party_id=int(party_id), party_role=party_role, status="open",
-                            weigher_user_id=_uid())
+                            weigher_user_id=_uid(), walkin_name=walkin_name)
             s.add(t)
             s.flush()
             t.ticket_no = _ticket_no(t.id)
             AuditService.record("weigh.create", "weigh_ticket", int(t.id),
-                                f"Started {t.ticket_no} for {p.display_name!r}", session=s)
+                                f"Started {t.ticket_no} for {who!r}", session=s)
             s.commit()
             return int(t.id)
 
@@ -420,7 +429,8 @@ class WeighService:
         return {
             "payment": payment,
             "id": int(t.id), "ticket_no": t.ticket_no or _ticket_no(t.id), "status": t.status,
-            "party_id": int(t.party_id), "party_name": t.party.display_name if t.party else "",
+            "party_id": int(t.party_id), "party_name": t.walkin_name or (t.party.display_name if t.party else ""),
+            "walkin_name": t.walkin_name or "",
             "party_phone": (t.party.phone if t.party else "") or "", "party_role": t.party_role,
             "weigher_user_id": int(t.weigher_user_id), "weigher_name": uname(t.weigher_user_id),
             "created_at": t.created_at, "submitted_at": t.submitted_at, "receipt_type": t.receipt_type or "weighing",
@@ -550,6 +560,7 @@ class WeighService:
                 "created_by_user_id": _uid(),
                 "items": items,
                 "note": f"Weigh ticket {t.ticket_no} (weighed by {s.get(User, t.weigher_user_id).username})",
+                "walkin_name": t.walkin_name or "",
                 "auto_flag_supplier": t.party_role == "supplier",
             })
             t.status = "finalized"

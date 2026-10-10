@@ -280,3 +280,22 @@ def test_weigher_can_correct_own_round_and_the_round_limits_still_apply():
     as_role("weigher", WEIGHER_2)
     with pytest.raises(PermissionDenied):
         W.update_round(rnd["id"], weight_kg=1)                  # and never another weigher's
+
+
+def test_walk_in_ticket_needs_a_name_and_finalizes_under_it():
+    from database.models.purchase import Purchase
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    with pytest.raises(ValueError):
+        W.create_ticket(WALKIN_PARTY_ID, "customer")
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Alhaji Sule")
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, 100)
+    _submit(tid, line, price=450)
+    assert W.get_ticket(tid)["party_name"] == "Alhaji Sule"
+    as_role("cashier", CASHIER)
+    res = W.finalize_ticket(tid)
+    with get_session() as s:
+        assert s.get(Purchase, res["purchase_id"]).walkin_name == "Alhaji Sule"
+    assert [p["name"] for p in W.search_parties("", customers_only=True)] == ["Customer One"] or \
+        all(p["kind"] != "supplier" for p in W.search_parties("", customers_only=True))
