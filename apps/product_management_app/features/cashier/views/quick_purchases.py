@@ -8,9 +8,15 @@ from PySide2.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from database.models import Party
 from database.services.quick_purchase_order_service import QuickPurchaseOrderService as Q
+from database.session import get_session
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
+from apps.product_management_app.features.cashier.dialogs.sale_checkout_dialog import SaleCheckoutDialog
+from apps.product_management_app.features.profiling.dialogs.advance_choice_dialog import prompt_and_apply_advance
+from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+from apps.product_management_app.features.profiling.dialogs.sale_payment_dialog import SalePaymentDialog
 from apps.product_management_app.features.cashier.dialogs.quick_purchase_order_dialog import (
     LineEditDialog, QuickPurchaseOrderDialog, RouteDialog,
 )
@@ -238,47 +244,76 @@ class QuickPurchasesView(QWidget):
             self._run(lambda: Q.drop_line(oid, ln["id"], "Given up"), "Drop line")
 
     def confirm(self):
-        """The last checkout page: selling price, supplier payment, customer payment - then to the Payments center."""
+        """
+        Finish the order through the SAME checkout the Sales Console uses: the Checkout dialog (selling price,
+        discount, paid now), then the Sale Payment screen for the customer, then the supplier payment screen.
+        """
         from apps.product_management_app.app_state import state
-        from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
-            QuickPurchaseConfirmDialog)
         oid, o = self._order()
         if not o:
             return
         try:
-            dlg = QuickPurchaseConfirmDialog(self, oid)
+            plan = Q.plan_confirm(oid)
         except Exception as e:
             QMessageBox.warning(self, "Confirm", str(e))
             return
-        if dlg.exec_() != dlg.Accepted:
-            return
-        v = dlg.payload()
-        buyer, walkin = o["buyer_party_id"], ""
-        if dlg.plan["has_sale"] and not buyer:
+        user_id = state.require_user_id()
+        buyer, walkin, label = o["buyer_party_id"], "", o["customer_name"] or "Walk-in"
+        if plan["has_sale"] and not buyer:
             walkin = o["customer_name"] or "Walk-in Customer"
             try:
                 buyer = state.get_or_lazy_create_walkin(walkin, "")
             except Exception as e:
                 QMessageBox.warning(self, "Confirm", f"Could not file the sale under {walkin}:\n{e}")
                 return
+        prices, discounts, paid, method, note = {}, {}, 0.0, "cash", ""
+        if plan["has_sale"]:
+            lines = []
+            for sl in plan["sale_lines"]:
+                if sl["sell_qty"] <= 0:
+                    continue
+                fert = str(sl["product_type"]).lower().startswith("fert")
+                bags = int(sl["sell_qty"]) if fert else max(1, round(sl["bags"] * sl["sell_qty"] / sl["wanted"]))
+                lines.append({"product_id": sl["product_id"], "product_type": sl["product_type"], "name": sl["name"],
+                              "rate": sl["price"], "bags": bags, "kg": 0.0 if fert else sl["sell_qty"],
+                              "subtotal": sl["price"] * sl["sell_qty"]})
+            dlg = SaleCheckoutDialog(self, customer_id=buyer if buyer else None, customer_label=label,
+                                     walkin_name=walkin, total=sum(x["subtotal"] for x in lines), lines=lines)
+            if dlg.exec_() != dlg.Accepted:
+                return
+            pay = dlg.payload()
+            prices, discounts = pay["rate_overrides"], pay["discount_overrides"]
+            paid, method, note = float(pay.get("amount_paid") or 0.0), pay.get("method") or "cash", pay.get("note", "")
         res = self._run(lambda: Q.confirm(
-            oid, v["prices"], v["supplier_paid"], v["customer_paid"], v["supplier_method"], v["customer_method"],
-            buyer_party_id=buyer, walkin_name=walkin), "Confirm")
+            oid, prices, customer_paid=paid, customer_method=method, buyer_party_id=buyer, walkin_name=walkin,
+            discounts=discounts, note=note), "Confirm")
         if not res:
             return
-        msg = []
+        msg = [f"Quick Purchase {o['order_no']} completed."]
         if res["sale_id"]:
-            msg.append(f"Sale {res['reference']}: {res['sale_total']:,.2f} - customer paid {res['customer_paid']:,.2f}"
-                       f", still owes {res['customer_owes']:,.2f}.")
-        msg.append(f"Suppliers: paid {res['paid_to_suppliers']:,.2f}, still owed {res['owed_to_suppliers']:,.2f}.")
+            msg.append(f"Sale {res['reference']}: {res['sale_total']:,.2f} - paid {res['customer_paid']:,.2f}, "
+                       f"still owes {res['customer_owes']:,.2f}.")
         msg += res["warnings"]
         QMessageBox.information(self, "Quick Purchase completed", "\n".join(msg))
-        if res["customer_owes"] > 0.004 or res["owed_to_suppliers"] > 0.004:
-            if QMessageBox.question(self, "Payments center", "Something is still unpaid. Open the Payments center?",
-                                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-                win = self.window()
-                if hasattr(win, "navigate"):
-                    win.navigate("cashier.payments")
+
+        if res["sale_id"] and buyer:                      # customer: exactly the console's payment steps
+            with get_session() as s:
+                party = s.get(Party, int(buyer))
+            if res["customer_owes"] > 0.005:
+                prompt_and_apply_advance(self, party_id=int(buyer), entity_type="sale", entity_id=int(res["sale_id"]),
+                                         balance=float(res["customer_owes"]), user_id=user_id,
+                                         party_name=(party.display_name if party else ""))
+            SalePaymentDialog(party=party, user_id=user_id, parent=self, print_slip=False).exec_()
+        if res["owed_to_suppliers"] > 0.005 and QMessageBox.question(          # suppliers: pay now, or leave owed
+                self, "Suppliers", f"We owe the suppliers {res['owed_to_suppliers']:,.2f}. Pay them now?\n\n"
+                "(Anything left unpaid stays in the Payments center.)",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            with get_session() as s:
+                for sid in sorted({x["supplier_id"] for x in res["supplier_purchases"]}):
+                    PurchasePaymentDialog(party=s.get(Party, int(sid)), user_id=user_id, parent=self,
+                                          print_slip=False).exec_()
+        self.refresh()
+
     def _run(self, fn, title):
         try:
             return fn()

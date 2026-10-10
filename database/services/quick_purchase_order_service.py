@@ -485,7 +485,8 @@ class QuickPurchaseOrderService:
     @require_role(*INTAKE_ROLES)
     def confirm(order_id: int, prices: Dict[int, float], supplier_paid: Optional[Dict[int, float]] = None,
                 customer_paid: float = 0.0, supplier_method: Any = "cash", customer_method: str = "cash",
-                buyer_party_id: Optional[int] = None, walkin_name: str = "") -> Dict[str, Any]:
+                buyer_party_id: Optional[int] = None, walkin_name: str = "",
+                discounts: Optional[Dict[int, float]] = None, note: str = "") -> Dict[str, Any]:
         """
         The last checkout step: buy what is still waiting (one Purchase per supplier), sell the customer
         what can be sold at the prices given, then record what was paid to the suppliers / by the customer.
@@ -502,7 +503,7 @@ class QuickPurchaseOrderService:
                                       "qty_bags": int(ln.qty_bags), "total_weight_kg": _f(ln.total_weight_kg),
                                       "unit_cost": _f(ln.unit_cost)}
                          for ln in o.lines if ln.state == "open"}
-        sale_items, total = [], 0.0
+        sale_items, total, discount_total = [], 0.0, 0.0
         for sl in basis["sale_lines"]:
             if sl["sell_qty"] <= 0:
                 continue
@@ -522,8 +523,16 @@ class QuickPurchaseOrderService:
                 sale_items.append({"product_id": sl["product_id"], "product_type": sl["product_type"],
                                    "qty_bags": int(lot) if fert else bags, "total_weight_kg": 0.0 if fert else lot,
                                    "unit_price": price, "unit_cost": cost})
-            total += price * sell
-        total = round(total, 2)
+            line_total = price * sell
+            disc = max(0.0, min(_f((discounts or {}).get(sl["product_id"])), line_total))
+            if disc:                                  # a line discount is a total: share it across the cost lots
+                lots = [i for i in sale_items if i["product_id"] == sl["product_id"]]
+                for i in lots:
+                    own = i["qty_bags"] if fert else i["total_weight_kg"]
+                    i["discount"] = round(disc * own / sell, 2)
+            total += line_total
+            discount_total += disc
+        total = round(total - discount_total, 2)
 
         bought = []                                           # (supplier_id, line_ids, purchase result)
         for sp in basis["suppliers"]:
@@ -540,7 +549,8 @@ class QuickPurchaseOrderService:
                 sale = SaleService.record({
                     "buyer_party_id": int(buyer_party_id or basis["buyer_party_id"] or 0),
                     "walkin_name": walkin_name or basis["customer_name"], "created_by_user_id": _uid(),
-                    "items": sale_items, "discount": 0.0, "total": total, "note": f"Quick Purchase {order_no}"})
+                    "items": sale_items, "discount": round(discount_total, 2), "total": total,
+                    "note": (note + " - " if note else "") + f"Quick Purchase {order_no}"})
             except Exception:
                 QuickPurchaseOrderService._undo_purchases([r["purchase_id"] for _, _, r in bought])
                 raise
@@ -585,6 +595,8 @@ class QuickPurchaseOrderService:
                 warnings.append(f"Customer payment not recorded: {e}")
         owed_to_suppliers = round(sum(_f(r.get("total_amount")) for _, _, r in bought) - paid_out, 2)
         return {"sale_id": sale_id, "reference": reference, "purchases": [int(r["purchase_id"]) for _, _, r in bought],
+                "supplier_purchases": [{"supplier_id": sid, "purchase_id": int(r["purchase_id"]),
+                                        "amount": _f(r.get("total_amount"))} for sid, _, r in bought],
                 "sale_total": total, "customer_paid": paid_in, "customer_owes": round(total - paid_in, 2) if sale_id else 0.0,
                 "paid_to_suppliers": paid_out, "owed_to_suppliers": owed_to_suppliers, "warnings": warnings}
 
