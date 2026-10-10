@@ -176,7 +176,7 @@ class QuickPurchasesView(QWidget):
         st = o["status"] if o else ""
         waiting = bool(o) and any(ln["state"] == "open" for ln in o["lines"])
         got = bool(o) and any(ln["state"] == "received" for ln in o["lines"])
-        self.btn_edit.setEnabled(st == "draft")
+        self.btn_edit.setEnabled(st in ("draft", "pending"))
         self.btn_send.setEnabled(st == "draft")
         self.btn_receive.setEnabled(st == "pending" and waiting)
         self.btn_route.setEnabled(st == "pending" and waiting)
@@ -329,8 +329,8 @@ class QuickPurchasesView(QWidget):
 
     def edit(self):
         oid, o = self._order()
-        if not o or o["status"] != "draft":
-            QMessageBox.information(self, "Edit", "Select a draft to edit - only drafts can be changed.")
+        if not o or o["status"] not in ("draft", "pending"):
+            QMessageBox.information(self, "Edit", "Select a draft or pending Quick Purchase to edit.")
             return
         QuickPurchaseOrderDialog(self, oid).exec_()
         self.refresh()

@@ -229,3 +229,29 @@ def test_confirm_without_a_cart_only_receives_and_pays_the_suppliers():
     res = Q.confirm(oid, {}, supplier_paid={SUPPLIER_ID: 279000})
     assert res["sale_id"] is None and res["owed_to_suppliers"] == 0 and Q.get(oid)["status"] == "completed"
     assert stock(FERT_ID)[0] == 80
+
+
+def test_a_pending_order_can_be_edited_as_a_whole():
+    oid = Q.create(_lines(), send=True, customer_name="Musa")
+    fert, crop = Q.get(oid)["lines"]
+    Q.receive(oid, [fert["id"]])                                   # the fertilizer already arrived
+    # edit the waiting maize (qty down, new cost, another supplier), add a new product, rename the customer
+    Q.update_pending(oid, [
+        {"id": crop["id"], "product_id": CROP_ID, "total_weight_kg": 200, "qty_bags": 4, "unit_cost": 90,
+         "supplier_id": SUPPLIER_2},
+        {"product_id": FERT_ID, "qty_bags": 5, "unit_cost": 9400, "supplier_id": SUPPLIER_ID}],
+        customer_name="Musa Farms", notes="edited")
+    o = Q.get(oid)
+    assert o["customer_name"] == "Musa Farms" and o["notes"] == "edited" and o["status"] == "pending"
+    by_state = [(x["product"], x["state"], x["qty"], x["unit_cost"], x["supplier"]) for x in o["lines"]]
+    assert by_state == [("NPK", "received", 10, 9500, "Supplier One"), ("Maize", "open", 200, 90, "Supplier Two"),
+                        ("NPK", "open", 5, 9400, "Supplier One")]                # no leftover line was created
+    # a waiting line left out of the editor is given up; the received one is never touched
+    Q.update_pending(oid, [{"id": o["lines"][2]["id"], "product_id": FERT_ID, "qty_bags": 5, "unit_cost": 9400,
+                            "supplier_id": SUPPLIER_ID}])
+    o = Q.get(oid)
+    assert [x["state"] for x in o["lines"]] == ["received", "dropped", "open"]
+    with pytest.raises(ValueError, match="at least one"):
+        Q.update_pending(oid, [])
+    with pytest.raises(ValueError, match="only possible when it is pending"):
+        Q.update_pending(Q.create(_lines()), [{"product_id": FERT_ID, "qty_bags": 1}])     # a draft uses update_draft

@@ -246,18 +246,30 @@ class QuickPurchaseOrderDialog(QDialog):
         self.product.currentIndexChanged.connect(self._product_changed)
         self.btn_add.clicked.connect(self._add_line)
         self.btn_remove.clicked.connect(self._remove_line)
+        self.table.cellDoubleClicked.connect(self._edit_line)
         self.btn_cancel.clicked.connect(self.reject)
         self.btn_draft.clicked.connect(lambda: self._save(send=False))
         self.btn_send.clicked.connect(lambda: self._save(send=True))
         self._product_changed()
 
+        self.pending = False
         if order_id:
             o = QuickPurchaseOrderService.get(order_id)
+            self.pending = o["status"] == "pending"
             self.customer.setText(o["customer_name"])
             self.notes.setText(o["notes"])
             for ln in o["lines"]:
-                self.lines.append({k: ln[k] for k in ("product_id", "qty_bags", "total_weight_kg", "unit_cost",
+                if self.pending and ln["state"] != "open":
+                    continue                       # received / given-up lines are history, not editable
+                self.lines.append({k: ln[k] for k in ("id", "product_id", "qty_bags", "total_weight_kg", "unit_cost",
+                                                      "supplier_id", "product", "supplier", "unit", "qty")}
+                                  if self.pending else
+                                  {k: ln[k] for k in ("product_id", "qty_bags", "total_weight_kg", "unit_cost",
                                                       "supplier_id", "product", "supplier", "unit", "qty")})
+        if self.pending:                          # a pending order is already with the supplier: one Save button
+            self.setWindowTitle("Edit Pending Quick Purchase")
+            self.btn_draft.setVisible(False)
+            self.btn_send.setText("Save Changes")
         self._refresh()
 
     def _fert(self) -> bool:
@@ -290,6 +302,25 @@ class QuickPurchaseOrderDialog(QDialog):
         self.kg.setValue(0)
         self._refresh()
 
+    def _edit_line(self, row: int, _col: int = 0):
+        """Double-click a row to change its quantity, cost or supplier."""
+        if not 0 <= row < len(self.lines):
+            return
+        ln = self.lines[row]
+        dlg = LineEditDialog(self, dict(ln))
+        if dlg.exec_() != dlg.Accepted:
+            return
+        v = dlg.values()
+        fert = ln["unit"] == "bag"
+        ln["qty"] = int(v["qty"]) if fert else v["qty"]
+        ln["qty_bags"] = int(v["qty"]) if fert else ln["qty_bags"]
+        ln["total_weight_kg"] = 0.0 if fert else v["qty"]
+        ln["unit_cost"] = v["unit_cost"]
+        sid = v["supplier_id"]
+        ln["supplier_id"] = sid or None
+        ln["supplier"] = dlg.supplier.currentText() if sid else ""
+        self._refresh()
+
     def _remove_line(self):
         r = self.table.currentRow()
         if 0 <= r < len(self.lines):
@@ -309,9 +340,14 @@ class QuickPurchaseOrderDialog(QDialog):
 
     def _save(self, send: bool):
         try:
-            payload = [{k: ln[k] for k in ("product_id", "qty_bags", "total_weight_kg", "unit_cost", "supplier_id")}
-                       for ln in self.lines]
-            if self.order_id:
+            keys = ("product_id", "qty_bags", "total_weight_kg", "unit_cost", "supplier_id") + (
+                ("id",) if self.pending else ())
+            payload = [{k: ln.get(k) for k in keys} for ln in self.lines]
+            if self.order_id and self.pending:
+                QuickPurchaseOrderService.update_pending(self.order_id, payload, self.customer.text(),
+                                                         self.notes.text())
+                self.saved_id = self.order_id
+            elif self.order_id:
                 QuickPurchaseOrderService.update_draft(self.order_id, payload, self.customer.text(),
                                                        self.notes.text())
                 self.saved_id = self.order_id
