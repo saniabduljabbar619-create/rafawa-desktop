@@ -12,7 +12,7 @@ from shared.uix.widgets.cards import Segmented
 class RegisterPartyDialog(QDialog):
     """Register a new customer or supplier. After accept(), `.party` holds the saved party."""
 
-    def __init__(self, parent=None, kind: str = "supplier"):
+    def __init__(self, parent=None, kind: str = "supplier", lock_kind: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Register Customer / Supplier")
         self.setModal(True)
@@ -29,6 +29,7 @@ class RegisterPartyDialog(QDialog):
         self.kind = Segmented([("supplier", "Supplier"), ("customer", "Customer")])
         self.kind.set_key(kind if kind in ("supplier", "customer") else "supplier")
         root.addWidget(self.kind)
+        self.kind.setVisible(not lock_kind)         # the weighing screen only registers customers
 
         form = QFormLayout()
         form.setSpacing(10)

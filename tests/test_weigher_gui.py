@@ -46,9 +46,9 @@ def _type_round(v, bags, kg):
 
 
 def _pick(v, name):
-    for i in range(v.party_list.count()):
-        if name in v.party_list.item(i).text():
-            v.party_list.setCurrentRow(i)
+    for i in range(v.party_cb.count()):
+        if name in v.party_cb.itemText(i):
+            v.party_cb.setCurrentIndex(i)
             return
     raise AssertionError(name)
 
@@ -56,8 +56,7 @@ def _pick(v, name):
 def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     v = _station()
     assert not v.btn_start.isEnabled()
-    _pick(v, "Supplier One")
-    v.kind_seg.set_key("supplier")
+    _pick(v, "Customer One")
     v.start_ticket()
     assert v.stack.currentIndex() == 1 and v.ticket_id
 
@@ -125,7 +124,7 @@ def test_price_step_leaves_a_product_without_a_usual_price_empty_and_amber(qapp,
     with get_session() as sess:
         sess.get(Product, CROP_ID).default_cost_rate = None
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     v.product_cb.setCurrentIndex(1); v.add_line()
     _type_round(v, "1", "100")
     v.btn_finish.click()
@@ -140,7 +139,7 @@ def test_price_step_fills_the_usual_price_and_back_returns_to_weighing(qapp, box
     with get_session() as sess:
         sess.get(Product, CROP_ID).default_cost_rate = 420
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     v.product_cb.setCurrentIndex(1); v.add_line()
     _type_round(v, "2", "100")
     v.btn_finish.click()
@@ -157,7 +156,7 @@ def test_price_step_fills_the_usual_price_and_back_returns_to_weighing(qapp, box
 
 def test_station_resume_and_cancel(qapp, boxes):
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     tid = v.ticket_id
     v.product_cb.setCurrentIndex(1); v.add_line()
     _type_round(v, "1", "50")
@@ -172,7 +171,7 @@ def test_station_resume_and_cancel(qapp, boxes):
 
 def test_finish_needs_a_round_and_oversized_rounds_are_refused(qapp, boxes):
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     v.product_cb.setCurrentIndex(1); v.add_line()
     v.btn_finish.click()
     assert v.stack.currentIndex() == 1 and any("at least one round" in m for _k, m in boxes)
@@ -190,7 +189,6 @@ def test_register_new_supplier_from_the_station(qapp, boxes):
     d._save()
     assert d.party["kind"] == "supplier" and d.result() == d.Accepted
     v._load_party_list(select_id=d.party["id"])
-    assert v.party_list.currentItem().text().startswith("Musa Farms")
     d2 = RegisterPartyDialog(v)
     d2.name.setText("Dup"); d2.phone.setText("08031234567")
     d2._save()
@@ -417,7 +415,7 @@ def test_parse_bags_and_kg():
 def test_a_half_typed_row_records_nothing_until_both_cells_are_filled(qapp, boxes):
     from PySide2.QtWidgets import QApplication
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     v.product_cb.setCurrentIndex(1); v.add_line()
     t = v.rounds_table
     t.item(0, 1).setText("3")
@@ -434,7 +432,7 @@ def test_a_half_typed_row_records_nothing_until_both_cells_are_filled(qapp, boxe
 def test_a_recorded_round_can_be_corrected_in_the_table(qapp, boxes):
     from PySide2.QtWidgets import QApplication
     v = _station()
-    _pick(v, "Supplier One"); v.start_ticket()
+    _pick(v, "Customer One"); v.start_ticket()
     v.product_cb.setCurrentIndex(1); v.add_line()
     _type_round(v, "3", "245")
     v.rounds_table.item(0, 2).setText("250")                      # misread the scale
@@ -445,3 +443,25 @@ def test_a_recorded_round_can_be_corrected_in_the_table(qapp, boxes):
     QApplication.processEvents(); QApplication.processEvents()
     assert W.get_ticket(v.ticket_id)["total_bags"] == 3
     assert v.rounds_table.item(0, 1).text() == "3 bags"
+
+
+def test_party_dropdown_lists_customers_and_walk_in_only(qapp, boxes):
+    v = _station()
+    items = [v.party_cb.itemText(i) for i in range(v.party_cb.count())]
+    assert items[0].startswith("Walk-in") and any("Customer One" in t for t in items)
+    assert not any("Supplier One" in t for t in items)
+    assert not hasattr(v, "kind_seg")
+    assert not v.btn_start.isEnabled() and not v.walkin_name.isVisibleTo(v)
+
+
+def test_walk_in_needs_a_name_and_the_ticket_carries_it(qapp, boxes):
+    v = _station()
+    v.party_cb.setCurrentIndex(0)                                  # Walk-in
+    assert v.walkin_name.isVisibleTo(v) and v.btn_start.isEnabled()
+    v.start_ticket()
+    assert any("name" in m.lower() for _k, m in boxes) and v.stack.currentIndex() == 0
+    v.walkin_name.setText("Alhaji Sule")
+    v.start_ticket()
+    t = W.get_ticket(v.ticket_id)
+    assert v.stack.currentIndex() == 1 and t["party_name"] == "Alhaji Sule" and t["walkin_name"] == "Alhaji Sule"
+    assert t["party_role"] == "customer"
