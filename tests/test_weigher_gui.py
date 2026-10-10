@@ -99,7 +99,7 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     v.btn_price_next.click()                                       # price saved on the ticket -> the receipt step
     assert v.stack.currentIndex() == 3 and W.get_ticket(v.ticket_id)["total_amount"] == 405.5 * 450
     # the two weigher receipts: Option 1 (weights only) is the default, Option 2 adds price, amount and payment
-    assert v.receipt_seg.key() == "weighing" and "WEIGHING RECEIPT (OPTION 1)" in v.preview.toPlainText()
+    assert v.receipt_seg.key() == "weighing" and "GRAND TOTAL BAGS" in v.preview.toPlainText() and "OPTION 1" not in v.preview.toPlainText()
     assert "GRAND TOTAL BAGS" in v.preview.toPlainText() and "Price/KG" not in v.preview.toPlainText()
     v.receipt_seg.set_key("value"); v._render_preview()
     text = v.preview.toPlainText()
@@ -115,7 +115,7 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     assert len(printed) == 1 and "FULL VALUE RECEIPT (OPTION 2)" in printed[0] and "Customer Signature" in printed[0]
     v.receipt_seg.set_key("weighing")
     v.btn_print.click()
-    assert len(printed) == 2 and "WEIGHING RECEIPT (OPTION 1)" in printed[1] and "Weigher Signature" in printed[1]
+    assert len(printed) == 2 and "GRAND TOTAL BAGS" in printed[1] and "Weigher Signature" in printed[1]
     v.btn_new.click()
     assert v.stack.currentIndex() == 0 and v.ticket_id == 0
 
@@ -221,7 +221,7 @@ def test_finalize_list_shows_every_weighing_with_amounts_and_the_admin_queue_doe
     assert printed == []
     mine.btn_print.click()                                                       # Option 1
     mine.btn_print_value.click()                                                 # Option 2
-    assert len(printed) == 2 and "WEIGHING RECEIPT (OPTION 1)" in printed[0] and "TOTAL AMOUNT" not in printed[0]
+    assert len(printed) == 2 and "GRAND TOTAL BAGS" in printed[0] and "TOTAL AMOUNT" not in printed[0]
     assert "FULL VALUE RECEIPT (OPTION 2)" in printed[1] and "TOTAL AMOUNT" in printed[1]
     mine.table.selectRow(0)                                                      # the open one: nothing to print yet
     assert not mine.btn_print.isEnabled() and not mine.btn_print_value.isEnabled() and open_tid
