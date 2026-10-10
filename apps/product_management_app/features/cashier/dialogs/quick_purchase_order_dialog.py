@@ -17,10 +17,14 @@ NEW = "__new__"
 NAIRA = "₦"
 
 
-def fill_supplier_combo(combo: QComboBox, exclude: Optional[int] = None, select: Optional[int] = None) -> None:
+def fill_supplier_combo(combo: QComboBox, exclude: Optional[int] = None, select: Optional[int] = None,
+                        none_text: Optional[str] = None, none_data=None) -> None:
+    if none_text is None:
+        none_text, none_data = getattr(combo, "_none", ("Pick a supplier...", None))
+    combo._none = (none_text, none_data)
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem("Pick a supplier...", None)
+    combo.addItem(none_text, none_data)
     for sup in SupplierProfileService.active_suppliers():
         if exclude is not None and int(sup["id"]) == int(exclude):
             continue
@@ -98,6 +102,70 @@ class RouteDialog(QDialog):
     def values(self) -> Dict[str, Any]:
         return {"supplier_id": int(self.supplier.currentData()), "note": self.note.text().strip(),
                 "unit_cost": float(self.cost.value()) or None}
+
+
+class LineEditDialog(QDialog):
+    """Fix one line: what the supplier really has, the price they quoted, or a different supplier."""
+
+    def __init__(self, parent, line: Dict[str, Any]):
+        super().__init__(parent)
+        self.line = line
+        self.setWindowTitle(f"Edit line - {line['product']}")
+        self.setMinimumWidth(480)
+        fert = line["unit"] == "bag"
+        v = QVBoxLayout(self)
+        asked = f"{line['qty']:g} {line['unit']}"
+        head = QLabel(f"{line['product']} - asked: {asked} @ {line['unit_cost']:,.2f} from "
+                      f"{line['supplier'] or 'nobody yet'}")
+        head.setWordWrap(True)
+        v.addWidget(head)
+        form = QFormLayout()
+        if fert:
+            self.qty = QSpinBox()
+            self.qty.setRange(1, 1_000_000)
+            self.qty.setValue(int(line["qty"]))
+        else:
+            self.qty = QDoubleSpinBox()
+            self.qty.setRange(0.01, 1_000_000_000)
+            self.qty.setDecimals(2)
+            self.qty.setValue(float(line["qty"]))
+        self.qty.setSuffix(f" {line['unit']}")
+        self.cost = QDoubleSpinBox()
+        self.cost.setRange(0.01, 99_999_999)
+        self.cost.setDecimals(2)
+        self.cost.setPrefix(NAIRA)
+        self.cost.setValue(float(line["unit_cost"]) or 0.01)
+        self.supplier = QComboBox()
+        fill_supplier_combo(self.supplier, none_text="Not assigned yet", none_data=0,
+                            select=line["supplier_id"])
+        self.supplier.currentIndexChanged.connect(lambda _i: on_supplier_pick(self, self.supplier))
+        self.note = QLineEdit()
+        self.note.setPlaceholderText("Optional - e.g. 'no stock', 'price changed'")
+        form.addRow("Quantity available:", self.qty)
+        form.addRow("Dealer cost each:", self.cost)
+        form.addRow("Supplier:", self.supplier)
+        form.addRow("Note:", self.note)
+        v.addLayout(form)
+        hint = QLabel("Supplier only has part of it? Lower the quantity - the rest stays as its own line to give "
+                      "to another supplier (or drop). Another supplier has it, or a different price? Change the "
+                      "supplier and cost here.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6b7280; font-size:11px;")
+        v.addWidget(hint)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel, self.btn_ok = QPushButton("Cancel"), QPushButton("Save line")
+        self.btn_ok.setObjectName("PrimaryButton")
+        cancel.clicked.connect(self.reject)
+        self.btn_ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(self.btn_ok)
+        v.addLayout(row)
+
+    def values(self) -> Dict[str, Any]:
+        sid = self.supplier.currentData()
+        return {"qty": float(self.qty.value()), "unit_cost": float(self.cost.value()),
+                "supplier_id": sid if isinstance(sid, int) else None, "note": self.note.text().strip()}
 
 
 class QuickPurchaseOrderDialog(QDialog):

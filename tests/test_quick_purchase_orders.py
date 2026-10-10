@@ -127,3 +127,105 @@ def test_list_filters_by_status_and_staff_only():
     set_session(UserSession(user_id=2, username="w", role="weigher"))
     with pytest.raises(PermissionDenied):
         Q.list_orders()
+
+
+# ---------------------------------------------------------------- editing lines, confirming
+def _cart(fert=80):
+    return [{"product_id": FERT_ID, "product_type": "fertilizer", "name": "NPK", "unit_price": 10000,
+             "unit_cost_at_sale": 9000, "qty_bags": fert, "total_weight_kg": 0}]
+
+
+def _sourcing(bags=30, supplier=SUPPLIER_ID, cart=None):
+    """80 bags wanted, 50 in stock, 30 being sourced."""
+    return Q.create([{"product_id": FERT_ID, "qty_bags": bags, "unit_cost": 9300, "supplier_id": supplier}],
+                    send=True, cart=_cart() if cart is None else cart)
+
+
+def test_editing_a_line_keeps_the_rest_unassigned_until_routed_or_dropped():
+    oid = _sourcing()
+    (ln,) = Q.get(oid)["lines"]
+    Q.edit_line(oid, ln["id"], qty=20, unit_cost=9400)
+    a, rest = Q.get(oid)["lines"]
+    assert (a["qty_bags"], a["unit_cost"], a["supplier_id"]) == (20, 9400, SUPPLIER_ID)
+    assert (rest["qty_bags"], rest["assigned"], rest["state"]) == (10, False, "open")
+    with pytest.raises(ValueError, match="Assign a supplier"):
+        Q.plan_confirm(oid)
+    Q.edit_line(oid, rest["id"], supplier_id=SUPPLIER_2, unit_cost=9500)       # another supplier has the rest
+    assert Q.get(oid)["lines"][1]["routes"][0]["supplier"] == "Supplier Two"
+    Q.edit_line(oid, a["id"], supplier_id=0)                                   # first one: not available after all
+    assert not Q.get(oid)["lines"][0]["assigned"] and Q.get(oid)["lines"][0]["routes"][0]["outcome"] == "unavailable"
+    Q.drop_line(oid, a["id"], "nobody has it")
+    assert Q.get(oid)["lines"][0]["state"] == "dropped" and Q.get(oid)["status"] == "pending"
+    with pytest.raises(ValueError, match="still waiting"):
+        Q.edit_line(oid, a["id"], qty=5)
+    Q.drop_line(oid, rest["id"])                                               # nothing left: order closes
+    assert Q.get(oid)["status"] == "cancelled"
+
+
+def test_receive_skips_lines_without_a_supplier():
+    oid = _sourcing()
+    (ln,) = Q.get(oid)["lines"]
+    Q.edit_line(oid, ln["id"], qty=10)
+    Q.receive(oid)
+    o = Q.get(oid)
+    assert [x["state"] for x in o["lines"]] == ["received", "open"] and o["status"] == "pending"
+    assert stock(FERT_ID)[0] == 60
+
+
+def test_confirm_buys_sells_and_records_the_payments():
+    from database.models.payment import Payment
+    oid = _sourcing()
+    plan = Q.plan_confirm(oid)
+    (sl,) = plan["sale_lines"]
+    assert (sl["wanted"], sl["have"], sl["incoming"], sl["sell_qty"], sl["short"]) == (80, 50, 30, 80, 0)
+    assert plan["suppliers"][0]["amount"] == 30 * 9300 and plan["open_total"] == 279000
+    res = Q.confirm(oid, {FERT_ID: 10500}, supplier_paid={SUPPLIER_ID: 100000}, customer_paid=500000,
+                    buyer_party_id=1)
+    assert res["sale_total"] == 80 * 10500 and res["customer_owes"] == 340000
+    assert res["paid_to_suppliers"] == 100000 and res["owed_to_suppliers"] == 179000 and not res["warnings"]
+    o = Q.get(oid)
+    assert o["status"] == "completed" and o["sale_id"] == res["sale_id"]
+    assert stock(FERT_ID)[0] == 0                                              # 50 + 30 bought - 80 sold
+    with get_session() as s:
+        pays = {(p.entity_type, p.direction): float(p.amount) for p in s.query(Payment)}
+        assert pays == {("purchase", "out"): 100000.0, ("sale", "in"): 500000.0}
+        from database.models.sale_item import SaleItem
+        costs = sorted((float(i.unit_cost_snapshot), i.qty_bags) for i in s.query(SaleItem))
+        assert costs == [(9000.0, 50), (9300.0, 30)]      # from-stock lot at book cost, bought lot at the dealer's
+    with pytest.raises(ValueError, match="already finished"):
+        Q.confirm(oid, {FERT_ID: 10500})
+
+
+def test_confirm_sells_only_what_could_be_sourced():
+    oid = _sourcing(bags=30)
+    (ln,) = Q.get(oid)["lines"]
+    Q.edit_line(oid, ln["id"], qty=10)
+    Q.drop_line(oid, Q.get(oid)["lines"][1]["id"])                            # the other 20 bags cannot be had
+    (sl,) = Q.plan_confirm(oid)["sale_lines"]
+    assert (sl["sell_qty"], sl["short"], sl["qp_part"], sl["stock_part"]) == (60, 20, 10, 50)
+    res = Q.confirm(oid, {FERT_ID: 10000}, buyer_party_id=1)
+    assert res["sale_total"] == 600000 and res["customer_owes"] == 600000 and res["owed_to_suppliers"] == 93000
+    assert stock(FERT_ID)[0] == 0
+
+
+def test_confirm_with_a_missing_price_buys_nothing_and_a_failed_sale_undoes_the_purchases(monkeypatch):
+    from database.services.sales_service import SaleService
+    oid = _sourcing()
+    with pytest.raises(ValueError, match="selling price"):
+        Q.confirm(oid, {}, buyer_party_id=1)
+    assert stock(FERT_ID)[0] == 50 and Q.get(oid)["status"] == "pending"
+    monkeypatch.setattr(SaleService, "record", staticmethod(lambda payload: (_ for _ in ()).throw(ValueError("boom"))))
+    with pytest.raises(ValueError, match="boom"):
+        Q.confirm(oid, {FERT_ID: 10000}, buyer_party_id=1)                    # the sale fails after buying
+    assert stock(FERT_ID)[0] == 50 and Q.get(oid)["status"] == "pending"
+    with get_session() as s:
+        assert s.query(Purchase).count() == 0
+
+
+def test_confirm_without_a_cart_only_receives_and_pays_the_suppliers():
+    oid = _sourcing(cart=[])
+    plan = Q.plan_confirm(oid)
+    assert not plan["has_sale"]
+    res = Q.confirm(oid, {}, supplier_paid={SUPPLIER_ID: 279000})
+    assert res["sale_id"] is None and res["owed_to_suppliers"] == 0 and Q.get(oid)["status"] == "completed"
+    assert stock(FERT_ID)[0] == 80

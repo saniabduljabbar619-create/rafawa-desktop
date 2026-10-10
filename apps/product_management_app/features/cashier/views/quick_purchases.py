@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide2.QtCore import Qt
+from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -11,12 +12,13 @@ from database.services.quick_purchase_order_service import QuickPurchaseOrderSer
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.cashier.dialogs.quick_purchase_order_dialog import (
-    QuickPurchaseOrderDialog, RouteDialog,
+    LineEditDialog, QuickPurchaseOrderDialog, RouteDialog,
 )
 
 FILTERS = [("all", "All"), ("draft", "Draft"), ("pending", "Pending"), ("completed", "Completed"),
            ("cancelled", "Cancelled")]
 STATE_TEXT = {"open": "waiting", "received": "received", "dropped": "given up"}
+NEEDS_SUPPLIER = "needs a supplier"
 COLS = ["No.", "Status", "For", "Products", "Supplier(s)", "Total", "Created"]
 
 
@@ -63,6 +65,10 @@ class QuickPurchasesView(QWidget):
         self.btn_receive = QPushButton("Goods received")
         self.btn_receive.setObjectName("PrimaryButton")
         self.btn_route = QPushButton("Route to another supplier")
+        self.btn_line = QPushButton("Edit line")
+        self.btn_drop = QPushButton("Drop line")
+        self.btn_confirm = QPushButton("Confirm  \u2192")
+        self.btn_confirm.setObjectName("PrimaryButton")
         self.btn_stock = QPushButton("Sell what's in stock")
         self.btn_cancel = QPushButton("Cancel order")
         self.btn_delete = QPushButton("Delete")
@@ -70,10 +76,11 @@ class QuickPurchasesView(QWidget):
         self.btn_load = QPushButton("Load cart into Sales")
         self.btn_load.setObjectName("PrimaryButton")
         self.btn_load.setVisible(load_callback is not None)
-        for b in (self.btn_edit, self.btn_send, self.btn_receive, self.btn_route, self.btn_stock, self.btn_cancel,
-                  self.btn_delete, self.btn_load):
+        for b in (self.btn_edit, self.btn_send, self.btn_line, self.btn_drop, self.btn_route, self.btn_receive,
+                  self.btn_stock, self.btn_cancel, self.btn_delete, self.btn_load):
             act.addWidget(b)
         act.addStretch(1)
+        act.addWidget(self.btn_confirm)
         root.addLayout(act)
 
         self.table = QTableWidget(0, len(COLS))
@@ -104,6 +111,11 @@ class QuickPurchasesView(QWidget):
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_delete.clicked.connect(self.delete)
         self.btn_load.clicked.connect(self.load_cart)
+        self.btn_line.clicked.connect(self.edit_line)
+        self.btn_drop.clicked.connect(self.drop_line)
+        self.btn_confirm.clicked.connect(self.confirm)
+        self.detail.cellDoubleClicked.connect(lambda *_a: self.edit_line())
+        self.detail.itemSelectionChanged.connect(self._line_buttons)
         self.table.itemSelectionChanged.connect(self._selection)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit())
         self._rows = {}
@@ -129,7 +141,8 @@ class QuickPurchasesView(QWidget):
         for i, o in enumerate(rows):
             live = [ln for ln in o["lines"] if ln["state"] != "dropped"]
             suppliers = sorted({ln["supplier"] for ln in live if ln["supplier"]})
-            vals = [o["order_no"], o["status"].title(), o["customer_name"] or "-",
+            vals = [o["order_no"], o["status"].title() + (" - sold" if o["sale_id"] else ""),
+                    o["customer_name"] or "-",
                     ", ".join(ln["product"] for ln in live) or "-", ", ".join(suppliers) or "-",
                     f"{o['total']:,.2f}", o["created_at"].strftime("%d/%m/%Y %H:%M") if o["created_at"] else ""]
             for c, v in enumerate(vals):
@@ -165,18 +178,105 @@ class QuickPurchasesView(QWidget):
         self.btn_cancel.setEnabled(st in ("draft", "pending") and not got)
         self.btn_delete.setEnabled(bool(o) and st != "completed" and not got)
         self.btn_load.setEnabled(bool(o and o["cart"]) and st in ("completed", "cancelled"))
+        self.btn_confirm.setEnabled(bool(o) and not o["sale_id"] and (
+            st in ("draft", "pending") or (st == "completed" and bool(o["cart"]))))
         self.detail.setRowCount(0)
         if not o:
+            self._line_buttons()
             return
         self.detail.setRowCount(len(o["lines"]))
         for i, ln in enumerate(o["lines"]):
             hist = " > ".join(f"{r['supplier']} ({r['outcome']})" for r in ln["routes"])
+            waiting = ln["state"] == "open"
             vals = [ln["product"], f"{ln['qty']:g} {ln['unit']}", f"{ln['unit_cost']:,.2f}", f"{ln['amount']:,.2f}",
-                    ln["supplier"] or "-", STATE_TEXT.get(ln["state"], ln["state"]), hist]
+                    ln["supplier"] or "-", NEEDS_SUPPLIER if waiting and not ln["assigned"]
+                    else STATE_TEXT.get(ln["state"], ln["state"]), hist]
             for c, v in enumerate(vals):
-                self.detail.setItem(i, c, QTableWidgetItem(v))
+                it = QTableWidgetItem(v)
+                if waiting and not ln["assigned"]:
+                    it.setBackground(QColor("#fff7ed"))
+                self.detail.setItem(i, c, it)
+        self._line_buttons()
+
+    def _line(self):
+        """(order id, order, the highlighted line if it is still waiting for goods)."""
+        oid, o = self._order()
+        r = self.detail.currentRow()
+        ln = o["lines"][r] if o and 0 <= r < len(o["lines"]) else None
+        return oid, o, (ln if ln and ln["state"] == "open" else None)
+
+    def _line_buttons(self):
+        _oid, o, ln = self._line()
+        ok = bool(o and ln and o["status"] in ("draft", "pending"))
+        self.btn_line.setEnabled(ok)
+        self.btn_drop.setEnabled(ok)
 
     # ------------------------------------------------------------------ actions
+    def edit_line(self):
+        oid, o, ln = self._line()
+        if not ln or o["status"] not in ("draft", "pending"):
+            QMessageBox.information(self, "Edit line", "Select a line that is still waiting for goods.")
+            return
+        dlg = LineEditDialog(self, ln)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        v = dlg.values()
+        self._run(lambda: Q.edit_line(oid, ln["id"], qty=v["qty"], unit_cost=v["unit_cost"],
+                                      supplier_id=v["supplier_id"] if v["supplier_id"] is not None else 0,
+                                      note=v["note"]), "Edit line")
+
+    def drop_line(self):
+        oid, o, ln = self._line()
+        if not ln:
+            QMessageBox.information(self, "Drop line", "Select a line that is still waiting for goods.")
+            return
+        ok = QMessageBox.question(self, "Drop line", f"Give up {ln['qty']:g} {ln['unit']} of {ln['product']}? "
+                                  "Nothing is bought for it.", QMessageBox.Yes | QMessageBox.No)
+        if ok == QMessageBox.Yes:
+            self._run(lambda: Q.drop_line(oid, ln["id"], "Given up"), "Drop line")
+
+    def confirm(self):
+        """The last checkout page: selling price, supplier payment, customer payment - then to the Payments center."""
+        from apps.product_management_app.app_state import state
+        from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
+            QuickPurchaseConfirmDialog)
+        oid, o = self._order()
+        if not o:
+            return
+        try:
+            dlg = QuickPurchaseConfirmDialog(self, oid)
+        except Exception as e:
+            QMessageBox.warning(self, "Confirm", str(e))
+            return
+        if dlg.exec_() != dlg.Accepted:
+            return
+        v = dlg.payload()
+        buyer, walkin = o["buyer_party_id"], ""
+        if dlg.plan["has_sale"] and not buyer:
+            walkin = o["customer_name"] or "Walk-in Customer"
+            try:
+                buyer = state.get_or_lazy_create_walkin(walkin, "")
+            except Exception as e:
+                QMessageBox.warning(self, "Confirm", f"Could not file the sale under {walkin}:\n{e}")
+                return
+        res = self._run(lambda: Q.confirm(
+            oid, v["prices"], v["supplier_paid"], v["customer_paid"], v["supplier_method"], v["customer_method"],
+            buyer_party_id=buyer, walkin_name=walkin), "Confirm")
+        if not res:
+            return
+        msg = []
+        if res["sale_id"]:
+            msg.append(f"Sale {res['reference']}: {res['sale_total']:,.2f} - customer paid {res['customer_paid']:,.2f}"
+                       f", still owes {res['customer_owes']:,.2f}.")
+        msg.append(f"Suppliers: paid {res['paid_to_suppliers']:,.2f}, still owed {res['owed_to_suppliers']:,.2f}.")
+        msg += res["warnings"]
+        QMessageBox.information(self, "Quick Purchase completed", "\n".join(msg))
+        if res["customer_owes"] > 0.004 or res["owed_to_suppliers"] > 0.004:
+            if QMessageBox.question(self, "Payments center", "Something is still unpaid. Open the Payments center?",
+                                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                win = self.window()
+                if hasattr(win, "navigate"):
+                    win.navigate("cashier.payments")
     def _run(self, fn, title):
         try:
             return fn()

@@ -35,6 +35,7 @@ class QuickPurchaseOrder(Base):
     customer_name = Column(String(120), nullable=True)                  # who the goods are being found for
     buyer_party_id = Column(Integer, ForeignKey("parties.id"), nullable=True)   # registered buyer, if any
     cart_json = Column(Text, nullable=True)       # the checkout cart this was raised for, to rebuild the sale
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)   # the sale made when the order was confirmed
     notes = Column(Text, nullable=True)
     close_reason = Column(String(255), nullable=True)                   # why cancelled / closed early
 

@@ -176,3 +176,11 @@ Standalone Sales Console "Quick Purchase": pick the missing products (supplier p
 **Add to Cart** - nothing is bought yet; in-stock items are added from the console as usual. At **Finalize Sale** the cashier chooses
 *Complete now* (buy + sell as before), *Save as pending* or *Save as draft* (a Quick Purchase order holding the planned lines plus
 the whole cart; reload it later from Pending Quick Purchases).
+
+Quick Purchases screen (finishing an order): each waiting line can be **edited** (quantity the supplier really has, price, supplier -
+lowering the quantity leaves the rest as an unassigned line to route to another supplier or drop) or **dropped**. **Confirm** opens the
+last checkout page: (1) selling price per product - the customer is sold only what could be sourced (stock + incoming, the rest shown as
+"short"), (2) did we pay each supplier (not yet / in full / part), (3) did the customer pay (not yet / in full / part). Confirming buys one
+Purchase per supplier, records the sale (bought lot at the dealer's cost, stock lot at book cost), then the payments through
+`PaymentService`; a failed sale undoes the purchases. Unpaid balances live in the Payments center (the screen offers to open it).
+`quick_purchase_orders.sale_id` (migration 0012) links the order to its sale.
