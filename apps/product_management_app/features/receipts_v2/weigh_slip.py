@@ -70,8 +70,7 @@ def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = W
     out = _header(shop)
     out.append(_rule())
     if value:
-        out += [_center("FULL VALUE RECEIPT (OPTION 2)"),
-                _center("(Product + Bags + KG + Price + Total + Payment)"), _rule()]
+        out += [_center("WEIGHING RECEIPT"), _rule()]
     out.append(_kv("Receipt No", ticket.get("ticket_no", "")))
     out.append(_kv(f"{role} Name", ticket.get("party_name", "")))
     out.append(_kv("Phone", ticket.get("party_phone", "") or "-"))

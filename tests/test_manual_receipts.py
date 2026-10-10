@@ -52,7 +52,7 @@ def test_option_1_weighing_receipt_has_products_bags_kg_and_the_two_signatures()
 
 def test_option_2_full_value_receipt_has_price_total_payment_and_cashier_signature():
     t = render_weigh_slip(TICKET, SHOP, "value")
-    for needle in ("FULL VALUE RECEIPT (OPTION 2)", "Price/KG", "2,376,000", "1,197,000", "TOTAL AMOUNT:",
+    for needle in ("WEIGHING RECEIPT", "Price/KG", "2,376,000", "1,197,000", "TOTAL AMOUNT:",
                    "N4,878,000", "Payment Status: Unpaid", "Amount Paid", "Balance",
                    "Authorized By:", "(Cashier/Admin)", "Customer Signature:"):
         assert needle in t, needle
@@ -92,7 +92,7 @@ def test_admin_ticket_queue_prints_the_weigher_receipts_and_the_purchase_receipt
     v = WeighTicketsAdminView(mode="cashier")
     assert printed == [] and v.btn_print.isEnabled() and not v.btn_print_purchase.isEnabled()   # not finalized yet
     v.btn_print_value.click()
-    assert len(printed) == 1 and "FULL VALUE RECEIPT (OPTION 2)" in printed[0]
+    assert len(printed) == 1 and "WEIGHING RECEIPT" in printed[0] and "OPTION 2" not in printed[0]
     res = W.finalize_ticket(tid, {line: 400})
     v.filter_seg.set_key("finalized")
     v.refresh()
@@ -125,7 +125,7 @@ def test_finalizing_an_intake_does_not_print_the_purchase_receipt(qapp, boxes, p
     assert W.get_ticket(tid)["status"] == "finalized" and spy == [] and printed == []
     dlg._t = W.get_ticket(tid)
     dlg.btn_print_value.click()                                    # the receipts are one click away
-    assert len(printed) == 1 and "FULL VALUE RECEIPT (OPTION 2)" in printed[0] and "Unpaid" in printed[0]
+    assert len(printed) == 1 and "WEIGHING RECEIPT" in printed[0] and "OPTION 2" not in printed[0] and "Unpaid" in printed[0]
 
 
 def test_documents_tab_and_intake_list_print_only_when_asked(qapp, boxes, monkeypatch):
