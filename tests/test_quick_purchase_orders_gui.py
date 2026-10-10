@@ -398,42 +398,77 @@ def test_line_edit_dialog_reads_back_what_was_typed(qapp):
     assert dlg.values()["qty"] == 20 and dlg.values()["supplier_id"] == 0
 
 
-def test_confirm_dialog_prices_payments_and_the_screen_completes_the_order(qapp, boxes, monkeypatch):
-    from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
-        PAID_FULL, PART_PAID, QuickPurchaseConfirmDialog)
+def test_confirm_runs_the_consoles_checkout_then_payment_dialogs(qapp, boxes, monkeypatch):
     from database.models.payment import Payment
     from apps.product_management_app.features.cashier.views import quick_purchases as qv
     oid = _sourcing()
+    seen = {}
+
+    class Checkout:
+        Accepted = 1
+
+        def __init__(self, parent, **k):
+            seen["lines"], seen["total"] = k["lines"], k["total"]
+
+        def exec_(self):
+            return 1
+
+        def payload(self):                      # price 10,500 each, a 5,000 discount, 300,000 paid now
+            return {"rate_overrides": {FERT_ID: 10500.0}, "discount_overrides": {FERT_ID: 5000.0}, "discount": 5000.0,
+                    "payment_mode": "paid", "amount_paid": 300000.0, "method": "transfer", "note": "urgent"}
+
+    class SalePay:
+        def __init__(self, **k):
+            seen["sale_pay_for"] = k["party"].display_name
+
+        def exec_(self):
+            seen["sale_pay_opened"] = True
+
+    class BuyPay:
+        def __init__(self, **k):
+            seen.setdefault("buy_pay_for", []).append(k["party"].display_name)
+
+        def exec_(self):
+            pass
+
+    monkeypatch.setattr(qv, "SaleCheckoutDialog", Checkout)
+    monkeypatch.setattr(qv, "SalePaymentDialog", SalePay)
+    monkeypatch.setattr(qv, "PurchasePaymentDialog", BuyPay)
+    monkeypatch.setattr(qv, "prompt_and_apply_advance", lambda *a, **k: seen.setdefault("advance", k["balance"]))
     v = _view()
     _select(v, oid)
     assert v.btn_confirm.isEnabled()
-    d = QuickPurchaseConfirmDialog(None, oid)
-    assert d.price_table.rowCount() == 1 and d._price_spins[FERT_ID].value() == 10000
-    d._price_spins[FERT_ID].setValue(10500)
-    d.customer_row.mode.setCurrentText(PART_PAID)
-    d.customer_row.amount.setValue(300000)
-    (row,) = d._supplier_rows.values()
-    row.mode.setCurrentText(PAID_FULL)
-    assert row.paid() == 30 * 9300
-    assert "customer still owes" in d.summary.text() and "540,000.00" in d.summary.text()
-    import apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog as cd
-    monkeypatch.setattr(cd, "QuickPurchaseConfirmDialog", lambda parent, order_id: d)
-    monkeypatch.setattr(type(d), "exec_", lambda self: self.Accepted)
     v.btn_confirm.click()
+    (line,) = seen["lines"]
+    assert (line["bags"], line["rate"], seen["total"]) == (80, 10000, 800000)          # the order's cart, as sold
     o = Q.get(oid)
     assert o["status"] == "completed" and o["sale_id"]
     with get_session() as s:
-        pays = {(p.entity_type, p.direction): float(p.amount) for p in s.query(Payment)}
-    assert pays == {("purchase", "out"): 279000.0, ("sale", "in"): 300000.0}
-    assert any("Payments center" in m[1] for m in boxes if m[0] == "question")
-    assert not v.btn_confirm.isEnabled()                       # already sold
+        from database.models.sale import Sale
+        sale = s.get(Sale, o["sale_id"])
+        assert float(sale.total_amount) == 80 * 10500 - 5000 and float(sale.discount) == 5000
+        pays = {(p.entity_type, p.direction, p.method): float(p.amount) for p in s.query(Payment)}
+    assert pays == {("sale", "in", "transfer"): 300000.0}                              # "paid now" is recorded
+    assert seen["advance"] == 535000.0 and seen["sale_pay_opened"] and seen["sale_pay_for"] == "Customer One"
+    assert seen["buy_pay_for"] == ["Supplier One"]                                      # suppliers: asked, paid there
+    assert not v.btn_confirm.isEnabled()                                                # already sold
 
 
-def test_confirm_dialog_refuses_a_zero_selling_price(qapp, boxes):
-    from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
-        QuickPurchaseConfirmDialog)
+def test_confirm_back_out_of_checkout_changes_nothing(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.views import quick_purchases as qv
     oid = _sourcing()
-    d = QuickPurchaseConfirmDialog(None, oid)
-    d._price_spins[FERT_ID].setValue(0)
-    d.btn_ok.click()
-    assert d.result() != d.Accepted and boxes[-1][0] == "warning" and "selling price" in boxes[-1][1]
+
+    class Checkout:
+        Accepted = 1
+
+        def __init__(self, *a, **k):
+            pass
+
+        def exec_(self):
+            return 0
+
+    monkeypatch.setattr(qv, "SaleCheckoutDialog", Checkout)
+    v = _view()
+    _select(v, oid)
+    v.btn_confirm.click()
+    assert Q.get(oid)["status"] == "pending" and stock(FERT_ID)[0] == 50

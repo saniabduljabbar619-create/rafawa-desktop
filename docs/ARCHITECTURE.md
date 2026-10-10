@@ -192,3 +192,9 @@ to the normal checkout / payment, unchanged) or *Draft* (saved, checkout not ope
 recorded `QuickPurchaseOrderService.mark_fulfilled` closes the order. Bug fixes in this flow: removing a Quick Purchase cart row also
 drops its planned purchase (and order line); the sale now costs the bought goods at the dealer's price and the rest of the product at
 the book cost it had before the purchase; a failed sale keeps the plan.
+
+**Confirm (Quick Purchases screen) now uses the Sales Console's own checkout.** After editing / routing, *Confirm →* opens the normal
+Checkout dialog (selling price, discount, paid now / not paid, method, note) for what can be sold, buys the waiting lines and records
+the sale (`QuickPurchaseOrderService.confirm`, incl. line discounts and the "paid now" amount), then the same payment steps as the
+console: the customer's advance prompt and the Sale Payment screen, and an offer to pay the suppliers on the Purchase Payment screen
+(unpaid stays in the Payments center).
