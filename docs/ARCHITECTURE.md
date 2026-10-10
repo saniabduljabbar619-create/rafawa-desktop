@@ -198,3 +198,7 @@ Checkout dialog (selling price, discount, paid now / not paid, method, note) for
 the sale (`QuickPurchaseOrderService.confirm`, incl. line discounts and the "paid now" amount), then the same payment steps as the
 console: the customer's advance prompt and the Sale Payment screen, and an offer to pay the suppliers on the Purchase Payment screen
 (unpaid stays in the Payments center).
+
+Pending Quick Purchases are fully editable: **Edit** opens the editor for draft *and* pending orders (`update_pending`: change the waiting
+lines - double-click a row for quantity / cost / supplier - add products, remove waiting lines; received lines are history and untouched),
+besides the per-line **Edit line** / **Drop line** / **Route** buttons.

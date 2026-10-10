@@ -292,9 +292,9 @@ class QuickPurchaseOrderService:
     def edit_line(order_id: int, line_id: int, qty: Optional[float] = None, unit_cost: Optional[float] = None,
                   supplier_id: Optional[int] = None, note: str = "") -> None:
         """
-        Fix up one line while the order is still open: the quantity the supplier really has, the price they
-        quoted, or a different supplier (supplier_id=0 un-assigns it). Lowering the quantity keeps the rest as
-        a separate unassigned line so nothing silently disappears - assign it to another supplier or drop it.
+        Fix up one line while the order is still open: the quantity the supplier really has, the price they quoted,
+        or a different supplier (supplier_id=0 un-assigns it). Lowering the quantity keeps the rest as a separate
+        unassigned line so nothing silently disappears - assign it to another supplier or drop it.
         """
         with get_session() as s:
             o = QuickPurchaseOrderService._load(s, order_id, lock=True)
@@ -302,51 +302,103 @@ class QuickPurchaseOrderService:
             ln = next((x for x in o.lines if int(x.id) == int(line_id)), None)
             if ln is None or ln.state != "open":
                 raise ValueError("Pick a line that is still waiting for goods.")
-            fert = _is_fert(ln.product.product_type)
-            what = []
-            if unit_cost is not None:
-                if _f(unit_cost) <= 0:
-                    raise ValueError("Enter the dealer cost.")
-                if abs(_f(unit_cost) - _f(ln.unit_cost)) > 0.004:
-                    what.append(f"cost {_f(ln.unit_cost):,.2f} -> {_f(unit_cost):,.2f}")
-                ln.unit_cost = _f(unit_cost)
-            if qty is not None:
-                q = float(int(qty)) if fert else round(_f(qty), 2)
-                if q <= 0:
-                    raise ValueError("Enter a quantity above zero - or drop the line.")
-                cur = float(ln.qty_bags) if fert else _f(ln.total_weight_kg)
-                bags = int(ln.qty_bags)
-                if q < cur:
-                    rem = cur - q
-                    if fert:
-                        keep_bags, rem_bags, keep_kg, rem_kg = int(q), int(rem), 0.0, 0.0
-                    else:
-                        keep_kg, rem_kg = q, round(rem, 2)
-                        keep_bags = max(1, round(bags * q / cur))
-                        rem_bags = max(1, bags - keep_bags)
+            QuickPurchaseOrderService._apply_line_edit(s, o, ln, qty, unit_cost, supplier_id, note, keep_rest=True)
+            s.commit()
+
+    @staticmethod
+    def _apply_line_edit(s, o: QuickPurchaseOrder, ln: QuickPurchaseLine, qty, unit_cost, supplier_id, note,
+                         keep_rest: bool) -> None:
+        fert = _is_fert(ln.product.product_type)
+        what = []
+        if unit_cost is not None:
+            if _f(unit_cost) <= 0:
+                raise ValueError("Enter the dealer cost.")
+            if abs(_f(unit_cost) - _f(ln.unit_cost)) > 0.004:
+                what.append(f"cost {_f(ln.unit_cost):,.2f} -> {_f(unit_cost):,.2f}")
+            ln.unit_cost = _f(unit_cost)
+        if qty is not None:
+            q = float(int(qty)) if fert else round(_f(qty), 2)
+            if q <= 0:
+                raise ValueError("Enter a quantity above zero - or drop the line.")
+            cur = float(ln.qty_bags) if fert else _f(ln.total_weight_kg)
+            bags = int(ln.qty_bags)
+            if q < cur:
+                rem = cur - q
+                if fert:
+                    keep_bags, rem_bags, keep_kg, rem_kg = int(q), int(rem), 0.0, 0.0
+                else:
+                    keep_kg, rem_kg = q, round(rem, 2)
+                    keep_bags = max(1, round(bags * q / cur))
+                    rem_bags = max(1, bags - keep_bags)
+                if keep_rest:
                     s.add(QuickPurchaseLine(
                         order_id=o.id, sort_order=max(x.sort_order for x in o.lines) + 1, product_id=ln.product_id,
                         qty_bags=rem_bags, total_weight_kg=rem_kg, unit_cost=ln.unit_cost, supplier_id=None,
                         state="open"))
-                    ln.qty_bags, ln.total_weight_kg = keep_bags, keep_kg
-                    what.append(f"qty {cur:g} -> {q:g}, {rem:g} left unassigned")
-                elif q > cur:
-                    ln.qty_bags = int(q) if fert else max(bags, round(bags * q / cur))
-                    ln.total_weight_kg = 0.0 if fert else q
-                    what.append(f"qty {cur:g} -> {q:g}")
-            if supplier_id is not None and int(supplier_id or 0) != int(ln.supplier_id or 0):
-                new_sid = QuickPurchaseOrderService._check_supplier(s, supplier_id) if supplier_id else None
-                for r in ln.routes:
-                    if r.outcome == "asked":
-                        r.outcome = "unavailable"
-                        r.note = (note or "").strip()[:255] or r.note
-                ln.supplier_id = new_sid
-                if new_sid:
-                    s.add(QuickPurchaseRoute(line_id=ln.id, supplier_id=new_sid, outcome="asked", by_user_id=_uid()))
-                what.append("supplier changed" if new_sid else "supplier removed")
-            if what:
-                AuditService.record("qp.edit_line", "quick_purchase", int(o.id),
-                                    f"{o.order_no} {ln.product.name}: " + "; ".join(what), session=s)
+                ln.qty_bags, ln.total_weight_kg = keep_bags, keep_kg
+                what.append(f"qty {cur:g} -> {q:g}" + (f", {rem:g} left unassigned" if keep_rest else ""))
+            elif q > cur:
+                ln.qty_bags = int(q) if fert else max(bags, round(bags * q / cur))
+                ln.total_weight_kg = 0.0 if fert else q
+                what.append(f"qty {cur:g} -> {q:g}")
+        if supplier_id is not None and int(supplier_id or 0) != int(ln.supplier_id or 0):
+            new_sid = QuickPurchaseOrderService._check_supplier(s, supplier_id) if supplier_id else None
+            for r in ln.routes:
+                if r.outcome == "asked":
+                    r.outcome = "unavailable"
+                    r.note = (note or "").strip()[:255] or r.note
+            ln.supplier_id = new_sid
+            if new_sid:
+                s.add(QuickPurchaseRoute(line_id=ln.id, supplier_id=new_sid, outcome="asked", by_user_id=_uid()))
+            what.append("supplier changed" if new_sid else "supplier removed")
+        if what:
+            AuditService.record("qp.edit_line", "quick_purchase", int(o.id),
+                                f"{o.order_no} {ln.product.name}: " + "; ".join(what), session=s)
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def update_pending(order_id: int, lines: List[Dict[str, Any]], customer_name: str = "", notes: str = "") -> None:
+        """
+        Edit a pending order as a whole (the editor): keep / change the lines that are still waiting (an "id" ties a
+        row to its line), add new ones, and drop the waiting lines that were removed. Received lines are untouched.
+        """
+        if not lines:
+            raise ValueError("Add at least one product.")
+        with get_session() as s:
+            o = QuickPurchaseOrderService._load(s, order_id, lock=True)
+            QuickPurchaseOrderService._need_status(o, "pending")
+            o.customer_name = (customer_name or "").strip() or None
+            o.notes = (notes or "").strip() or None
+            waiting = {int(x.id): x for x in QuickPurchaseOrderService._open_lines(o)}
+            keep = {int(r["id"]) for r in lines if r.get("id")}
+            for lid, ln in waiting.items():
+                if lid not in keep:
+                    ln.state = "dropped"
+                    for r in ln.routes:
+                        if r.outcome == "asked":
+                            r.outcome = "unavailable"
+            n = max([x.sort_order for x in o.lines] or [-1]) + 1
+            for raw in lines:
+                if raw.get("id"):
+                    ln = waiting.get(int(raw["id"]))
+                    if ln is None:
+                        raise ValueError("A line you edited is no longer waiting for goods - reopen the order.")
+                    fert = _is_fert(ln.product.product_type)
+                    QuickPurchaseOrderService._apply_line_edit(
+                        s, o, ln, raw.get("qty_bags") if fert else raw.get("total_weight_kg"),
+                        raw.get("unit_cost") or None, int(raw.get("supplier_id") or 0), "", keep_rest=False)
+                    if not fert:
+                        ln.qty_bags = max(int(raw.get("qty_bags") or 0), 1)
+                else:
+                    ln = QuickPurchaseOrderService._make_line(s, n, raw, require_supplier=False)
+                    n += 1
+                    o.lines.append(ln)
+                    s.flush()
+                    if ln.supplier_id:
+                        s.add(QuickPurchaseRoute(line_id=ln.id, supplier_id=ln.supplier_id, outcome="asked",
+                                                 by_user_id=_uid()))
+            AuditService.record("qp.edit", "quick_purchase", int(o.id), f"{o.order_no} pending order edited",
+                                session=s)
             s.commit()
 
     @staticmethod

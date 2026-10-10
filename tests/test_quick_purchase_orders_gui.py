@@ -52,7 +52,7 @@ def test_buttons_follow_the_status(qapp, boxes):
     assert v.btn_delete.isEnabled()
     _select(v, p)
     assert v.btn_receive.isEnabled() and v.btn_route.isEnabled() and v.btn_stock.isEnabled()
-    assert not v.btn_edit.isEnabled() and v.btn_cancel.isEnabled()
+    assert v.btn_edit.isEnabled() and v.btn_cancel.isEnabled()          # pending orders stay editable
 
 
 def test_send_receive_and_filter(qapp, boxes):
@@ -472,3 +472,25 @@ def test_confirm_back_out_of_checkout_changes_nothing(qapp, boxes, monkeypatch):
     _select(v, oid)
     v.btn_confirm.click()
     assert Q.get(oid)["status"] == "pending" and stock(FERT_ID)[0] == 50
+
+
+def test_editor_opens_a_pending_order_and_saves_changes(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.dialogs import quick_purchase_order_dialog as d
+    oid = _sourcing()
+    dlg = d.QuickPurchaseOrderDialog(order_id=oid)
+    assert dlg.pending and dlg.btn_send.text() == "Save Changes" and not dlg.btn_draft.isVisible()
+    assert len(dlg.lines) == 1 and dlg.lines[0]["id"]
+    monkeypatch.setattr(d.LineEditDialog, "exec_", lambda self: self.Accepted)
+    monkeypatch.setattr(d.LineEditDialog, "values", lambda self: {"qty": 18.0, "unit_cost": 9500.0,
+                                                                  "supplier_id": SUPPLIER_2, "note": ""})
+    dlg._edit_line(0)                                          # double-click the row
+    dlg.customer.setText("Musa Farms")
+    dlg.btn_send.click()                                       # Save Changes
+    o = Q.get(oid)
+    assert o["status"] == "pending" and o["customer_name"] == "Musa Farms"
+    assert [(x["qty_bags"], x["unit_cost"], x["supplier"]) for x in o["lines"]] == [(18, 9500, "Supplier Two")]
+    d2 = d.QuickPurchaseOrderDialog(order_id=oid)
+    d2.table.selectRow(0)
+    d2.btn_remove.click()                                      # removing the only line is refused
+    d2.btn_send.click()
+    assert boxes[-1][0] == "warning" and Q.get(oid)["lines"][0]["state"] == "open"
