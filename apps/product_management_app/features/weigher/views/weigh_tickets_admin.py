@@ -53,8 +53,12 @@ class WeighTicketsAdminView(QWidget):
         self.filter_seg = Segmented(FILTERS)
         bar.addWidget(self.filter_seg)
         bar.addStretch(1)
+        self.btn_print_purchase = QPushButton("Print Purchase Receipt")
+        self.btn_print = QPushButton("Print Weighing Receipt")
+        self.btn_print_value = QPushButton("Print Value Receipt")
         self.btn_refresh = QPushButton("Refresh")
-        bar.addWidget(self.btn_refresh)
+        for b in (self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_refresh):
+            bar.addWidget(b)
         root.addLayout(bar)
 
         self.table = make_ticket_table(show_amount=True, show_weigher=True)
@@ -67,6 +71,10 @@ class WeighTicketsAdminView(QWidget):
         self.filter_seg.changed.connect(lambda _k: self.refresh())
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_open.clicked.connect(self.open_selected)
+        self.btn_print.clicked.connect(lambda: self.print_weigh("weighing"))
+        self.btn_print_value.clicked.connect(lambda: self.print_weigh("value"))
+        self.btn_print_purchase.clicked.connect(self.print_purchase)
+        self.table.itemSelectionChanged.connect(self._buttons)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self.open_selected())
         self.refresh()
 
@@ -85,6 +93,45 @@ class WeighTicketsAdminView(QWidget):
         fill_ticket_table(self.table, rows)
         if self.table.rowCount():
             self.table.selectRow(0)
+        self._buttons()
+
+    def _selected(self):
+        tid = selected_ticket_id(self.table)
+        try:
+            return (tid, WeighService.get_ticket(tid)) if tid else (None, None)
+        except Exception:
+            return None, None
+
+    def _buttons(self):
+        _tid, t = self._selected()
+        self.btn_print.setEnabled(bool(t and t["status"] != "open"))
+        self.btn_print_value.setEnabled(bool(t and t["status"] != "open"))
+        self.btn_print_purchase.setEnabled(bool(t and t.get("purchase_id")))
+
+    def print_weigh(self, option: str):
+        """The weigher's receipt (Option 1 weighing / Option 2 full value) - only when asked for."""
+        _tid, t = self._selected()
+        if not t:
+            QMessageBox.information(self, "Print Receipt", "Select a ticket first.")
+            return
+        try:
+            from apps.product_management_app.features.receipts_v2 import get_shop, receipt_print, render_weigh_slip
+            receipt_print.print_text(self, render_weigh_slip(t, get_shop(), option),
+                                     window_title=f"Weighing Receipt - {t['ticket_no']}")
+        except Exception as e:
+            QMessageBox.warning(self, "Print Receipt", str(e))
+
+    def print_purchase(self):
+        """The purchase receipt made when the ticket was finalized - only when asked for."""
+        _tid, t = self._selected()
+        if not t or not t.get("purchase_id"):
+            QMessageBox.information(self, "Print Receipt", "Select a finalized ticket first.")
+            return
+        try:
+            from apps.product_management_app.features.receipts_v2 import MODE_FULL, PURCHASE, print_receipt
+            print_receipt(self, PURCHASE, int(t["purchase_id"]), MODE_FULL)
+        except Exception as e:
+            QMessageBox.warning(self, "Print Receipt", str(e))
 
     def open_selected(self):
         tid = selected_ticket_id(self.table)

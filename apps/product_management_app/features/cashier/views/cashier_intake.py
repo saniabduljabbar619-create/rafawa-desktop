@@ -55,6 +55,13 @@ class CashierIntakeView(QWidget):
         row.addWidget(self.search, 1)
 
         self.btn_refresh = QPushButton("Refresh")
+        self.btn_print = QPushButton("Print Receipt")
+        self.btn_print.setToolTip("Prints the receipt of the selected intake - nothing prints by itself")
+        self.btn_print_swap = QPushButton("Print Last Swap Receipts")
+        self.btn_print_swap.setEnabled(False)
+        self._last_swap = None
+        row.addWidget(self.btn_print)
+        row.addWidget(self.btn_print_swap)
         row.addWidget(self.btn_refresh)
 
         # Table
@@ -71,6 +78,8 @@ class CashierIntakeView(QWidget):
         self.btn_new.clicked.connect(self._new_intake)
         self.btn_swap.clicked.connect(self._swap)
         self.btn_refresh.clicked.connect(self.refresh)
+        self.btn_print.clicked.connect(self._print_selected)
+        self.btn_print_swap.clicked.connect(self._print_last_swap)
         self.search.textChanged.connect(self.refresh)
 
         self.refresh()
@@ -189,20 +198,32 @@ class CashierIntakeView(QWidget):
             )
             return
 
-        # --------------------------------------------------
-        # PRINT: full intake receipt (all cart lines), then ask about a
-        # delivery note. [Option 2]
-        # --------------------------------------------------
-        try:
-            if purchase_id > 0:
-                print_full_then_optional_delivery(self, PURCHASE, purchase_id)
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Receipt Error",
-                f"Intake recorded but receipt printing failed:\n{e}"
-            )
+        # Nothing prints by itself: select the intake and press "Print Receipt".
         self.refresh()
+
+    def _print_selected(self):
+        """The full intake receipt (then, if wanted, a delivery note) of the selected row - only when asked for."""
+        from PySide2.QtWidgets import QMessageBox
+        r = self.table.currentRow()
+        ref = self.table.item(r, 1).text() if r >= 0 and self.table.item(r, 1) else ""
+        digits = "".join(ch for ch in ref if ch.isdigit())
+        if not digits:
+            QMessageBox.information(self, "Print Receipt", "Select an intake first.")
+            return
+        try:
+            print_full_then_optional_delivery(self, PURCHASE, int(digits))
+        except Exception as e:
+            QMessageBox.warning(self, "Receipt Error", f"The receipt could not be printed:\n{e}")
+
+    def _print_last_swap(self):
+        from PySide2.QtWidgets import QMessageBox
+        if not self._last_swap:
+            return
+        try:
+            print_full_then_optional_delivery(self, PURCHASE, int(self._last_swap["purchase_id"]))   # goods he brought
+            print_full_then_optional_delivery(self, SALE, int(self._last_swap["sale_id"]))          # goods he took
+        except Exception as e:
+            QMessageBox.warning(self, "Receipt Error", f"The receipt could not be printed:\n{e}")
 
     def _swap(self):
         from PySide2.QtWidgets import QMessageBox
@@ -228,11 +249,8 @@ class CashierIntakeView(QWidget):
             self, "Swap recorded",
             f"He brought {r['purchase_total']:,.2f} (PUR-{r['purchase_id']}) and took "
             f"{r['sale_total']:,.2f} (SAL-{r['sale_id']}).\n{r['offset']:,.2f} was set off.\n\n{tail}")
-        try:
-            print_full_then_optional_delivery(self, PURCHASE, int(r["purchase_id"]))     # goods he brought
-            print_full_then_optional_delivery(self, SALE, int(r["sale_id"]))            # goods he took
-        except Exception as e:
-            QMessageBox.warning(self, "Receipt Error", f"Swap recorded but the receipt failed:\n{e}")
+        self._last_swap = {"purchase_id": int(r["purchase_id"]), "sale_id": int(r["sale_id"])}
+        self.btn_print_swap.setEnabled(True)              # receipts print only when asked for
         self.refresh()
 
     def refresh(self):

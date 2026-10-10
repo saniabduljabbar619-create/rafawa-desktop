@@ -37,7 +37,7 @@ from shared.auth.session import get_session as get_login_session
 MAX_BAGS_PER_ROUND = 3            # a weigher's round is 1-3 bags (or part of a bag)
 MAX_KG_PER_ROUND = 5000.0         # sanity ceiling against a mistyped weight
 STATUSES = ("open", "submitted", "finalized", "cancelled")
-RECEIPT_TYPES = ("full", "summary")
+RECEIPT_TYPES = ("weighing", "value", "full", "summary")     # the first two are the weigher's receipts; the rest are older slips
 
 ANY_STAFF = WEIGH_ROLES | INTAKE_ROLES
 
@@ -322,9 +322,9 @@ class WeighService:
 
     @staticmethod
     @require_role(*WEIGH_ROLES)
-    def submit_ticket(ticket_id: int, receipt_type: str = "full") -> Dict[str, Any]:
+    def submit_ticket(ticket_id: int, receipt_type: str = "weighing") -> Dict[str, Any]:
         """Weigher is done: lock the ticket and hand it to the cashier/admin."""
-        receipt_type = (receipt_type or "full").strip().lower()
+        receipt_type = (receipt_type or "weighing").strip().lower()
         if receipt_type not in RECEIPT_TYPES:
             raise ValueError("Choose a receipt type.")
         with get_session() as s:
@@ -407,12 +407,23 @@ class WeighService:
                             "edited": bool(r.edited_by_user_id)} for r in ln.rounds],
             })
         tb, tk = WeighService._totals(t)
+        payment = {"status": "Unpaid", "paid": 0.0, "balance": round(total_amt, 2), "total": round(total_amt, 2)}
+        if with_prices and t.purchase_id:                       # finalized: the real purchase's position
+            from database.models.purchase import Purchase
+            from database.services.purchase_adjustment_service import PurchaseAdjustmentService
+            pur = s.get(Purchase, int(t.purchase_id))
+            if pur is not None:
+                n = PurchaseAdjustmentService._purchase_balance(s, pur)
+                payment = {"status": "Paid" if n["balance"] <= 0.005 else ("Part paid" if n["paid"] > 0.005 else "Unpaid"),
+                           "paid": round(n["paid"], 2), "balance": round(n["balance"], 2),
+                           "total": round(n["net_total"], 2)}
         return {
+            "payment": payment,
             "id": int(t.id), "ticket_no": t.ticket_no or _ticket_no(t.id), "status": t.status,
             "party_id": int(t.party_id), "party_name": t.party.display_name if t.party else "",
             "party_phone": (t.party.phone if t.party else "") or "", "party_role": t.party_role,
             "weigher_user_id": int(t.weigher_user_id), "weigher_name": uname(t.weigher_user_id),
-            "created_at": t.created_at, "submitted_at": t.submitted_at, "receipt_type": t.receipt_type or "full",
+            "created_at": t.created_at, "submitted_at": t.submitted_at, "receipt_type": t.receipt_type or "weighing",
             "notes": t.notes or "", "purchase_id": int(t.purchase_id) if t.purchase_id else None,
             "finalized_at": t.finalized_at, "finalized_by": uname(t.finalized_by_user_id),
             "cancel_reason": t.cancel_reason or "",

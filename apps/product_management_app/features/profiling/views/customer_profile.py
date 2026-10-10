@@ -1468,9 +1468,7 @@ class CustomerProfileView(QWidget):
                 pay = PurchasePaymentDialog(party=source_party, user_id=self.session_user_id, parent=self, print_slip=False)
                 pay.exec_()
 
-            if purchase_id > 0:
-                print_full_then_optional_delivery(self, PURCHASE, purchase_id)
-            self.refresh_all()
+            self.refresh_all()                      # receipts print only when asked (Sales/Purchases tab > Print Receipt)
             
         except Exception as e:
             QMessageBox.critical(self, "Intake Failed", str(e))

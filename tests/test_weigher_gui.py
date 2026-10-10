@@ -98,16 +98,24 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     assert v.lbl_price_amount.text() == f"₦{405.5 * 450:,.2f}" and v.price_table.item(0, 5).text() == f"₦{405.5 * 450:,.2f}"
     v.btn_price_next.click()                                       # price saved on the ticket -> the receipt step
     assert v.stack.currentIndex() == 3 and W.get_ticket(v.ticket_id)["total_amount"] == 405.5 * 450
-    assert "TOTAL WEIGHT" in v.preview.toPlainText() and "245.50" in v.preview.toPlainText()
-    assert "TOTAL AMOUNT" in v.preview.toPlainText() and f"{405.5 * 450:,.2f}" in v.preview.toPlainText()
-    v.receipt_seg.set_key("summary"); v._render_preview()
-    assert "245.50" not in v.preview.toPlainText()
+    # the two weigher receipts: Option 1 (weights only) is the default, Option 2 adds price, amount and payment
+    assert v.receipt_seg.key() == "weighing" and "WEIGHING RECEIPT (OPTION 1)" in v.preview.toPlainText()
+    assert "GRAND TOTAL BAGS" in v.preview.toPlainText() and "Price/KG" not in v.preview.toPlainText()
+    v.receipt_seg.set_key("value"); v._render_preview()
+    text = v.preview.toPlainText()
+    assert "FULL VALUE RECEIPT (OPTION 2)" in text and "Price/KG" in text and "Payment Status: Unpaid" in text
+    assert f"{405.5 * 450:,.0f}" in text
 
     v.btn_submit.click()
     t = W.get_ticket(v.ticket_id)
-    assert t["status"] == "submitted" and t["receipt_type"] == "summary" and len(printed) == 1
-    assert "Weigher: ____" in printed[0] and f"{405.5 * 450:,.2f}" in printed[0]
+    assert t["status"] == "submitted" and t["receipt_type"] == "value"
+    assert printed == []                                           # submitting never prints by itself
     assert v.btn_submit.isHidden() and not v.btn_new.isHidden() and not v.btn_print.isHidden()
+    v.btn_print.click()                                            # only the button prints
+    assert len(printed) == 1 and "FULL VALUE RECEIPT (OPTION 2)" in printed[0] and "Customer Signature" in printed[0]
+    v.receipt_seg.set_key("weighing")
+    v.btn_print.click()
+    assert len(printed) == 2 and "WEIGHING RECEIPT (OPTION 1)" in printed[1] and "Weigher Signature" in printed[1]
     v.btn_new.click()
     assert v.stack.currentIndex() == 0 and v.ticket_id == 0
 
@@ -210,10 +218,13 @@ def test_finalize_list_shows_every_weighing_with_amounts_and_the_admin_queue_doe
     assert mine.kpi_open.value.text() == "1"
     mine.table.selectRow(1)                                                      # the submitted one (oldest last)
     assert mine.btn_edit.isEnabled() and mine.btn_remove.isEnabled() and mine.btn_print.isEnabled()
-    mine.print_selected()
-    assert len(printed) == 1 and "WEIGHING SLIP" in printed[0] and "TOTAL AMOUNT" in printed[0]
+    assert printed == []
+    mine.btn_print.click()                                                       # Option 1
+    mine.btn_print_value.click()                                                 # Option 2
+    assert len(printed) == 2 and "WEIGHING RECEIPT (OPTION 1)" in printed[0] and "TOTAL AMOUNT" not in printed[0]
+    assert "FULL VALUE RECEIPT (OPTION 2)" in printed[1] and "TOTAL AMOUNT" in printed[1]
     mine.table.selectRow(0)                                                      # the open one: nothing to print yet
-    assert not mine.btn_print.isEnabled() and open_tid
+    assert not mine.btn_print.isEnabled() and not mine.btn_print_value.isEnabled() and open_tid
 
     as_role("cashier", CASHIER)
     q = WeighTicketsAdminView(mode="cashier")
