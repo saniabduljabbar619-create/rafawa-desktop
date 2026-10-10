@@ -16,8 +16,12 @@ from typing import Any, Dict, List
 from .receipt_render import WIDTH, _center, _fmt_dt, _num, _rule, _wrap
 from .receipt_models import ShopInfo
 
-FULL = "full"
-SUMMARY = "summary"
+FULL = "full"            # legacy: every round
+SUMMARY = "summary"      # legacy: totals per product
+WEIGHING = "weighing"    # Option 1 - Weighing Receipt: product + total bags + total kg
+VALUE = "value"          # Option 2 - Full Value Receipt: + price, amount and payment
+RECEIPT_TYPES = (WEIGHING, VALUE)
+RECEIPT_TITLES = {WEIGHING: "Weighing Receipt (Option 1)", VALUE: "Full Value Receipt (Option 2)"}
 
 
 def _kg(v) -> str:
@@ -35,8 +39,95 @@ def _two(left: str, right: str) -> str:
     return left + " " * gap + right
 
 
+def _money(v) -> str:
+    return f"{float(v or 0):,.0f}"
+
+
+def _header(shop: ShopInfo) -> List[str]:
+    out = [_center(shop.name)]
+    for ln in _wrap(shop.address, WIDTH):
+        if ln:
+            out.append(_center(ln))
+    for x in (shop.phone, getattr(shop, "email", "")):
+        if x:
+            out.append(_center(x))
+    return out
+
+
+def _kv(label: str, value) -> str:
+    return f"{label:<14}: {value}"
+
+
+def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = WEIGHING) -> str:
+    """
+    The weigher's two receipts (80mm text):
+      'weighing' - Option 1: product + total bags + total kg per product, grand total bags, signatures.
+      'value'    - Option 2: + price/kg, amount, total, payment status / paid / balance, cashier + customer signatures.
+    ticket is WeighService.get_ticket()'s dict.
+    """
+    value = option == VALUE
+    role = "Supplier" if ticket.get("party_role") == "supplier" else "Customer"
+    out = _header(shop)
+    out += [_rule(), _center("FULL VALUE RECEIPT (OPTION 2)" if value else "WEIGHING RECEIPT (OPTION 1)"),
+            _center("(Product + Bags + KG + Price + Total + Payment)" if value
+                    else "(Product + Total Bags + Total KG)"), _rule()]
+    out.append(_kv("Receipt No", ticket.get("ticket_no", "")))
+    out.append(_kv(f"{role} Name", ticket.get("party_name", "")))
+    out.append(_kv("Phone", ticket.get("party_phone", "") or "-"))
+    out.append(_kv("Ref ID", ticket.get("id", "")))
+    out.append(_kv("User", ticket.get("weigher_name", "")))
+    out.append(_kv("Date", _fmt_dt(ticket.get("submitted_at") or ticket.get("created_at") or datetime.now())))
+    out.append(_rule())
+
+    lines = [ln for ln in ticket.get("lines", []) if ln.get("rounds")]
+    if value:
+        out.append(f"{'S/N':<4}{'Product':<11}{'Bags':>5}{'KG':>9}{'Price/KG':>9}{'Amount':>10}")
+    else:
+        out.append(f"{'S/N':<4}{'Product':<20}{'Total Bags':>12}{'Total KG':>12}")
+    out.append(_rule())
+    for i, ln in enumerate(lines, 1):
+        name = ln.get("product_name", "")
+        if ln.get("grade"):
+            name += f" ({ln['grade']})"
+        amount = ln.get("amount")
+        if amount is None and ln.get("unit_price"):
+            amount = float(ln["unit_price"]) * float(ln.get("kg") or 0)
+        if value:
+            wrapped = _wrap(name, 11)
+            for extra in wrapped[:-1]:
+                out.append(f"{'':<4}{extra}")
+            out.append(f"{i:<4}{wrapped[-1]:<11}{_bags(ln.get('bags')):>5}{_money(ln.get('kg')):>9}"
+                       f"{_money(ln.get('unit_price')):>9}{_money(amount):>10}")
+        else:
+            wrapped = _wrap(name, 19)
+            for extra in wrapped[:-1]:
+                out.append(f"{'':<4}{extra}")
+            out.append(f"{i:<4}{wrapped[-1]:<20}{_bags(ln.get('bags')) + ' bags':>12}{_money(ln.get('kg')) + ' KG':>12}")
+    out.append(_rule())
+    if value:
+        out.append(_two("TOTAL AMOUNT:", f"N{_money(ticket.get('total_amount'))}"))
+        pay = ticket.get("payment") or {}
+        out += ["", _kv("Payment Status", pay.get("status", "Unpaid")),
+                _kv("Amount Paid", f"N{_money(pay.get('paid'))}"),
+                _kv("Balance", f"N{_money(pay.get('balance', ticket.get('total_amount')))}"), _rule(),
+                "", "Authorized By: ____________________", "(Cashier/Admin)", "",
+                "Customer Signature: _______________"]
+    else:
+        out.append(_two("GRAND TOTAL BAGS:", f"{_bags(ticket.get('total_bags'))} bags"))
+        out += ["", "Note: Total KG is shown per product. Grand",
+                "Total KG is not provided on this receipt.", "", "",
+                "Received by: ______________________", "", "Weigher Signature: _________________"]
+    out += ["", _rule(), _center(shop.footer_note or "Thank you for trading with us"), "", ""]
+    return "\n".join(out)
+
+
 def render_weigh_slip(ticket: Dict[str, Any], shop: ShopInfo, receipt_type: str = FULL) -> str:
-    """ticket is WeighService.get_ticket()'s dict. receipt_type: 'full' (every round) or 'summary'."""
+    """
+    ticket is WeighService.get_ticket()'s dict. receipt_type: 'weighing' / 'value' (the two weigher receipts), or
+    the older 'full' (every round) / 'summary' slips still found on tickets saved before.
+    """
+    if receipt_type in RECEIPT_TYPES:
+        return render_weigh_receipt(ticket, shop, receipt_type)
     out: List[str] = []
     out += [_center(shop.name), ]
     for ln in _wrap(shop.address, WIDTH):

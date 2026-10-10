@@ -46,12 +46,13 @@ class WeigherTicketsView(QWidget):
         bar.addWidget(self.filter_seg)
         bar.addStretch(1)
         self.btn_refresh = QPushButton("Refresh")
-        self.btn_print = QPushButton("Print Slip")
+        self.btn_print = QPushButton("Print Weighing Receipt")
+        self.btn_print_value = QPushButton("Print Value Receipt")
         self.btn_edit = QPushButton("Edit")
         self.btn_edit.setObjectName("PrimaryButton")
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setProperty("role", "danger")
-        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_refresh):
+        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_print_value, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -60,7 +61,8 @@ class WeigherTicketsView(QWidget):
 
         self.filter_seg.changed.connect(lambda _k: self.refresh())
         self.btn_refresh.clicked.connect(self.refresh)
-        self.btn_print.clicked.connect(self.print_selected)
+        self.btn_print.clicked.connect(lambda: self.print_selected("weighing"))
+        self.btn_print_value.clicked.connect(lambda: self.print_selected("value"))
         self.btn_edit.clicked.connect(self.edit_selected)
         self.btn_remove.clicked.connect(self.remove_selected)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit_selected())
@@ -93,7 +95,9 @@ class WeigherTicketsView(QWidget):
         ok = bool(t and t["status"] in EDITABLE)
         self.btn_edit.setEnabled(ok)
         self.btn_remove.setEnabled(ok)
-        self.btn_print.setEnabled(bool(t and t["status"] != "open"))
+        printable = bool(t and t["status"] != "open")
+        self.btn_print.setEnabled(printable)
+        self.btn_print_value.setEnabled(printable)
 
     def edit_selected(self):
         """Correct a weighing: its rounds and prices (a finalized one opens read-only)."""
@@ -127,18 +131,18 @@ class WeigherTicketsView(QWidget):
             QMessageBox.warning(self, "Remove", str(e))
         self.refresh()
 
-    def print_selected(self):
+    def print_selected(self, option: str = "weighing"):
         tid = selected_ticket_id(self.table)
         if not tid:
-            QMessageBox.information(self, "Print Slip", "Select a ticket first.")
+            QMessageBox.information(self, "Print Receipt", "Select a ticket first.")
             return
         try:
             t = WeighService.get_ticket(tid)
             if t["status"] == "open":
-                QMessageBox.information(self, "Print Slip", "Finish the weighing first (Weighing Station → Resume).")
+                QMessageBox.information(self, "Print Receipt", "Finish the weighing first (Weighing Station → Resume).")
                 return
             from apps.product_management_app.features.receipts_v2 import get_shop, receipt_print, render_weigh_slip
-            receipt_print.print_text(self, render_weigh_slip(t, get_shop(), t["receipt_type"]),
-                                     window_title=f"Weighing Slip - {t['ticket_no']}")
+            receipt_print.print_text(self, render_weigh_slip(t, get_shop(), option),
+                                     window_title=f"Weighing Receipt - {t['ticket_no']}")
         except Exception as e:
-            QMessageBox.warning(self, "Print Slip", str(e))
+            QMessageBox.warning(self, "Print Receipt", str(e))

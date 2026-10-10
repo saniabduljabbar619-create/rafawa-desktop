@@ -274,9 +274,14 @@ def test_status_between_carting_and_checkout_pending_continues_and_the_order_is_
     from database.models.sale_item import SaleItem
     v = _cart_with_planned_fertilizer(qapp, monkeypatch)
     _fake_checkout(monkeypatch, v)
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.No))
     seen = {}
     monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: seen.setdefault("s", "pending"))
+    assert not v.btn_print_qp.isEnabled()
     v._checkout()
+    assert not any("Print" in q for q in asked)                         # supplier receipts are never offered by themselves
+    assert v.btn_print_qp.isEnabled() and len(v._last_qp_ids) == 1       # ...they have their own button
     (o,) = Q.list_orders()
     assert o["status"] == "completed" and o["sale_id"] and o["lines"][0]["state"] == "received"
     assert [(c["qty_bags"], c["qp"]) for c in o["cart"]] == [(20, False), (30, True)]

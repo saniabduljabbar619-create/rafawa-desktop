@@ -130,13 +130,15 @@ class WeighTicketReviewDialog(QDialog):
         btns = QHBoxLayout()
         self.btn_reject = QPushButton("Remove Ticket" if self.mode == "weigher" else "Cancel Ticket")
         self.btn_reject.setProperty("role", "danger")
-        self.btn_print = QPushButton("Print Weigh Slip")
+        self.btn_print = QPushButton("Print Weighing Receipt")
+        self.btn_print_value = QPushButton("Print Value Receipt")
         self.btn_close = QPushButton("Close")
         self.btn_finalize = QPushButton("Save Changes" if self.mode == "weigher" else "Finalize Intake  →  Payment")
         self.btn_finalize.setObjectName("PrimaryButton")
         self.btn_finalize.setMinimumHeight(42)
         btns.addWidget(self.btn_reject)
         btns.addWidget(self.btn_print)
+        btns.addWidget(self.btn_print_value)
         btns.addStretch(1)
         btns.addWidget(self.btn_close)
         btns.addWidget(self.btn_finalize)
@@ -148,7 +150,8 @@ class WeighTicketReviewDialog(QDialog):
         self.btn_remove_round.clicked.connect(self._remove_round)
         self.btn_finalize.clicked.connect(self.save_changes if self.mode == "weigher" else self.finalize)
         self.btn_reject.clicked.connect(self._cancel_ticket)
-        self.btn_print.clicked.connect(self._print_slip)
+        self.btn_print.clicked.connect(lambda: self._print_slip("weighing"))
+        self.btn_print_value.clicked.connect(lambda: self._print_slip("value"))
         self.btn_close.clicked.connect(self.reject)
 
         self._active_line = 0
@@ -366,12 +369,11 @@ class WeighTicketReviewDialog(QDialog):
         self.accept()
 
     def _process_payment(self, res):
-        """Same payment flow as a normal cashier purchase: offer advances, take payment, print."""
+        """Same payment flow as a normal cashier purchase: offer advances, take payment (receipts print on request)."""
         from database.models.party import Party
         from database.session import get_session
         from apps.product_management_app.features.profiling.dialogs.advance_choice_dialog import prompt_and_apply_advance
         from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
-        from apps.product_management_app.features.receipts_v2 import PURCHASE, print_full_then_optional_delivery
 
         uid = require_user_id()
         with get_session() as s:
@@ -380,7 +382,6 @@ class WeighTicketReviewDialog(QDialog):
             self, party_id=int(res["party_id"]), entity_type="purchase", entity_id=int(res["purchase_id"]),
             balance=float(res["total_amount"]), user_id=uid, party_name=(party.display_name if party else ""))
         PurchasePaymentDialog(party=party, user_id=uid, parent=self, print_slip=False).exec_()
-        print_full_then_optional_delivery(self, PURCHASE, int(res["purchase_id"]))
 
     def _cancel_ticket(self):
         weigher = self.mode == "weigher"
@@ -398,10 +399,10 @@ class WeighTicketReviewDialog(QDialog):
             return
         self.accept()
 
-    def _print_slip(self):
+    def _print_slip(self, option: str = "weighing"):
         try:
             from apps.product_management_app.features.receipts_v2 import get_shop, receipt_print, render_weigh_slip
-            receipt_print.print_text(self, render_weigh_slip(self._t, get_shop(), self._t["receipt_type"]),
-                                     window_title=f"Weighing Slip - {self._t['ticket_no']}")
+            receipt_print.print_text(self, render_weigh_slip(self._t, get_shop(), option),
+                                     window_title=f"Weighing Receipt - {self._t['ticket_no']}")
         except Exception as e:
             QMessageBox.warning(self, "Print", str(e))

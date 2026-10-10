@@ -256,6 +256,10 @@ class CashierSalesView(QWidget):
 
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_clear = QPushButton("Clear Cart")
+        self.btn_print_qp = QPushButton("QP Supplier Receipts")
+        self.btn_print_qp.setToolTip("Print the supplier receipt(s) for the Quick Purchase(s) of the last sale")
+        self.btn_print_qp.setEnabled(False)
+        self._last_qp_ids: List[int] = []
         self.btn_delivery = QPushButton("Delivery Note")
         self.btn_delivery.setToolTip("Print a products-only delivery note for the last sale")
         self.btn_receipt = QPushButton("Print Receipt")
@@ -266,6 +270,7 @@ class CashierSalesView(QWidget):
         btn_row.addWidget(self.btn_remove)
         btn_row.addWidget(self.btn_clear)
         btn_row.addWidget(self.btn_delivery)
+        btn_row.addWidget(self.btn_print_qp)
         btn_row.addWidget(self.btn_receipt)
         btn_row.addStretch(1)
 
@@ -287,6 +292,7 @@ class CashierSalesView(QWidget):
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear_cart)
         self.btn_delivery.clicked.connect(self._print_last_delivery)
+        self.btn_print_qp.clicked.connect(self._print_last_qp_receipts)
         self.btn_receipt.clicked.connect(self._print_last_receipt)
         self.btn_checkout.clicked.connect(self._checkout)
 
@@ -1147,40 +1153,9 @@ class CashierSalesView(QWidget):
         # The sale genuinely committed - now, and only now, offer to print
         # supplier documents for whatever was just, actually bought. Real
         # purchase ids only exist from this point on.
-        if committed_qp_ids:
-            resp = QMessageBox.question(
-                self, "Print Receipts",
-                "Print receipt(s) for the Quick Purchase(s) just made?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-            )
-            if resp == QMessageBox.Yes:
-                from apps.product_management_app.features.sales_orders.dialogs.driver_picker_dialog import (
-                    DriverPickerDialog,
-                )
-                driver_dlg = DriverPickerDialog(
-                    parent=self,
-                    skip_label="Print Without Driver",
-                    hint_text="Optional - who's collecting these goods from the supplier(s)?",
-                )
-                driver_name = None
-                if driver_dlg.exec_() == driver_dlg.Accepted:
-                    driver_name = driver_dlg.selected_driver_name
-
-                try:
-                    from apps.product_management_app.features.receipts_v2.receipt_print import (
-                        print_combined_delivery_note, print_quick_purchase_supplier_receipt,
-                    )
-                    if len(committed_qp_ids) > 1:
-                        print_combined_delivery_note(self, committed_qp_ids)
-                    for pid in committed_qp_ids:
-                        print_quick_purchase_supplier_receipt(self, pid, driver_name)
-                except Exception as e:
-                    QMessageBox.warning(
-                        self, "Printing Failed",
-                        f"The purchase(s) were recorded correctly, but "
-                        f"printing failed:\n{e}\n\nYou can reprint later "
-                        f"from each supplier's own profile."
-                    )
+        # Supplier receipts for what was just bought are NOT printed by themselves: "QP Supplier Receipts" does it.
+        self._last_qp_ids = list(committed_qp_ids)
+        self.btn_print_qp.setEnabled(bool(committed_qp_ids))
 
         ref = str(res.get("reference") or "")
         sale_id = int(res.get("sale_id") or 0)
@@ -1244,6 +1219,26 @@ class CashierSalesView(QWidget):
         self.customer_cb.setCurrentIndex(0)
         self.walkin_name.clear()
         self.walkin_type_cb.setCurrentIndex(0)
+
+    def _print_last_qp_receipts(self):
+        """Supplier receipt(s) for the Quick Purchase(s) of the last sale - only when asked for."""
+        if not self._last_qp_ids:
+            QMessageBox.information(self, "Quick Purchase", "No recent Quick Purchase to print a receipt for.")
+            return
+        from apps.product_management_app.features.sales_orders.dialogs.driver_picker_dialog import DriverPickerDialog
+        driver_dlg = DriverPickerDialog(parent=self, skip_label="Print Without Driver",
+                                        hint_text="Optional - who's collecting these goods from the supplier(s)?")
+        driver_name = driver_dlg.selected_driver_name if driver_dlg.exec_() == driver_dlg.Accepted else None
+        try:
+            from apps.product_management_app.features.receipts_v2.receipt_print import (
+                print_combined_delivery_note, print_quick_purchase_supplier_receipt,
+            )
+            if len(self._last_qp_ids) > 1:
+                print_combined_delivery_note(self, self._last_qp_ids)
+            for pid in self._last_qp_ids:
+                print_quick_purchase_supplier_receipt(self, pid, driver_name)
+        except Exception as e:
+            QMessageBox.warning(self, "Printing Failed", f"The receipt(s) could not be printed:\n{e}")
 
     def _print_last_delivery(self):
         """Print a products-only delivery note for the most recent sale."""

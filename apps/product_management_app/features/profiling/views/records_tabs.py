@@ -71,7 +71,9 @@ class DocumentsTab(QWidget):
         self.chk_voided = QCheckBox("Show voided")
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#374151; font-weight:600;")
-        for b in (self.btn_all, self.btn_unpaid, self.btn_clear):
+        self.btn_print = QPushButton("Print Receipt")
+        self.btn_print.setToolTip("Prints the receipt of the highlighted row - nothing prints by itself")
+        for b in (self.btn_all, self.btn_unpaid, self.btn_clear, self.btn_print):
             bar.addWidget(b)
         bar.addWidget(self.lbl)
         bar.addStretch(1)
@@ -88,8 +90,23 @@ class DocumentsTab(QWidget):
         self.btn_all.clicked.connect(lambda: self._tick_all(True))
         self.btn_unpaid.clicked.connect(self.tick_unpaid)
         self.btn_clear.clicked.connect(lambda: self._tick_all(False))
+        self.btn_print.clicked.connect(self.print_selected)
         self.chk_voided.toggled.connect(lambda _on: self.reload())
         self.reload()
+
+    def print_selected(self) -> None:
+        """The full receipt (then, if wanted, a delivery note) of the highlighted sale / purchase."""
+        from PySide2.QtWidgets import QMessageBox
+        r = self.table.currentRow()
+        if not 0 <= r < len(self.rows):
+            QMessageBox.information(self, "Print Receipt", f"Click a {self.kind} row first.")
+            return
+        try:
+            from apps.product_management_app.features.receipts_v2 import (
+                PURCHASE, SALE, print_full_then_optional_delivery)
+            print_full_then_optional_delivery(self, SALE if self.kind == "sale" else PURCHASE, int(self.rows[r]["id"]))
+        except Exception as e:
+            QMessageBox.warning(self, "Print Receipt", str(e))
 
     def reload(self) -> None:
         keep = set(self.ticked_ids())

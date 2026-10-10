@@ -202,3 +202,13 @@ console: the customer's advance prompt and the Sale Payment screen, and an offer
 Pending Quick Purchases are fully editable: **Edit** opens the editor for draft *and* pending orders (`update_pending`: change the waiting
 lines - double-click a row for quantity / cost / supplier - add products, remove waiting lines; received lines are history and untouched),
 besides the per-line **Edit line** / **Drop line** / **Route** buttons.
+
+**Receipts are manual.** Nothing prints by itself anywhere - every receipt has its own button: weigher station (*Print Receipt*, after
+*Submit to Cashier*), Finalize List / review dialog / Weigh Tickets queue (*Print Weighing Receipt*, *Print Value Receipt*, and for
+finalized tickets *Print Purchase Receipt*), Cashier Purchase (*Print Receipt*, *Print Last Swap Receipts*), customer profile
+Sales/Purchases tabs (*Print Receipt*), Sales Console (*Delivery Note*, *Print Receipt*, *QP Supplier Receipts*), Quick Purchases
+(*Print Sale Receipt*, *Print Supplier Receipt*).
+The weigher has **two receipts** (`receipts_v2/weigh_slip.py`): Option 1 *Weighing Receipt* (product + total bags + total kg, grand
+total bags, "Received by" / weigher signatures) and Option 2 *Full Value Receipt* (+ price/kg, amounts, total, payment status /
+amount paid / balance from the purchase once finalized, cashier + customer signatures). `receipt_type` is `weighing` or `value`
+(`full` / `summary` remain only for tickets saved before). The Quick Purchases screen is also in the Admin (Product Management) menu.

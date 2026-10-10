@@ -757,7 +757,8 @@ class WeigherStationView(QWidget):
         cap = QLabel("RECEIPT TYPE")
         cap.setObjectName("SectionLabel")
         ll.addWidget(cap)
-        self.receipt_seg = Segmented([("full", "Full slip (every round)"), ("summary", "Summary (totals only)")])
+        self.receipt_seg = Segmented([("weighing", "Option 1 - Weighing Receipt"),
+                                      ("value", "Option 2 - Full Value Receipt")])
         ll.addWidget(self.receipt_seg)
         self.lbl_receipt_totals = QLabel("")
         self.lbl_receipt_totals.setStyleSheet("font-size:15px; font-weight:700; color:#0f766e; margin-top:6px;")
@@ -769,10 +770,10 @@ class WeigherStationView(QWidget):
         ll.addWidget(self.lbl_status)
         ll.addStretch(1)
         self.btn_back = QPushButton("←  Back to Price")
-        self.btn_submit = QPushButton("Submit && Print Slip")
+        self.btn_submit = QPushButton("Submit to Cashier")
         self.btn_submit.setObjectName("PrimaryButton")
         self.btn_submit.setMinimumHeight(44)
-        self.btn_print = QPushButton("Print Again")
+        self.btn_print = QPushButton("Print Receipt")
         self.btn_print.setVisible(False)
         self.btn_new = QPushButton("New Weighing")
         self.btn_new.setObjectName("PrimaryButton")
@@ -785,7 +786,7 @@ class WeigherStationView(QWidget):
         right = _card()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(16, 14, 16, 14)
-        cap2 = QLabel("SLIP PREVIEW - signed by the weigher and the customer / supplier")
+        cap2 = QLabel("RECEIPT PREVIEW - nothing prints until you press Print Receipt")
         cap2.setObjectName("SectionLabel")
         rl.addWidget(cap2)
         self.preview = QPlainTextEdit()
@@ -800,7 +801,7 @@ class WeigherStationView(QWidget):
 
         self.receipt_seg.changed.connect(lambda _k: self._render_preview())
         self.btn_back.clicked.connect(lambda: self._go(2))
-        self.btn_submit.clicked.connect(self.submit_and_print)
+        self.btn_submit.clicked.connect(self.submit)
         self.btn_print.clicked.connect(self._print_current)
         self.btn_new.clicked.connect(self.new_weighing)
         return page
@@ -833,7 +834,7 @@ class WeigherStationView(QWidget):
         self._render_preview()
         self._go(3)
 
-    def submit_and_print(self):
+    def submit(self):
         try:
             self._ticket = WeighService.submit_ticket(self.ticket_id, self.receipt_seg.key())
         except Exception as e:
@@ -842,21 +843,19 @@ class WeigherStationView(QWidget):
         self._submitted = True
         self.btn_submit.setVisible(False)
         self.btn_back.setVisible(False)
-        self.receipt_seg.setEnabled(False)
         self.btn_print.setVisible(True)
         self.btn_new.setVisible(True)
         self.lbl_status.setText(f"✔ {self._ticket['ticket_no']} submitted to the cashier.\n"
-                                "Have the slip signed by the weigher and the customer / supplier.")
+                                "Pick Option 1 or Option 2 and press Print Receipt when you need it.")
         self._render_preview()
         self._load_open_tickets()
-        self._print_current()
 
     def _print_current(self):
         from apps.product_management_app.features.receipts_v2 import receipt_print
         try:
-            receipt_print.print_text(self, self._slip_text(), window_title=f"Weighing Slip - {self._ticket['ticket_no']}")
+            receipt_print.print_text(self, self._slip_text(), window_title=f"Weighing Receipt - {self._ticket['ticket_no']}")
         except Exception as e:
-            self._msg(f"The slip could not be printed:\n{e}\n\nThe ticket is saved - use Print Again.", "Print")
+            self._msg(f"The receipt could not be printed:\n{e}\n\nThe ticket is saved - press Print Receipt to try again.", "Print")
 
     def new_weighing(self):
         self.ticket_id = 0

@@ -8,6 +8,7 @@ from PySide2.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from apps.product_management_app.features.receipts_v2 import PURCHASE, SALE
 from database.models import Party
 from database.services.quick_purchase_order_service import QuickPurchaseOrderService as Q
 from database.session import get_session
@@ -79,11 +80,14 @@ class QuickPurchasesView(QWidget):
         self.btn_cancel = QPushButton("Cancel order")
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.setProperty("role", "danger")
+        self.btn_print_sale = QPushButton("Print Sale Receipt")
+        self.btn_print_buy = QPushButton("Print Supplier Receipt")
         self.btn_load = QPushButton("Load cart into Sales")
         self.btn_load.setObjectName("PrimaryButton")
         self.btn_load.setVisible(load_callback is not None)
         for b in (self.btn_edit, self.btn_send, self.btn_line, self.btn_drop, self.btn_route, self.btn_receive,
-                  self.btn_stock, self.btn_cancel, self.btn_delete, self.btn_load):
+                  self.btn_stock, self.btn_cancel, self.btn_delete, self.btn_print_sale, self.btn_print_buy,
+                  self.btn_load):
             act.addWidget(b)
         act.addStretch(1)
         act.addWidget(self.btn_confirm)
@@ -117,6 +121,8 @@ class QuickPurchasesView(QWidget):
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_delete.clicked.connect(self.delete)
         self.btn_load.clicked.connect(self.load_cart)
+        self.btn_print_sale.clicked.connect(self.print_sale)
+        self.btn_print_buy.clicked.connect(self.print_supplier)
         self.btn_line.clicked.connect(self.edit_line)
         self.btn_drop.clicked.connect(self.drop_line)
         self.btn_confirm.clicked.connect(self.confirm)
@@ -186,6 +192,8 @@ class QuickPurchasesView(QWidget):
         live = bool(o and o["cart"]) and st in ("draft", "pending") and any(c.get("qp") for c in o["cart"])
         done = bool(o and o["cart"]) and st in ("completed", "cancelled") and not o["sale_id"]
         self.btn_load.setEnabled(live or done)
+        self.btn_print_sale.setEnabled(bool(o and o["sale_id"]))
+        self.btn_print_buy.setEnabled(bool(o and any(ln["purchase_id"] for ln in o["lines"])))
         self.btn_confirm.setEnabled(bool(o) and not o["sale_id"] and (
             st in ("draft", "pending") or (st == "completed" and bool(o["cart"]))))
         self.detail.setRowCount(0)
@@ -401,6 +409,26 @@ class QuickPurchasesView(QWidget):
                                   "the books stay as they are.", QMessageBox.Yes | QMessageBox.No)
         if ok == QMessageBox.Yes:
             self._run(lambda: Q.cancel(oid, "Cancelled"), "Cancel")
+
+    def print_sale(self):
+        """The sale receipt - printed only when asked for."""
+        _oid, o = self._order()
+        if o and o["sale_id"]:
+            self._print(SALE, [o["sale_id"]])
+
+    def print_supplier(self):
+        """The supplier purchase receipt(s) for the goods received - printed only when asked for."""
+        _oid, o = self._order()
+        if o:
+            self._print(PURCHASE, sorted({ln["purchase_id"] for ln in o["lines"] if ln["purchase_id"]}))
+
+    def _print(self, doc_type, ids):
+        from apps.product_management_app.features.receipts_v2 import print_full_then_optional_delivery
+        for i in ids:
+            try:
+                print_full_then_optional_delivery(self, doc_type, int(i))
+            except Exception as e:
+                QMessageBox.warning(self, "Print Receipt", f"Could not print #{i}:\n{e}")
 
     def load_cart(self):
         _oid, o = self._order()
