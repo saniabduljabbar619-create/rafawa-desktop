@@ -177,7 +177,9 @@ class QuickPurchasesView(QWidget):
         self.btn_stock.setEnabled(st in ("draft", "pending") and waiting)
         self.btn_cancel.setEnabled(st in ("draft", "pending") and not got)
         self.btn_delete.setEnabled(bool(o) and st != "completed" and not got)
-        self.btn_load.setEnabled(bool(o and o["cart"]) and st in ("completed", "cancelled"))
+        live = bool(o and o["cart"]) and st in ("draft", "pending") and any(c.get("qp") for c in o["cart"])
+        done = bool(o and o["cart"]) and st in ("completed", "cancelled") and not o["sale_id"]
+        self.btn_load.setEnabled(live or done)
         self.btn_confirm.setEnabled(bool(o) and not o["sale_id"] and (
             st in ("draft", "pending") or (st == "completed" and bool(o["cart"]))))
         self.detail.setRowCount(0)
