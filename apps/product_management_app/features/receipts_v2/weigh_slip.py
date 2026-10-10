@@ -68,9 +68,10 @@ def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = W
     value = option == VALUE
     role = "Supplier" if ticket.get("party_role") == "supplier" else "Customer"
     out = _header(shop)
-    out += [_rule(), _center("FULL VALUE RECEIPT (OPTION 2)" if value else "WEIGHING RECEIPT (OPTION 1)"),
-            _center("(Product + Bags + KG + Price + Total + Payment)" if value
-                    else "(Product + Total Bags + Total KG)"), _rule()]
+    out.append(_rule())
+    if value:
+        out += [_center("FULL VALUE RECEIPT (OPTION 2)"),
+                _center("(Product + Bags + KG + Price + Total + Payment)"), _rule()]
     out.append(_kv("Receipt No", ticket.get("ticket_no", "")))
     out.append(_kv(f"{role} Name", ticket.get("party_name", "")))
     out.append(_kv("Phone", ticket.get("party_phone", "") or "-"))
@@ -116,7 +117,7 @@ def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = W
         out.append(_two("GRAND TOTAL BAGS:", f"{_bags(ticket.get('total_bags'))} bags"))
         out += ["", "Note: Total KG is shown per product. Grand",
                 "Total KG is not provided on this receipt.", "", "",
-                "Received by: ______________________", "", "Weigher Signature: _________________"]
+                "Weigher Signature: _________________"]
     out += ["", _rule(), _center(shop.footer_note or "Thank you for trading with us"), "", ""]
     return "\n".join(out)
 

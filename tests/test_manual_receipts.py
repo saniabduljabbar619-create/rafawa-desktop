@@ -41,12 +41,12 @@ def printed(monkeypatch):
 
 def test_option_1_weighing_receipt_has_products_bags_kg_and_the_two_signatures():
     t = render_weigh_slip(TICKET, SHOP, "weighing")
-    for needle in ("WEIGHING RECEIPT (OPTION 1)", "(Product + Total Bags + Total KG)", "Receipt No    : WT-00128",
+    for needle in ("GRAND TOTAL BAGS", "Receipt No    : WT-00128",
                    "Customer Name : Sharifadden", "Phone", "Ref ID        : 128", "User          : Basiru Rafawa",
                    "Total Bags", "Total KG", "100 bags", "5,940 KG", "GRAND TOTAL BAGS:", "205 bags",
-                   "Grand\nTotal KG is not provided", "Received by:", "Weigher Signature:", "Thank you for trading with us"):
+                   "Grand\nTotal KG is not provided", "Weigher Signature:", "Thank you for trading with us"):
         assert needle in t, needle
-    assert "Price" not in t and "Payment" not in t
+    assert "Price" not in t and "Payment" not in t and "OPTION 1" not in t and "Received by" not in t
     assert all(len(line) <= WIDTH for line in t.splitlines())
 
 
