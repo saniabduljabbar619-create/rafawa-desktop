@@ -253,3 +253,88 @@ def test_checkout_back_to_cart_changes_nothing(qapp, boxes, monkeypatch):
     monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: None)
     v._checkout()
     assert Q.list_orders() == [] and len(v.cart) == 2 and v._pending_standalone_qp
+
+
+# ---------------------------------------------------------------- edit lines / confirm from the screen
+def _sourcing(bags=30, supplier=SUPPLIER_ID):
+    cart = [{"product_id": FERT_ID, "product_type": "fertilizer", "name": "NPK", "unit_price": 10000,
+             "unit_cost_at_sale": 9000, "qty_bags": 80, "total_weight_kg": 0}]
+    return Q.create([{"product_id": FERT_ID, "qty_bags": bags, "unit_cost": 9300, "supplier_id": supplier}],
+                    send=True, cart=cart, buyer_party_id=1, customer_name="Customer One")
+
+
+def test_edit_line_dialog_splits_the_order_and_routes_the_rest(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.views import quick_purchases as qv
+    oid = _sourcing()
+    v = _view()
+    _select(v, oid)
+    assert not v.btn_line.isEnabled()
+    v.detail.selectRow(0)
+    assert v.btn_line.isEnabled() and v.btn_drop.isEnabled()
+    monkeypatch.setattr(qv.LineEditDialog, "exec_", lambda self: self.Accepted)
+    monkeypatch.setattr(qv.LineEditDialog, "values", lambda self: {"qty": 12.0, "unit_cost": 9400.0,
+                                                                   "supplier_id": SUPPLIER_ID, "note": ""})
+    v.btn_line.click()
+    lines = Q.get(oid)["lines"]
+    assert [(x["qty_bags"], x["assigned"]) for x in lines] == [(12, True), (18, False)]
+    assert v.detail.item(1, 5).text() == "needs a supplier"
+    monkeypatch.setattr(qv.LineEditDialog, "values", lambda self: {"qty": 18.0, "unit_cost": 9500.0,
+                                                                   "supplier_id": SUPPLIER_2, "note": "price"})
+    v.detail.selectRow(1)
+    v.btn_line.click()
+    assert Q.get(oid)["lines"][1]["supplier"] == "Supplier Two"
+    v.detail.selectRow(0)
+    v.btn_drop.click()
+    assert Q.get(oid)["lines"][0]["state"] == "dropped"
+
+
+def test_line_edit_dialog_reads_back_what_was_typed(qapp):
+    from apps.product_management_app.features.cashier.dialogs.quick_purchase_order_dialog import LineEditDialog
+    oid = _sourcing()
+    ln = Q.get(oid)["lines"][0]
+    dlg = LineEditDialog(None, ln)
+    assert dlg.qty.value() == 30 and dlg.supplier.currentData() == SUPPLIER_ID
+    dlg.qty.setValue(20)
+    dlg.supplier.setCurrentIndex(dlg.supplier.findData(0))
+    assert dlg.values()["qty"] == 20 and dlg.values()["supplier_id"] == 0
+
+
+def test_confirm_dialog_prices_payments_and_the_screen_completes_the_order(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
+        PAID_FULL, PART_PAID, QuickPurchaseConfirmDialog)
+    from database.models.payment import Payment
+    from apps.product_management_app.features.cashier.views import quick_purchases as qv
+    oid = _sourcing()
+    v = _view()
+    _select(v, oid)
+    assert v.btn_confirm.isEnabled()
+    d = QuickPurchaseConfirmDialog(None, oid)
+    assert d.price_table.rowCount() == 1 and d._price_spins[FERT_ID].value() == 10000
+    d._price_spins[FERT_ID].setValue(10500)
+    d.customer_row.mode.setCurrentText(PART_PAID)
+    d.customer_row.amount.setValue(300000)
+    (row,) = d._supplier_rows.values()
+    row.mode.setCurrentText(PAID_FULL)
+    assert row.paid() == 30 * 9300
+    assert "customer still owes" in d.summary.text() and "540,000.00" in d.summary.text()
+    import apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog as cd
+    monkeypatch.setattr(cd, "QuickPurchaseConfirmDialog", lambda parent, order_id: d)
+    monkeypatch.setattr(type(d), "exec_", lambda self: self.Accepted)
+    v.btn_confirm.click()
+    o = Q.get(oid)
+    assert o["status"] == "completed" and o["sale_id"]
+    with get_session() as s:
+        pays = {(p.entity_type, p.direction): float(p.amount) for p in s.query(Payment)}
+    assert pays == {("purchase", "out"): 279000.0, ("sale", "in"): 300000.0}
+    assert any("Payments center" in m[1] for m in boxes if m[0] == "question")
+    assert not v.btn_confirm.isEnabled()                       # already sold
+
+
+def test_confirm_dialog_refuses_a_zero_selling_price(qapp, boxes):
+    from apps.product_management_app.features.cashier.dialogs.quick_purchase_confirm_dialog import (
+        QuickPurchaseConfirmDialog)
+    oid = _sourcing()
+    d = QuickPurchaseConfirmDialog(None, oid)
+    d._price_spins[FERT_ID].setValue(0)
+    d.btn_ok.click()
+    assert d.result() != d.Accepted and boxes[-1][0] == "warning" and "selling price" in boxes[-1][1]
