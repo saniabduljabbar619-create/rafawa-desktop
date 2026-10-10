@@ -218,34 +218,133 @@ def test_standalone_dialog_adds_to_cart_with_a_preselected_supplier_and_crop_bag
     meta["bags_spin"].setValue(6)
     dlg.btn_ok.click()
     assert dlg.result() == dlg.Accepted
-    assert dlg.new_cart_lines == [{"product_id": CROP_ID, "product_type": "crops", "name": "Maize", "qty": 300.0,
-                                   "bags": 6, "unit_cost": 9300.0}]
+    (line,) = dlg.new_cart_lines
+    assert line.pop("key") == dlg.pending_quick_purchases[0]["short_lines"][0]["key"]   # ties row to its plan
+    assert line == {"product_id": CROP_ID, "product_type": "crops", "name": "Maize", "qty": 300.0, "bags": 6,
+                    "unit_cost": 9300.0}
     assert dlg.pending_quick_purchases[0]["short_lines"][0]["qty_bags"] == 6
 
 
 def _cart_with_planned_fertilizer(qapp, monkeypatch):
     from apps.product_management_app.features.cashier.views import cashier_sales as cs
     v = _sales_view()
+    v.walkin_name.setText("Musa")
     v.cart = [cs.CartItem(product_id=FERT_ID, product_type="fertilizer", name="NPK", unit_price=10000,
                           unit_cost_at_sale=9000, qty_bags=20, total_weight_kg=0)]     # from our own stock
     v._pending_standalone_qp = [{"supplier_party_id": SUPPLIER_ID, "short_lines": [
-        {"product_id": FERT_ID, "product_type": "fertilizer", "qty_bags": 30, "total_weight_kg": 0.0,
+        {"key": "k1", "product_id": FERT_ID, "product_type": "fertilizer", "qty_bags": 30, "total_weight_kg": 0.0,
          "unit_cost": 9300}]}]
     v.cart.append(cs.CartItem(product_id=FERT_ID, product_type="fertilizer", name="NPK", unit_price=10000,
-                              unit_cost_at_sale=9300, qty_bags=30, total_weight_kg=0))
+                              unit_cost_at_sale=9300, qty_bags=30, total_weight_kg=0, qp_key="k1"))
     return v
 
 
-@pytest.mark.parametrize("choice,status", [("pending", "pending"), ("draft", "draft")])
-def test_checkout_can_save_standalone_quick_purchase_as_pending_or_draft(qapp, boxes, monkeypatch, choice, status):
+def _fake_checkout(monkeypatch, v):
+    """Stand in for the checkout / payment dialogs - the rest of the real flow runs."""
+    from apps.product_management_app.features.cashier.views import cashier_sales as cs
+
+    class Checkout:
+        Accepted = 1
+
+        def __init__(self, *a, **k):
+            self.total = k.get("total", 0)
+
+        def exec_(self):
+            return 1
+
+        def payload(self):
+            return {"discount": 0.0, "grand_subtotal": self.total, "rate_overrides": {}, "discount_overrides": {},
+                    "note": ""}
+
+    class Payment:
+        def __init__(self, *a, **k):
+            pass
+
+        def exec_(self):
+            return 1
+
+    monkeypatch.setattr(cs, "SaleCheckoutDialog", Checkout)
+    monkeypatch.setattr(cs, "SalePaymentDialog", Payment)
+    import apps.product_management_app.features.profiling.dialogs.advance_choice_dialog as adv
+    monkeypatch.setattr(adv, "prompt_and_apply_advance", lambda *a, **k: 0)
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+
+
+def test_status_between_carting_and_checkout_pending_continues_and_the_order_is_completed(qapp, boxes, monkeypatch):
+    from database.models.sale_item import SaleItem
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    _fake_checkout(monkeypatch, v)
+    seen = {}
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: seen.setdefault("s", "pending"))
+    v._checkout()
+    (o,) = Q.list_orders()
+    assert o["status"] == "completed" and o["sale_id"] and o["lines"][0]["state"] == "received"
+    assert [(c["qty_bags"], c["qp"]) for c in o["cart"]] == [(20, False), (30, True)]
+    assert v.cart == [] and v._qp_order_id is None and stock(FERT_ID)[0] == 30          # 50 + 30 bought - 50 sold
+    with get_session() as s:
+        costs = sorted((float(i.unit_cost_snapshot), i.qty_bags) for i in s.query(SaleItem))
+    assert costs == [(9000.0, 20), (9300.0, 30)]               # stock lot at book cost, bought lot at the dealer's
+
+
+@pytest.mark.parametrize("choice,status", [("draft", "draft")])
+def test_checkout_can_save_standalone_quick_purchase_as_draft(qapp, boxes, monkeypatch, choice, status):
     v = _cart_with_planned_fertilizer(qapp, monkeypatch)
     monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: choice)
     v._checkout()
     (o,) = Q.list_orders(status)
     assert o["lines"][0]["qty_bags"] == 30 and o["lines"][0]["supplier_id"] == SUPPLIER_ID
-    assert [(c["product_id"], c["qty_bags"]) for c in o["cart"]] == [(FERT_ID, 20), (FERT_ID, 30)]   # stock + quick purchase
-    assert v.cart == [] and v._pending_standalone_qp == []
+    assert [(c["product_id"], c["qty_bags"]) for c in o["cart"]] == [(FERT_ID, 20), (FERT_ID, 30)]
+    assert v.cart == [] and v._pending_standalone_qp == [] and v._qp_order_id is None
     assert stock(FERT_ID)[0] == 50                                           # nothing bought yet
+
+
+def test_removing_a_quick_purchase_cart_row_drops_its_planned_purchase_and_order_line(qapp, boxes, monkeypatch):
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: "pending")
+    assert v._save_quick_purchase_order("pending") is True
+    oid = v._qp_order_id
+    v.cart_table.setRowCount(2)
+    v.cart_table.selectRow(1)                                  # the Quick Purchase row
+    v._remove_selected()
+    assert [c.qp_key for c in v.cart] == [""] and v._pending_standalone_qp == []
+    assert Q.get(oid)["status"] == "cancelled" and v._qp_order_id is None
+    # a cart row from our own stock never touches a plan
+    v2 = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    v2.cart_table.setRowCount(2)
+    v2.cart_table.selectRow(0)
+    v2._remove_selected()
+    assert len(v2._pending_standalone_qp) == 1
+
+
+def test_a_failed_sale_keeps_the_plan_and_buys_nothing(qapp, boxes, monkeypatch):
+    from database.services.sales_service import SaleService
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    _fake_checkout(monkeypatch, v)
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: "pending")
+    monkeypatch.setattr(SaleService, "record", staticmethod(lambda payload: (_ for _ in ()).throw(ValueError("boom"))))
+    v._checkout()
+    assert stock(FERT_ID)[0] == 50 and len(v._pending_standalone_qp) == 1 and len(v.cart) == 2
+    assert [o["status"] for o in Q.list_orders()] == ["pending"] and v._qp_order_id
+
+
+def test_a_pending_order_edited_elsewhere_comes_back_live_into_the_cart(qapp, boxes, monkeypatch):
+    v = _cart_with_planned_fertilizer(qapp, monkeypatch)
+    monkeypatch.setattr(type(v), "_ask_quick_purchase_status", lambda self: "pending")
+    v._save_quick_purchase_order("pending")
+    oid = v._qp_order_id
+    (ln,) = Q.get(oid)["lines"]
+    Q.edit_line(oid, ln["id"], qty=12, unit_cost=9400, supplier_id=SUPPLIER_2)       # the supplier has only 12
+    Q.drop_line(oid, Q.get(oid)["lines"][1]["id"], "nobody has the rest")
+    v2 = _sales_view()
+    assert v2._load_quick_purchase_cart(Q.get(oid)) is True
+    assert [(c.qty_bags, c.unit_cost_at_sale, bool(c.qp_key)) for c in v2.cart] == [(20, 9000, False),
+                                                                                    (12, 9400, True)]
+    assert v2._qp_order_id == oid and v2._pending_standalone_qp[0]["supplier_party_id"] == SUPPLIER_2
+    assert v2.cart[1].unit_price == 10000                                        # price carried from the cart
+    _fake_checkout(monkeypatch, v2)
+    v2.walkin_name.setText("Musa")
+    v2._checkout()                                                               # straight to checkout, no status ask
+    assert Q.get(oid)["status"] == "completed" and stock(FERT_ID)[0] == 50 + 12 - 32
 
 
 def test_checkout_back_to_cart_changes_nothing(qapp, boxes, monkeypatch):

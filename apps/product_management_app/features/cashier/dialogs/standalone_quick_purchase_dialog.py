@@ -21,6 +21,7 @@ purchase belongs to one supplier by nature.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Dict, Any, List
 
 from PySide2.QtCore import Qt
@@ -289,7 +290,9 @@ class StandaloneQuickPurchaseDialog(QDialog):
                 is_fert = meta["is_fert"]
                 qty = meta["qty_spin"].value()
                 bags = int(qty) if is_fert else int(meta["bags_spin"].value())
+                meta["key"] = uuid.uuid4().hex[:10]            # ties the cart row to this planned line
                 short_lines.append({
+                    "key": meta["key"],
                     "product_id": meta["product_id"],
                     "product_type": meta["product_type"],
                     "qty_bags": bags,
@@ -305,6 +308,7 @@ class StandaloneQuickPurchaseDialog(QDialog):
             for i in row_indices:
                 meta = self._row_meta[i]
                 purchased_lines.append({
+                    "key": meta["key"],
                     "product_id": meta["product_id"],
                     "product_type": meta["product_type"],
                     "name": meta["name"],

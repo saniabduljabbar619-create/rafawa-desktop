@@ -184,3 +184,11 @@ last checkout page: (1) selling price per product - the customer is sold only wh
 Purchase per supplier, records the sale (bought lot at the dealer's cost, stock lot at book cost), then the payments through
 `PaymentService`; a failed sale undoes the purchases. Unpaid balances live in the Payments center (the screen offers to open it).
 `quick_purchase_orders.sale_id` (migration 0012) links the order to its sale.
+
+**Status step between carting and checkout (standalone Quick Purchase).** At Finalize Sale, if the cart holds Quick Purchase rows
+(`CartItem.qp_key`) that have no saved order yet, the cashier picks *Pending* (default - saved with the whole cart, then straight on
+to the normal checkout / payment, unchanged) or *Draft* (saved, checkout not opened). The order stays editable in Quick Purchases;
+"Load cart into Sales" brings a draft/pending order back **live** (its current lines become the planned purchase). When the sale is
+recorded `QuickPurchaseOrderService.mark_fulfilled` closes the order. Bug fixes in this flow: removing a Quick Purchase cart row also
+drops its planned purchase (and order line); the sale now costs the bought goods at the dealer's price and the rest of the product at
+the book cost it had before the purchase; a failed sale keeps the plan.

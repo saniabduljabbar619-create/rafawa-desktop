@@ -351,6 +351,53 @@ class QuickPurchaseOrderService:
 
     @staticmethod
     @require_role(*INTAKE_ROLES)
+    def add_lines(order_id: int, lines: List[Dict[str, Any]]) -> None:
+        """More products were added to the cart for the same Quick Purchase: put them on the order too."""
+        with get_session() as s:
+            o = QuickPurchaseOrderService._load(s, order_id, lock=True)
+            QuickPurchaseOrderService._need_status(o, "draft", "pending")
+            n = max([x.sort_order for x in o.lines] or [-1]) + 1
+            for i, raw in enumerate(lines):
+                ln = QuickPurchaseOrderService._make_line(s, n + i, raw, require_supplier=False)
+                o.lines.append(ln)
+                s.flush()
+                if o.status == "pending" and ln.supplier_id:
+                    s.add(QuickPurchaseRoute(line_id=ln.id, supplier_id=ln.supplier_id, outcome="asked",
+                                             by_user_id=_uid()))
+            AuditService.record("qp.add_lines", "quick_purchase", int(o.id),
+                                f"{o.order_no}: {len(lines)} line(s) added", session=s)
+            s.commit()
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def mark_fulfilled(order_id: int, purchases: Dict[int, int], sale_id: Optional[int]) -> None:
+        """
+        The Sales Console bought the goods (one Purchase per supplier) and recorded the sale: close the order's
+        lines for those suppliers as received and link the sale. Lines for any other supplier stay open.
+        """
+        purchases = {int(k): int(v) for k, v in purchases.items()}
+        with get_session() as s:
+            o = QuickPurchaseOrderService._load(s, order_id, lock=True)
+            for ln in QuickPurchaseOrderService._open_lines(o):
+                pid = purchases.get(int(ln.supplier_id or 0))
+                if pid:
+                    ln.state, ln.purchase_id = "received", pid
+                    for r in ln.routes:
+                        if r.outcome == "asked" and int(r.supplier_id) == int(ln.supplier_id):
+                            r.outcome = "received"
+            o.sale_id = int(sale_id) if sale_id else o.sale_id
+            s.flush()
+            s.refresh(o)
+            if not QuickPurchaseOrderService._open_lines(o):
+                o.status, o.completed_at = "completed", datetime.now()
+            AuditService.record("qp.fulfilled", "quick_purchase", int(o.id),
+                                f"{o.order_no}: bought and sold from the Sales Console - {o.status}", session=s)
+            s.commit()
+        for pid in purchases.values():
+            QuickPurchaseService.link_sale(pid, sale_id)
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
     def drop_line(order_id: int, line_id: int, reason: str = "") -> None:
         """Give up one line (the supplier cannot supply it and nobody else is asked)."""
         with get_session() as s:

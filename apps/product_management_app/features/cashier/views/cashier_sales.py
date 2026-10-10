@@ -26,6 +26,7 @@ from apps.product_management_app.features.cashier.dialogs.quick_purchase_dialog 
     QuickPurchaseDialog, DECISION_QUICK, DECISION_BACKORDER, DECISION_AVAILABLE, DECISION_SAVE,
 )
 from database.models import Party
+from database.models.product import Product as DBProduct
 from database.session import get_session
 from datetime import datetime
 from shared.uix.widgets.cards import Segmented, chip, style_table
@@ -40,6 +41,7 @@ class CartItem:
     unit_cost_at_sale: float
     qty_bags: int
     total_weight_kg: float
+    qp_key: str = ""          # non-empty: this row was added by the Quick Purchase button (ties it to its planned purchase)
 
     @property
     def subtotal(self) -> float:
@@ -58,6 +60,8 @@ class CashierSalesView(QWidget):
         self.current_category: str = ""  # crops | fertilizer
         self._last_sale_id: int = 0      # for on-demand delivery note / receipt
         self._delivery_note_printed: bool = False  # gates the Print Receipt button
+        self._pending_standalone_qp: List[Dict[str, Any]] = []   # planned (not yet bought) Quick Purchases
+        self._qp_order_id: Optional[int] = None                  # the saved Quick Purchase order they belong to
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -482,11 +486,29 @@ class CashierSalesView(QWidget):
         dlg.exec_()
 
     def _load_quick_purchase_cart(self, order) -> bool:
-        """Rebuild the sale a Quick Purchase was raised for: its buyer and its whole cart."""
+        """
+        Bring a Quick Purchase's sale back into the console: its buyer and its cart. A draft / pending order raised
+        by the Quick Purchase button comes back LIVE - its current lines (as edited) become the planned purchase, so
+        Finalize Sale buys, sells and completes the order. A finished order comes back as an ordinary cart.
+        """
+        from database.services.quick_purchase_order_service import QuickPurchaseOrderService as Q
         cart = order.get("cart") or []
         if not cart:
             QMessageBox.information(self, "Quick Purchase", "This Quick Purchase was not raised from a sale, "
                                     "so there is no cart to bring back.")
+            return False
+        live = order["status"] in ("draft", "pending") and any(x.get("qp") for x in cart)
+        if live and order["status"] == "draft":
+            try:
+                Q.send(order["id"])
+                order = Q.get(order["id"])
+            except Exception as e:
+                QMessageBox.warning(self, "Quick Purchase", str(e))
+                return False
+        open_lines = [ln for ln in order["lines"] if ln["state"] == "open"]
+        if live and any(not ln["assigned"] for ln in open_lines):
+            QMessageBox.warning(self, "Quick Purchase", "Assign a supplier to - or drop - the lines that have none "
+                                "yet, then load the cart.")
             return False
         if self.cart and QMessageBox.question(
                 self, "Replace the cart?", "The cart already has items. Replace it with the one from "
@@ -499,11 +521,32 @@ class CashierSalesView(QWidget):
             self.customer_cb.setCurrentIndex(max(self.customer_cb.findData(None), 0))
             self.walkin_name.setText(order.get("customer_name") or "")
         self._sync_customer_ui()
-        self.cart = [CartItem(
-            product_id=int(x["product_id"]), product_type=str(x["product_type"]), name=str(x["name"]),
-            unit_price=float(x["unit_price"]), unit_cost_at_sale=float(x.get("unit_cost_at_sale") or 0),
-            qty_bags=int(x["qty_bags"]), total_weight_kg=float(x["total_weight_kg"])) for x in cart]
-        self._pending_standalone_qp = []
+
+        def row(x, key=""):
+            return CartItem(
+                product_id=int(x["product_id"]), product_type=str(x["product_type"]), name=str(x["name"]),
+                unit_price=float(x["unit_price"]), unit_cost_at_sale=float(x.get("unit_cost_at_sale") or 0),
+                qty_bags=int(x["qty_bags"]), total_weight_kg=float(x["total_weight_kg"]), qp_key=key)
+
+        self._pending_standalone_qp, self._qp_order_id = [], None
+        if not live:
+            self.cart = [row(x) for x in cart]
+        else:
+            price = {int(x["product_id"]): float(x["unit_price"]) for x in cart if x.get("qp")}
+            self.cart = [row(x) for x in cart if not x.get("qp")]
+            plans: Dict[int, List[Dict[str, Any]]] = {}
+            for ln in open_lines:
+                key, fert = f"L{ln['id']}", ln["unit"] == "bag"
+                kg = 0.0 if fert else float(ln["total_weight_kg"])
+                self.cart.append(CartItem(
+                    product_id=int(ln["product_id"]), product_type=str(ln["product_type"]).lower(), name=ln["product"],
+                    unit_price=price.get(int(ln["product_id"]), 0.0), unit_cost_at_sale=float(ln["unit_cost"]),
+                    qty_bags=int(ln["qty_bags"]), total_weight_kg=kg, qp_key=key))
+                plans.setdefault(int(ln["supplier_id"]), []).append({
+                    "key": key, "product_id": int(ln["product_id"]), "product_type": str(ln["product_type"]).lower(),
+                    "qty_bags": int(ln["qty_bags"]), "total_weight_kg": kg, "unit_cost": float(ln["unit_cost"])})
+            self._pending_standalone_qp = [{"supplier_party_id": sid, "short_lines": ls} for sid, ls in plans.items()]
+            self._qp_order_id = int(order["id"])
         self._refresh_cart()
         return True
 
@@ -520,9 +563,17 @@ class CashierSalesView(QWidget):
         # pattern). Accumulated here since this button can be used more
         # than once before checkout; _checkout() commits every pending
         # entry, all at once, immediately before the sale itself.
-        if not hasattr(self, "_pending_standalone_qp"):
-            self._pending_standalone_qp: List[Dict[str, Any]] = []
         self._pending_standalone_qp.extend(dlg.pending_quick_purchases)
+        if self._qp_order_id:                      # this cart already has a saved Quick Purchase: keep it in step
+            from database.services.quick_purchase_order_service import QuickPurchaseOrderService
+            try:
+                QuickPurchaseOrderService.add_lines(self._qp_order_id, [
+                    {"product_id": int(ln["product_id"]), "qty_bags": int(ln.get("qty_bags") or 0),
+                     "total_weight_kg": float(ln.get("total_weight_kg") or 0), "unit_cost": float(ln.get("unit_cost") or 0),
+                     "supplier_id": int(plan["supplier_party_id"])}
+                    for plan in dlg.pending_quick_purchases for ln in plan["short_lines"]])
+            except Exception as e:
+                QMessageBox.warning(self, "Quick Purchase", f"Saved order not updated:\n{e}")
 
         # Added straight into the current cart at the product's normal
         # sale rate. The checkout screen's own editable Rate field is
@@ -541,6 +592,7 @@ class CashierSalesView(QWidget):
                 unit_cost_at_sale=float(line["unit_cost"]),
                 qty_bags=int(qty) if is_fert else int(line.get("bags") or 0),
                 total_weight_kg=0.0 if is_fert else qty,
+                qp_key=str(line.get("key") or ""),
             ))
 
         self._refresh_cart()
@@ -559,8 +611,39 @@ class CashierSalesView(QWidget):
         if idx is None:
             QMessageBox.information(self, "Cart", "Select a cart row first.")
             return
-        self.cart.pop(idx)
+        item = self.cart.pop(idx)
+        if item.qp_key:
+            self._drop_qp_plan(item)          # the goods are no longer wanted: do not buy them at checkout
         self._refresh_cart()
+
+    def _drop_qp_plan(self, item: "CartItem") -> None:
+        """A Quick Purchase cart row was removed: drop its planned purchase (and its line on the saved order)."""
+        found = None
+        for plan in self._pending_standalone_qp:
+            for ln in plan["short_lines"]:
+                if ln.get("key") == item.qp_key:
+                    found = (plan, ln)
+        if found is None:
+            return
+        plan, ln = found
+        plan["short_lines"].remove(ln)
+        if not plan["short_lines"]:
+            self._pending_standalone_qp.remove(plan)
+        if not self._qp_order_id:
+            return
+        from database.services.quick_purchase_order_service import QuickPurchaseOrderService as Q
+        fert = str(ln.get("product_type") or "").lower() in ("fertilizer", "fertilizers")
+        qty = float(ln["qty_bags"]) if fert else float(ln["total_weight_kg"])
+        try:
+            for x in Q.get(self._qp_order_id)["lines"]:
+                if (x["state"] == "open" and x["product_id"] == int(ln["product_id"])
+                        and x["supplier_id"] == int(plan["supplier_party_id"]) and abs(x["qty"] - qty) < 0.01):
+                    Q.drop_line(self._qp_order_id, x["id"], "Removed from the cart")
+                    break
+        except Exception as e:
+            QMessageBox.warning(self, "Quick Purchase", f"The saved Quick Purchase was not updated:\n{e}")
+        if not self._pending_standalone_qp:
+            self._qp_order_id = None
 
     def _clear_cart(self):
         if not self.cart:
@@ -573,6 +656,11 @@ class CashierSalesView(QWidget):
             # let it survive to incorrectly commit against a later,
             # unrelated sale.
             self._pending_standalone_qp = []
+            if self._qp_order_id:
+                QMessageBox.information(
+                    self, "Quick Purchase", "The cart is cleared. Its Quick Purchase stays saved as it was - "
+                    "cancel or delete it from Quick Purchases if it is not needed.")
+                self._qp_order_id = None
             self._refresh_cart()
 
     def _refresh_cart(self):
@@ -759,26 +847,34 @@ class CashierSalesView(QWidget):
         }
 
     def _ask_quick_purchase_status(self) -> Optional[str]:
-        """The cart holds Quick Purchase items that are not bought yet: how should this be finished?"""
+        """Between carting and checkout: what status does this Quick Purchase get? (pending is the default)"""
         n = sum(len(p.get("short_lines", [])) for p in self._pending_standalone_qp)
         box = QMessageBox(self)
         box.setWindowTitle("Quick Purchase")
-        box.setText(f"This cart has {n} Quick Purchase item(s) that are not bought yet.\n\nHow do you want to finish?")
+        box.setText(f"This cart has {n} Quick Purchase item(s). Save them as:")
         box.setInformativeText(
-            "Complete now: the suppliers have the goods - buy them and complete the sale.\n"
-            "Save as pending: the order is with the supplier; finish the sale when the goods arrive "
-            "(or route it to another supplier if they do not have them).\n"
-            "Save as draft: keep the plan, send it to the supplier later.")
-        b_now = box.addButton("Complete now", QMessageBox.AcceptRole)
-        b_pend = box.addButton("Save as pending", QMessageBox.ActionRole)
+            "Pending: sent to the supplier - continue to checkout. You can still edit it (quantity, price, another "
+            "supplier) from Quick Purchases.\n"
+            "Draft: keep the plan for later - nothing is sent and the checkout is not opened.")
+        b_pend = box.addButton("Pending - continue to checkout", QMessageBox.AcceptRole)
         b_draft = box.addButton("Save as draft", QMessageBox.ActionRole)
         box.addButton("Back to cart", QMessageBox.RejectRole)
+        box.setDefaultButton(b_pend)
         box.exec_()
         clicked = box.clickedButton()
-        return {b_now: "complete", b_pend: "pending", b_draft: "draft"}.get(clicked)
+        return {b_pend: "pending", b_draft: "draft"}.get(clicked)
+
+    def _qp_cart_snapshot(self) -> List[Dict[str, Any]]:
+        return [{"product_id": x.product_id, "product_type": x.product_type, "name": x.name,
+                 "unit_price": x.unit_price, "unit_cost_at_sale": x.unit_cost_at_sale,
+                 "qty_bags": x.qty_bags, "total_weight_kg": x.total_weight_kg, "qp": bool(x.qp_key)}
+                for x in self.cart]
 
     def _save_quick_purchase_order(self, status: str) -> bool:
-        """Keep the planned Quick Purchase (and the whole cart) as a draft / pending order, then clear the cart."""
+        """
+        Save the planned Quick Purchase (and the whole cart) as a pending / draft order. Pending: True - go on to
+        checkout. Draft: the cart is cleared and False is returned (the operator finishes it later).
+        """
         from database.services.quick_purchase_order_service import QuickPurchaseOrderService
         lines = []
         for plan in self._pending_standalone_qp:
@@ -787,26 +883,25 @@ class CashierSalesView(QWidget):
                               "total_weight_kg": float(ln.get("total_weight_kg") or 0),
                               "unit_cost": float(ln.get("unit_cost") or 0),
                               "supplier_id": int(plan["supplier_party_id"])})
-        cart = [{"product_id": x.product_id, "product_type": x.product_type, "name": x.name,
-                 "unit_price": x.unit_price, "unit_cost_at_sale": x.unit_cost_at_sale,
-                 "qty_bags": x.qty_bags, "total_weight_kg": x.total_weight_kg} for x in self.cart]
         walkin = self.walkin_name.text().strip()
         cust = walkin or (self.customer_cb.currentText() if self.customer_cb.currentData() is not None else "")
         try:
             oid = QuickPurchaseOrderService.create(
-                lines, customer_name=cust, send=(status == "pending"), cart=cart,
+                lines, customer_name=cust, send=(status == "pending"), cart=self._qp_cart_snapshot(),
                 buyer_party_id=self.customer_cb.currentData())
         except Exception as e:
             QMessageBox.warning(self, "Quick Purchase", f"Could not save it:\n{e}")
             return False
-        self.cart = []
-        self._pending_standalone_qp = []
+        if status == "pending":
+            self._qp_order_id = oid
+            return True
+        self.cart, self._pending_standalone_qp, self._qp_order_id = [], [], None
         self._refresh_cart()
         QMessageBox.information(
             self, "Quick Purchase saved",
-            f"Saved as {status} (QP-{oid:05d}). Open Pending Quick Purchases to route it, record the goods as "
-            "received or send it - then load the cart back here to complete the sale.")
-        return True
+            f"Saved as a draft (QP-{oid:05d}). Open Pending Quick Purchases to edit and send it, then load the "
+            "cart back here to checkout.")
+        return False
 
     def _checkout(self):
         if not self.cart:
@@ -833,13 +928,11 @@ class CashierSalesView(QWidget):
 
         total_revenue = sum(x.subtotal for x in self.cart)
 
-        # Quick Purchase items added with the standalone button: say how this will be finished.
-        if getattr(self, "_pending_standalone_qp", None):
+        # Quick Purchase items added with the standalone button: between carting and checkout they get a status
+        # (pending by default, or draft) and are saved as an editable Quick Purchase order.
+        if self._pending_standalone_qp and not self._qp_order_id:
             status = self._ask_quick_purchase_status()
-            if status is None:
-                return
-            if status in ("pending", "draft"):
-                self._save_quick_purchase_order(status)
+            if status is None or not self._save_quick_purchase_order(status):
                 return
 
         # ---------------------------------------------------------------
@@ -923,6 +1016,17 @@ class CashierSalesView(QWidget):
             "total_weight_kg": x.total_weight_kg,
             "unit_price": x.unit_price,
         } for x in self.cart]
+
+        # Quick Purchase button items: the goods bought from the dealer are costed at the dealer's price and the
+        # rest of that product at the book cost it had BEFORE the purchase moves it (the purchase overwrites the
+        # product's default cost, which every unpriced line would otherwise pick up).
+        if not qp_sale_lines and self._pending_standalone_qp:
+            with get_session() as s:
+                book = {int(pid): float(c or 0) for pid, c in
+                        s.query(DBProduct.id, DBProduct.default_cost_rate).filter(
+                            DBProduct.id.in_([int(x.product_id) for x in self.cart])).all()}
+            for item, x in zip(sale_items, self.cart):
+                item["unit_cost"] = float(x.unit_cost_at_sale) if x.qp_key else book.get(int(x.product_id), 0.0)
 
         # Apply the FINAL price by product_id - reaches BOTH cost lots of a
         # Quick-Purchased product (book-cost lot + dealer-cost lot), since
@@ -1036,6 +1140,7 @@ class CashierSalesView(QWidget):
                     f"be automatically reversed:\n{details}\n\nPlease review "
                     f"them manually."
                 )
+            self._pending_standalone_qp = standalone_plans      # nothing was bought after all: plan stays
             QMessageBox.critical(self, "Sale Failed", str(e))
             return
 
@@ -1079,6 +1184,18 @@ class CashierSalesView(QWidget):
 
         ref = str(res.get("reference") or "")
         sale_id = int(res.get("sale_id") or 0)
+
+        if self._qp_order_id:                      # the saved Quick Purchase is now bought and sold: close it
+            from database.services.quick_purchase_order_service import QuickPurchaseOrderService
+            try:
+                QuickPurchaseOrderService.mark_fulfilled(
+                    self._qp_order_id,
+                    {int(plan["supplier_party_id"]): pid for plan, pid in zip(standalone_plans, committed_qp_ids)},
+                    sale_id)
+            except Exception as e:
+                QMessageBox.warning(self, "Quick Purchase", f"The sale and purchases were recorded, but the saved "
+                                    f"Quick Purchase could not be closed:\n{e}")
+            self._qp_order_id = None
 
         if sale_id > 0 and buyer_party_id > 0:
             with get_session() as s:
