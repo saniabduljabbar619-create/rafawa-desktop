@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build installer",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File build.ps1",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build installer (skip tests)",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File build.ps1 -SkipTests",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build exe only",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File build.ps1 -SkipTests -ExeOnly",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

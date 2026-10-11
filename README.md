@@ -95,8 +95,13 @@ Set `RAFAWA_DATA_DIR` to relocate the data folder (portable installs).
 ## Building and releasing
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1      # tests -> RafawaApp.exe -> installer
+powershell -ExecutionPolicy Bypass -File build.ps1              # tests -> RafawaApp.exe -> installer
+powershell -ExecutionPolicy Bypass -File build.ps1 -SkipTests   # same, without the tests
+powershell -ExecutionPolicy Bypass -File build.ps1 -ExeOnly     # only dist\RafawaApp.exe
 ```
+
+In VS Code: **Terminal > Run Task > Build installer**. The installer step needs
+[Inno Setup 6](https://jrsoftware.org/isdl.php) installed; the result is `RafawaAppSetup.exe` in the project folder.
 
 The version lives in `shared/version.py` (shown in the window title, logs and installer).
 Pushing a tag such as `v3.5.0` runs `.github/workflows/release.yml`, which builds the exe and
