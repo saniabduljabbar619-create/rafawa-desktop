@@ -13,6 +13,9 @@ $python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe"
 
 $version = & $python -c "from shared.version import __version__; print(__version__)"
 Write-Host "Building Rafawa Desktop $version"
+if (Test-Path ".env") { Write-Host "Found .env - it will be bundled inside the exe (the exe carries its own database settings)." }
+elseif (Test-Path ".env.template") { Write-Host "Found .env.template - it will be bundled inside the exe as .env." }
+else { Write-Host "No .env here - the exe will carry the .env.example placeholder; put a real .env next to the exe." }
 
 & $python -m pip install -r requirements.txt pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "Installing the requirements failed." }

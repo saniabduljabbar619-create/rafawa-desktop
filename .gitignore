@@ -25,6 +25,7 @@ dist/
 dist_installer/
 *.exe
 *.spec
+!RafawaApp.spec
 # Runtime logs
 *.log
 
