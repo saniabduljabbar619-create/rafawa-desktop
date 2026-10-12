@@ -103,6 +103,10 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -ExeOnly     # only dist\Rafa
 In VS Code: **Terminal > Run Task > Build installer**. The installer step needs
 [Inno Setup 6](https://jrsoftware.org/isdl.php) installed; the result is `RafawaAppSetup.exe` in the project folder.
 
+The installer asks for the MySQL details (and, optionally, the cloud backup) and writes them to `.env` next to the
+program, URL-encoding the password for you; nothing secret is stored in the installer. An existing `.env` is kept on
+upgrades, and a silent install (`/SILENT`) copies `.env.example` for you to edit.
+
 The version lives in `shared/version.py` (shown in the window title, logs and installer).
 Pushing a tag such as `v3.5.0` runs `.github/workflows/release.yml`, which builds the exe and
 installer on a Windows runner and attaches them as a build artifact.
