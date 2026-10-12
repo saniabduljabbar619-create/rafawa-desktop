@@ -1,6 +1,7 @@
 """The weigher's screens end to end, plus the cashier/admin side that takes over."""
 import pytest
-from PySide2.QtWidgets import QInputDialog, QMessageBox
+from PySide2.QtCore import Qt
+from PySide2.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from database.models.purchase import Purchase
 from database.services.user_admin_service import UserAdminService
@@ -76,7 +77,7 @@ def test_station_full_flow_from_party_to_signed_slip(qapp, boxes, printed):
     _type_round(v, "0.5", "21.25")                                # a part-bag
     assert v.lbl_total_bags.text() == "5.5" and v.lbl_total_kg.text() == "426.75 kg"
     assert v.rounds_table.rowCount() == 4                          # 3 rounds + the next blank row
-    assert v.lbl_round_totals.text() == "Total: 5.5 bags  -  426.75 kg"
+    assert v.lbl_round_totals.text() == "Total: 5.5 bags  -  426.75 kg  -  avg 77.59 kg / bag"
 
     _type_round(v, "1", "0")                                      # zero weight is refused
     assert any("Weight must be more than zero" in m for _k, m in boxes)
@@ -500,3 +501,69 @@ def test_walk_in_button_with_no_name_or_cancel_starts_nothing(qapp, boxes, monke
     monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("   ", True)))      # nothing typed
     v.btn_walkin.click()
     assert v.stack.currentIndex() == 0 and not v.ticket_id and any("name" in m.lower() for _k, m in boxes)
+
+
+def test_each_round_shows_its_average_weight_per_bag(qapp, boxes):
+    v = _station()
+    _pick(v, "Customer One")
+    v.start_ticket()
+    v.product_cb.setCurrentIndex(1)
+    v.add_line()
+    _type_round(v, "3", "289")                                       # 3 bags weighed 289 kg
+    assert v.rounds_table.item(0, 3).text() == "96.33"               # 289 / 3, worked out by the system
+    assert not (v.rounds_table.item(0, 3).flags() & Qt.ItemIsEditable)
+    _type_round(v, "2", "200")
+    assert v.rounds_table.item(1, 3).text() == "100.00"
+    assert "avg 97.80 kg / bag" in v.lbl_round_totals.text()         # (289 + 200) / 5 for the whole product
+    assert v.rounds_table.item(2, 3).text() == ""                    # the blank next row shows nothing
+    # a part-bag round and a correction both update the figure
+    _type_round(v, "0.5", "50")
+    assert v.rounds_table.item(2, 3).text() == "100.00"
+    v.rounds_table.item(0, 2).setText("300")
+    QApplication.processEvents(); QApplication.processEvents()
+    assert v.rounds_table.item(0, 3).text() == "100.00"
+
+
+def _age_ticket(tid, days=1):
+    from datetime import datetime, timedelta
+    from database.models.weigh_ticket import WeighTicket
+    with get_session() as s:
+        s.get(WeighTicket, tid).created_at = datetime.now() - timedelta(days=days)
+        s.commit()
+
+
+def test_the_weighers_screen_starts_from_zero_each_day_but_nothing_is_deleted(qapp, boxes):
+    from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
+    as_role("weigher", CASHIER_A)
+    old = W.create_ticket(SUPPLIER_ID, "supplier")                   # an unfinished weighing from yesterday
+    _age_ticket(old)
+    today = W.create_ticket(SUPPLIER_ID, "supplier")
+    v = _station()
+    texts = [v.open_list.item(i).text() for i in range(v.open_list.count())]
+    assert len(texts) == 1 and W.get_ticket(today)["ticket_no"] in texts[0]       # only today's
+    mine = WeigherTicketsView()
+    assert mine.table.rowCount() == 1 and "today" in mine.subtitle.text()
+    mine.chk_earlier.setChecked(True)                                # earlier days on request
+    assert mine.table.rowCount() == 2
+    # nothing was deleted: the admin / cashier still see yesterday's ticket, and it can still be finished or removed
+    as_role("admin", ADMIN_ID)
+    assert {t["id"] for t in W.list_tickets(status="open")} == {old, today}
+    assert W.get_ticket(old)["status"] == "open"
+    # a new day while the party page is showing refreshes the list by itself
+    from datetime import date, timedelta
+    v._day = date.today() - timedelta(days=1)
+    as_role("weigher", CASHIER_A)
+    _age_ticket(today)                                               # "today" has now become yesterday
+    v._check_new_day()
+    assert v.open_list.count() == 0
+
+
+def test_the_screen_is_not_pulled_away_at_midnight_during_a_weighing(qapp, boxes):
+    from datetime import date, timedelta
+    v = _station()
+    _pick(v, "Customer One")
+    v.start_ticket()
+    assert v.stack.currentIndex() == 1
+    v._day = date.today() - timedelta(days=1)
+    v._check_new_day()
+    assert v.stack.currentIndex() == 1 and v.ticket_id

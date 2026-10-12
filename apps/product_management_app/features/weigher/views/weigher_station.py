@@ -26,7 +26,7 @@ from PySide2.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from database.services.weigh_service import WeighService
+from database.services.weigh_service import WeighService, avg_kg_per_bag, day_start
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import Segmented, avatar, style_table
 from shared.uix.widgets.product_select import add_select_placeholder
@@ -55,6 +55,11 @@ def _fmt_bags(v) -> str:
 def _bags_text(v) -> str:
     v = float(v or 0)
     return f"{_fmt_bags(v)} bag" + ("" if v == 1 else "s")
+
+
+def _avg_text(kg, bags) -> str:
+    a = avg_kg_per_bag(kg, bags)
+    return "" if a is None else f"{a:,.2f}"
 
 
 _BAGS_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*(?:bags?|b)?\s*$", re.IGNORECASE)
@@ -114,6 +119,20 @@ class WeigherStationView(QWidget):
         self._go(0)
         self._load_party_list()
         self._load_open_tickets()
+
+        # at midnight the waiting list starts again from zero (yesterday's unfinished weighings are not deleted:
+        # admin / cashier still see them, and they stay in the history)
+        self._day = day_start().date()
+        self._midnight = QTimer(self)
+        self._midnight.timeout.connect(self._check_new_day)
+        self._midnight.start(30000)
+
+    def _check_new_day(self):
+        today = day_start().date()
+        if today != self._day:
+            self._day = today
+            if self.stack.currentIndex() == 0:                  # never pull the screen from under a weighing in progress
+                self._load_open_tickets()
 
     # ------------------------------------------------------------------ step header
     def _go(self, index: int):
@@ -243,7 +262,7 @@ class WeigherStationView(QWidget):
     def _load_open_tickets(self):
         self.open_list.clear()
         try:
-            rows = WeighService.list_tickets(status="open")
+            rows = WeighService.list_tickets(status="open", since=day_start())   # the screen starts from zero each day
         except Exception:
             rows = []
         for t in rows:
@@ -384,8 +403,8 @@ class WeigherStationView(QWidget):
         ml.addWidget(hint)
 
         self._rounds_busy = False
-        self.rounds_table = QTableWidget(0, 3)
-        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags Round", "Weight (kg)"])
+        self.rounds_table = QTableWidget(0, 4)
+        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags Round", "Weight (kg)", "Avg / bag (kg)"])
         self.rounds_table.setEditTriggers(QTableWidget.AllEditTriggers)
         self.rounds_table.setSelectionBehavior(QTableWidget.SelectItems)
         self.rounds_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -493,7 +512,8 @@ class WeigherStationView(QWidget):
         for ln in t["lines"]:
             tag = " / ".join(x for x in (ln["area"], ln["grade"] and f"Grade {ln['grade']}") if x)
             it = QListWidgetItem(f"{ln['product_name']}" + (f"  ({tag})" if tag else "") +
-                                 f"\n{_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg")
+                                 f"\n{_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg"
+                                 + (f"  -  avg {_avg_text(ln['kg'], ln['bags'])}" if ln["bags"] else ""))
             it.setData(Qt.UserRole, int(ln["id"]))
             self.lines_list.addItem(it)
             if int(ln["id"]) == keep:
@@ -530,7 +550,9 @@ class WeigherStationView(QWidget):
             for r in ln["rounds"]:
                 self._add_round_row(r["round_no"], r["id"], _bags_text(r["bags"]), f"{r['weight_kg']:.2f}")
             self._add_round_row(len(ln["rounds"]) + 1, None, "", "")      # the next round, ready to type
-            self.lbl_round_totals.setText(f"Total: {_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg")
+            avg = _avg_text(ln["kg"], ln["bags"])
+            self.lbl_round_totals.setText(f"Total: {_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg"
+                                          + (f"  -  avg {avg} kg / bag" if avg else ""))
         finally:
             self._rounds_busy = False
 
@@ -549,6 +571,11 @@ class WeigherStationView(QWidget):
             it = QTableWidgetItem(text)
             it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             t.setItem(row, col, it)
+        avg = QTableWidgetItem(_avg_text(parse_kg(kg_text), parse_bags(bags_text)) if bags_text and kg_text else "")
+        avg.setFlags(Qt.ItemIsEnabled)                                  # worked out by the system, not typed
+        avg.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        avg.setForeground(QColor("#0f766e"))
+        t.setItem(row, 3, avg)
 
     def _focus_cell(self, row: int, col: int):
         t = self.rounds_table
@@ -558,7 +585,7 @@ class WeigherStationView(QWidget):
 
     def _on_round_cell(self, item):
         """A cell was typed into: record the round when both bags and kg are there, or correct it."""
-        if self._rounds_busy or item.column() == 0 or not self.active_line_id:
+        if self._rounds_busy or item.column() in (0, 3) or not self.active_line_id:
             return
         t = self.rounds_table
         row = item.row()

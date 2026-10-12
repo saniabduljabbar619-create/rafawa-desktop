@@ -2,9 +2,10 @@
 """The weigher's Finalize List: every weighing they did, where each stands - edit, remove or reprint it."""
 from __future__ import annotations
 
-from PySide2.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide2.QtCore import QTimer
+from PySide2.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from database.services.weigh_service import WeighService
+from database.services.weigh_service import WeighService, day_start
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.views.ticket_table import (
@@ -44,6 +45,9 @@ class WeigherTicketsView(QWidget):
         bar = QHBoxLayout()
         self.filter_seg = Segmented(FILTERS)
         bar.addWidget(self.filter_seg)
+        self.chk_earlier = QCheckBox("Include earlier days")
+        self.chk_earlier.setToolTip("The list starts from zero each day. Tick this to see weighings from earlier days too.")
+        bar.addWidget(self.chk_earlier)
         bar.addStretch(1)
         self.btn_refresh = QPushButton("Refresh")
         self.btn_print = QPushButton("Print Weighing Receipt")
@@ -60,6 +64,7 @@ class WeigherTicketsView(QWidget):
         root.addWidget(self.table, 1)
 
         self.filter_seg.changed.connect(lambda _k: self.refresh())
+        self.chk_earlier.toggled.connect(lambda _c: self.refresh())
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_print.clicked.connect(lambda: self.print_selected("weighing"))
         self.btn_print_value.clicked.connect(lambda: self.print_selected("value"))
@@ -69,9 +74,21 @@ class WeigherTicketsView(QWidget):
         self.table.itemSelectionChanged.connect(self._buttons)
         self.refresh()
 
+        # at midnight the list starts again from zero (nothing is deleted - admin / cashier still see everything)
+        self._day = day_start().date()
+        self._midnight = QTimer(self)
+        self._midnight.timeout.connect(self._check_new_day)
+        self._midnight.start(30000)
+
+    def _check_new_day(self):
+        today = day_start().date()
+        if today != self._day:
+            self._day = today
+            self.refresh()
+
     def refresh(self):
         try:
-            allrows = WeighService.list_tickets()
+            allrows = WeighService.list_tickets(since=None if self.chk_earlier.isChecked() else day_start())
         except Exception as e:
             QMessageBox.warning(self, "Finalize List", str(e))
             return
@@ -81,7 +98,8 @@ class WeigherTicketsView(QWidget):
         self.kpi_done.set(str(count("finalized")))
         key = self.filter_seg.key()
         rows = allrows if key == "all" else [t for t in allrows if t["status"] == key]
-        self.subtitle.setText(f"{len(rows)} of {len(allrows)} tickets")
+        self.subtitle.setText(f"{len(rows)} of {len(allrows)} tickets"
+                              + ("" if self.chk_earlier.isChecked() else " today"))
         self._rows = {int(t["id"]): t for t in rows}
         fill_ticket_table(self.table, rows)
         self._buttons()

@@ -20,7 +20,7 @@ from PySide2.QtWidgets import (
     QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from database.services.weigh_service import WeighService
+from database.services.weigh_service import WeighService, avg_kg_per_bag
 from shared.auth.session import require_user_id
 from shared.uix.widgets.cards import avatar, chip, style_table
 
@@ -84,8 +84,8 @@ class WeighTicketReviewDialog(QDialog):
         cap2 = QLabel("ROUNDS - verify and correct (edit a cell, or add / remove a round)")
         cap2.setObjectName("SectionLabel")
         root.addWidget(cap2)
-        self.rounds_table = QTableWidget(0, 3)
-        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags", "Weight (kg)"])
+        self.rounds_table = QTableWidget(0, 4)
+        self.rounds_table.setHorizontalHeaderLabels(["Round", "Bags", "Weight (kg)", "Avg / bag (kg)"])
         self.rounds_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.rounds_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.rounds_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -257,11 +257,13 @@ class WeighTicketReviewDialog(QDialog):
         for r in (ln["rounds"] if ln else []):
             row = self.rounds_table.rowCount()
             self.rounds_table.insertRow(row)
-            for c, v in enumerate((str(r["round_no"]), _fmt_bags(r["bags"]), f"{r['weight_kg']:.2f}")):
+            avg = avg_kg_per_bag(r["weight_kg"], r["bags"])
+            for c, v in enumerate((str(r["round_no"]), _fmt_bags(r["bags"]), f"{r['weight_kg']:.2f}",
+                                   "" if avg is None else f"{avg:,.2f}")):
                 cell = QTableWidgetItem(v)
                 cell.setData(Qt.UserRole, int(r["id"]))
                 cell.setTextAlignment(Qt.AlignCenter if c == 0 else Qt.AlignRight | Qt.AlignVCenter)
-                if c == 0 or not self.editable:
+                if c in (0, 3) or not self.editable:
                     cell.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 if r.get("edited") and c:
                     cell.setForeground(QColor("#b45309"))
@@ -284,7 +286,7 @@ class WeighTicketReviewDialog(QDialog):
 
     # ------------------------------------------------------------------ corrections
     def _on_round_edited(self, item):
-        if not self.editable or item.column() == 0:
+        if not self.editable or item.column() in (0, 3):
             return
         rid = int(item.data(Qt.UserRole))
         row = item.row()
