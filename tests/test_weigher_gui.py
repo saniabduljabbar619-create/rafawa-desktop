@@ -1,6 +1,6 @@
 """The weigher's screens end to end, plus the cashier/admin side that takes over."""
 import pytest
-from PySide2.QtWidgets import QMessageBox
+from PySide2.QtWidgets import QInputDialog, QMessageBox
 
 from database.models.purchase import Purchase
 from database.services.user_admin_service import UserAdminService
@@ -450,29 +450,28 @@ def _rows(v):
     return [v.party_list.item(i).text() for i in range(v.party_list.count())]
 
 
-def test_one_letter_lists_matching_customers_and_a_walk_in_line(qapp, boxes):
+def test_one_letter_lists_matching_customers(qapp, boxes):
     v = _station()
     assert any("Customer One" in t for t in _rows(v)) and not any("Supplier One" in t for t in _rows(v))
     assert not v.btn_start.isEnabled()
     v.party_search.setText("c")                                    # a single letter is enough
-    rows = _rows(v)
-    assert rows[0].startswith("+  Walk-in:  c") and any("Customer One" in t for t in rows)
-    assert not any("Supplier One" in t for t in rows)
+    assert any("Customer One" in t for t in _rows(v)) and not any("Walk-in" in t for t in _rows(v))
     v.party_search.setText("s")                                    # a supplier-only name never shows up
     assert not any("Supplier One" in t for t in _rows(v))
     v.party_search.setText("zzz")
-    assert _rows(v) == ["+  Walk-in:  zzz    (new name)"]
+    assert _rows(v) == []
 
 
-def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes):
+def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes, monkeypatch):
     from database.models.party import Party
     from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
     from shared.config.constants import WALKIN_PARTY_ID
     v = _station()
-    v.party_search.setText("Musa")                                 # one name, no surname
-    v.party_list.setCurrentRow(0)
-    assert v.btn_start.isEnabled()
-    v.start_ticket()
+    asked = []
+    monkeypatch.setattr(QInputDialog, "getItem",
+                        staticmethod(lambda *a, **k: (asked.append(a[3]), ("Musa", True))[1]))   # one name, no surname
+    v.btn_walkin.click()                                           # the separate Walk-in button asks for the name
+    assert asked == [[]]
     t = W.get_ticket(v.ticket_id)
     assert v.stack.currentIndex() == 1 and t["party_name"] == "Musa" and t["walkin_name"] == "Musa"
     line = W.add_line(v.ticket_id, CROP_ID)
@@ -491,3 +490,13 @@ def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes):
     assert dlg.table.rowCount() == 1                               # payment lists only this walk-in's purchases
     other = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False, walkin_name="Someone Else")
     assert other.table.rowCount() == 0
+
+
+def test_walk_in_button_with_no_name_or_cancel_starts_nothing(qapp, boxes, monkeypatch):
+    v = _station()
+    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("Musa", False)))   # cancelled
+    v.btn_walkin.click()
+    assert v.stack.currentIndex() == 0 and not v.ticket_id
+    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("   ", True)))      # nothing typed
+    v.btn_walkin.click()
+    assert v.stack.currentIndex() == 0 and not v.ticket_id and any("name" in m.lower() for _k, m in boxes)
