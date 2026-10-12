@@ -299,3 +299,15 @@ def test_walk_in_ticket_needs_a_name_and_finalizes_under_it():
         assert s.get(Purchase, res["purchase_id"]).walkin_name == "Alhaji Sule"
     assert [p["name"] for p in W.search_parties("", customers_only=True)] == ["Customer One"] or \
         all(p["kind"] != "supplier" for p in W.search_parties("", customers_only=True))
+
+
+def test_a_walk_in_can_be_a_single_letter_and_past_names_are_searchable():
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="A")
+    assert W.get_ticket(tid)["party_name"] == "A"
+    W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Aminu")
+    assert W.search_walkins("a") == ["A", "Aminu"] and W.search_walkins("min") == ["Aminu"]
+    assert W.search_walkins("") == ["A", "Aminu"] and W.search_walkins("zz") == []
+    with pytest.raises(ValueError):
+        W.create_ticket(CUSTOMER_ID, "customer", walkin_name="Someone")     # a real customer is not the walk-in account

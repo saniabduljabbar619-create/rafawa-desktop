@@ -376,12 +376,15 @@ class WeighTicketReviewDialog(QDialog):
         from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
 
         uid = require_user_id()
+        walkin = (self._t.get("walkin_name") or "").strip()      # a walk-in: no account, so no advances to apply
         with get_session() as s:
             party = s.get(Party, int(res["party_id"]))
-        prompt_and_apply_advance(
-            self, party_id=int(res["party_id"]), entity_type="purchase", entity_id=int(res["purchase_id"]),
-            balance=float(res["total_amount"]), user_id=uid, party_name=(party.display_name if party else ""))
-        PurchasePaymentDialog(party=party, user_id=uid, parent=self, print_slip=False).exec_()
+        if not walkin:
+            prompt_and_apply_advance(
+                self, party_id=int(res["party_id"]), entity_type="purchase", entity_id=int(res["purchase_id"]),
+                balance=float(res["total_amount"]), user_id=uid, party_name=(party.display_name if party else ""))
+        PurchasePaymentDialog(party=party, user_id=uid, parent=self, print_slip=False,
+                              walkin_name=walkin or None).exec_()
 
     def _cancel_ticket(self):
         weigher = self.mode == "weigher"

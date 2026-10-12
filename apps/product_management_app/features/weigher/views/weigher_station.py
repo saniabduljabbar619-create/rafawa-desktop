@@ -150,25 +150,23 @@ class WeigherStationView(QWidget):
         ll.addWidget(cap)
 
         crow = QHBoxLayout()
-        self.party_cb = QComboBox()
-        self.party_cb.setEditable(True)                       # type to filter the drop-down
-        self.party_cb.setInsertPolicy(QComboBox.NoInsert)
-        self.party_cb.lineEdit().setPlaceholderText("Select a customer (type to search)")
-        self.party_cb.setMinimumHeight(36)
-        self.party_cb.completer().setFilterMode(Qt.MatchContains)
-        self.party_cb.completer().setCaseSensitivity(Qt.CaseInsensitive)
+        self.party_search = QLineEdit()
+        self.party_search.setPlaceholderText("Type a letter or a name - customers and walk-ins appear below")
+        self.party_search.setClearButtonEnabled(True)
+        self.party_search.setMinimumHeight(36)
         self.btn_register = QPushButton("+ Register New")
         self.btn_register.setMinimumHeight(36)
-        crow.addWidget(self.party_cb, 1)
+        crow.addWidget(self.party_search, 1)
         crow.addWidget(self.btn_register)
         ll.addLayout(crow)
 
-        self.walkin_name = QLineEdit()
-        self.walkin_name.setPlaceholderText("Walk-in's name")
-        self.walkin_name.setMinimumHeight(36)
-        self.walkin_name.setVisible(False)
-        ll.addWidget(self.walkin_name)
-        ll.addStretch(1)
+        self.party_hint = QLabel("")
+        self.party_hint.setStyleSheet("color:#6b7280; font-size:11px;")
+        ll.addWidget(self.party_hint)
+
+        self.party_list = QListWidget()
+        self.party_list.setStyleSheet(_LIST_CSS)
+        ll.addWidget(self.party_list, 1)
 
         self.btn_start = QPushButton("Start Weighing  →")
         self.btn_start.setObjectName("PrimaryButton")
@@ -196,38 +194,58 @@ class WeigherStationView(QWidget):
         lay.addWidget(right, 2)
 
         self.btn_register.clicked.connect(self._register_party)
-        self.party_cb.currentIndexChanged.connect(self._party_changed)
+        self.party_search.textChanged.connect(self._load_party_list)
+        self.party_search.returnPressed.connect(self._search_enter)
+        self.party_list.itemSelectionChanged.connect(self._party_changed)
+        self.party_list.itemDoubleClicked.connect(lambda _i: self.start_ticket())
         self.btn_start.clicked.connect(self.start_ticket)
         self.open_list.itemSelectionChanged.connect(lambda: self.btn_resume.setEnabled(bool(self.open_list.selectedItems())))
         self.btn_resume.clicked.connect(self._resume_selected)
         return page
 
     def _load_party_list(self, *_a, select_id: int = 0):
-        """Fill the drop-down: Walk-in first, then every registered customer."""
-        cb = self.party_cb
-        cb.blockSignals(True)
-        cb.clear()
-        cb.addItem("Walk-in (no account)", {"walkin": True})
+        """Results for what is typed (even one letter): a walk-in with that name first, walk-in names used before,
+        then registered customers whose name or phone contains it. Nothing typed: the customers, A to Z."""
+        text = self.party_search.text().strip()
+        lst = self.party_list
+        lst.blockSignals(True)
+        lst.clear()
         try:
-            rows = WeighService.search_parties("", limit=1000, customers_only=True)
+            walkins = WeighService.search_walkins(text) if text else []
+            customers = WeighService.search_parties(text, limit=60 if text else 100, customers_only=True)
         except Exception as e:
             self._msg(str(e))
-            rows = []
-        for p in rows:
-            cb.addItem(f"{p['name']}    {p['phone']}".rstrip(), p)
+            walkins, customers = [], []
+        if text:
+            it = QListWidgetItem(f"+  Walk-in:  {text}    (new name)")
+            it.setData(Qt.UserRole, {"walkin": True, "name": text})
+            lst.addItem(it)
+        for n in walkins:
+            if text and n.lower() == text.lower():
+                continue
+            it = QListWidgetItem(f"Walk-in:  {n}")
+            it.setData(Qt.UserRole, {"walkin": True, "name": n})
+            lst.addItem(it)
+        for p in customers:
+            it = QListWidgetItem(f"{p['name']}    {p['phone']}".rstrip())
+            it.setData(Qt.UserRole, p)
+            lst.addItem(it)
             if select_id and p["id"] == select_id:
-                cb.setCurrentIndex(cb.count() - 1)
-        if not select_id:
-            cb.setCurrentIndex(-1)
-            cb.clearEditText()
-        cb.blockSignals(False)
+                lst.setCurrentItem(it)
+        self.party_hint.setText(
+            "Pick a customer, or the walk-in line to weigh for someone without an account."
+            if text else "Type the first letter of a customer's name - or a new walk-in's name.")
+        lst.blockSignals(False)
         self._party_changed()
 
     def _party_changed(self, *_a):
-        data = self.party_cb.currentData()
-        walkin = bool(data and data.get("walkin"))
-        self.walkin_name.setVisible(walkin)
-        self.btn_start.setEnabled(data is not None)
+        self.btn_start.setEnabled(bool(self.party_list.selectedItems()))
+
+    def _search_enter(self):
+        if not self.party_list.selectedItems() and self.party_list.count():
+            self.party_list.setCurrentRow(0)
+        if self.party_list.selectedItems():
+            self.start_ticket()
 
     def _load_open_tickets(self):
         self.open_list.clear()
@@ -244,17 +262,21 @@ class WeigherStationView(QWidget):
     def _register_party(self):
         dlg = RegisterPartyDialog(self, kind="customer", lock_kind=True)
         if dlg.exec_() == dlg.Accepted and dlg.party:
+            self.party_search.blockSignals(True)
+            self.party_search.setText(dlg.party["name"])
+            self.party_search.blockSignals(False)
             self._load_party_list(select_id=dlg.party["id"])
 
     def start_ticket(self):
-        party = self.party_cb.currentData()
-        if party is None:
+        items = self.party_list.selectedItems()
+        if not items:
             self._msg("Select a customer or a walk-in first.")
             return
-        name = self.walkin_name.text().strip()
+        party = items[0].data(Qt.UserRole)
         try:
             if party.get("walkin"):
                 from shared.config.constants import WALKIN_PARTY_ID
+                name = party["name"]
                 self.ticket_id = WeighService.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=name)
                 party = {"id": WALKIN_PARTY_ID, "name": name, "phone": "", "kind": "customer"}
             else:
@@ -878,7 +900,9 @@ class WeigherStationView(QWidget):
         self.active_line_id = 0
         self._submitted = False
         self._ticket = {}
-        self.walkin_name.clear()
+        self.party_search.blockSignals(True)
+        self.party_search.clear()
+        self.party_search.blockSignals(False)
         self._load_party_list()
         self._load_open_tickets()
         self._load_catalog()
