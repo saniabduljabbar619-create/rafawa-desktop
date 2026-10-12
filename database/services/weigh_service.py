@@ -43,6 +43,18 @@ RECEIPT_TYPES = ("weighing", "value", "full", "summary")     # the first two are
 ANY_STAFF = WEIGH_ROLES | INTAKE_ROLES
 
 
+def avg_kg_per_bag(kg, bags) -> Optional[float]:
+    """Average weight of one bag (kg / bags); None when there are no bags yet."""
+    b = _f(bags)
+    return round(_f(kg) / b, 2) if b > 0 else None
+
+
+def day_start(now: Optional[datetime] = None) -> datetime:
+    """Midnight at the start of today - the weigher's screen starts from zero at this moment each day."""
+    n = now or datetime.now()
+    return n.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _f(v) -> float:
     try:
         return float(v or 0)
@@ -486,13 +498,16 @@ class WeighService:
     @staticmethod
     @require_role(*ANY_STAFF)
     def list_tickets(status: Optional[Iterable[str]] = None, mine_only: bool = False,
-                     limit: int = 300) -> List[Dict[str, Any]]:
-        """Summaries, newest first (with amounts). A weigher only ever sees their own tickets."""
+                     limit: int = 300, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Summaries, newest first (with amounts). A weigher only ever sees their own tickets.
+        `since` keeps only tickets started at or after that moment (the weigher's screen passes today's midnight)."""
         statuses = [x for x in ([status] if isinstance(status, str) else list(status or [])) if x in STATUSES]
         with get_session() as s:
             q = s.query(WeighTicket)
             if statuses:
                 q = q.filter(WeighTicket.status.in_(statuses))
+            if since is not None:
+                q = q.filter(WeighTicket.created_at >= since)
             if mine_only or _is_weigher():
                 q = q.filter(WeighTicket.weigher_user_id == _uid())
             tickets = q.order_by(WeighTicket.id.desc()).limit(int(limit)).all()
