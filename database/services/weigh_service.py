@@ -131,6 +131,29 @@ class WeighService:
 
     @staticmethod
     @require_role(*ANY_STAFF)
+    def search_walkins(q: str = "", limit: int = 15) -> List[str]:
+        """Walk-in names used before (on weighings, sales or purchases), matched on any part of the name."""
+        q = (q or "").strip().lower()
+        names: Dict[str, str] = {}
+        with get_session() as s:
+            rows = s.query(WeighTicket.walkin_name).filter(WeighTicket.walkin_name.isnot(None)).distinct().all()
+        for (n,) in rows:
+            n = (n or "").strip()
+            if n:
+                names.setdefault(n.lower(), n)
+        try:
+            from database.services.walkin_service import WalkinService
+            for t in WalkinService.list_traders():
+                n = (t.get("name") or "").strip()
+                if n:
+                    names.setdefault(n.lower(), n)
+        except Exception:
+            pass
+        out = sorted((n for k, n in names.items() if not q or q in k), key=str.lower)
+        return out[:int(limit)]
+
+    @staticmethod
+    @require_role(*ANY_STAFF)
     def crop_products() -> List[Dict[str, Any]]:
         """Crops the weigher can pick (the catalog is managed by admin)."""
         with get_session() as s:
@@ -198,10 +221,13 @@ class WeighService:
             raise ValueError("party_role must be customer or supplier.")
         walkin_name = (walkin_name or "").strip()
         with get_session() as s:
-            if is_shared_walkin(party_id, s):                        # the shared walk-in: told apart by name
-                if len(walkin_name) < 2:
-                    raise ValueError("Type the walk-in's name first.")
+            if walkin_name:                                          # a walk-in: the shared account, told apart by name
+                if not is_shared_walkin(party_id, s):
+                    raise ValueError("There is no shared walk-in account in this database, so a walk-in cannot be "
+                                     "weighed. Register the person as a customer instead.")
                 who = walkin_name
+            elif is_shared_walkin(party_id, s):
+                raise ValueError("Type the walk-in's name first.")
             else:
                 p = s.get(Party, int(party_id))
                 if p is None or not p.is_active:

@@ -46,9 +46,10 @@ def _type_round(v, bags, kg):
 
 
 def _pick(v, name):
-    for i in range(v.party_cb.count()):
-        if name in v.party_cb.itemText(i):
-            v.party_cb.setCurrentIndex(i)
+    v.party_search.setText(name)
+    for i in range(v.party_list.count()):
+        if name in v.party_list.item(i).text() and not v.party_list.item(i).text().startswith("+"):
+            v.party_list.setCurrentRow(i)
             return
     raise AssertionError(name)
 
@@ -445,23 +446,48 @@ def test_a_recorded_round_can_be_corrected_in_the_table(qapp, boxes):
     assert v.rounds_table.item(0, 1).text() == "3 bags"
 
 
-def test_party_dropdown_lists_customers_and_walk_in_only(qapp, boxes):
-    v = _station()
-    items = [v.party_cb.itemText(i) for i in range(v.party_cb.count())]
-    assert items[0].startswith("Walk-in") and any("Customer One" in t for t in items)
-    assert not any("Supplier One" in t for t in items)
-    assert not hasattr(v, "kind_seg")
-    assert not v.btn_start.isEnabled() and not v.walkin_name.isVisibleTo(v)
+def _rows(v):
+    return [v.party_list.item(i).text() for i in range(v.party_list.count())]
 
 
-def test_walk_in_needs_a_name_and_the_ticket_carries_it(qapp, boxes):
+def test_one_letter_lists_matching_customers_and_a_walk_in_line(qapp, boxes):
     v = _station()
-    v.party_cb.setCurrentIndex(0)                                  # Walk-in
-    assert v.walkin_name.isVisibleTo(v) and v.btn_start.isEnabled()
-    v.start_ticket()
-    assert any("name" in m.lower() for _k, m in boxes) and v.stack.currentIndex() == 0
-    v.walkin_name.setText("Alhaji Sule")
+    assert any("Customer One" in t for t in _rows(v)) and not any("Supplier One" in t for t in _rows(v))
+    assert not v.btn_start.isEnabled()
+    v.party_search.setText("c")                                    # a single letter is enough
+    rows = _rows(v)
+    assert rows[0].startswith("+  Walk-in:  c") and any("Customer One" in t for t in rows)
+    assert not any("Supplier One" in t for t in rows)
+    v.party_search.setText("s")                                    # a supplier-only name never shows up
+    assert not any("Supplier One" in t for t in _rows(v))
+    v.party_search.setText("zzz")
+    assert _rows(v) == ["+  Walk-in:  zzz    (new name)"]
+
+
+def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes):
+    from database.models.party import Party
+    from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+    from shared.config.constants import WALKIN_PARTY_ID
+    v = _station()
+    v.party_search.setText("Musa")                                 # one name, no surname
+    v.party_list.setCurrentRow(0)
+    assert v.btn_start.isEnabled()
     v.start_ticket()
     t = W.get_ticket(v.ticket_id)
-    assert v.stack.currentIndex() == 1 and t["party_name"] == "Alhaji Sule" and t["walkin_name"] == "Alhaji Sule"
-    assert t["party_role"] == "customer"
+    assert v.stack.currentIndex() == 1 and t["party_name"] == "Musa" and t["walkin_name"] == "Musa"
+    line = W.add_line(v.ticket_id, CROP_ID)
+    W.record_round(line, 2, 100)
+    W.set_line_price(line, 450)
+    W.submit_ticket(v.ticket_id, "weighing")
+
+    as_role("cashier", CASHIER)                                    # the cashier finalizes it into a purchase
+    res = W.finalize_ticket(v.ticket_id)
+    with get_session() as s:
+        p = s.get(Purchase, res["purchase_id"])
+        assert p.supplier_party_id == WALKIN_PARTY_ID and p.walkin_name == "Musa"
+        party = s.get(Party, WALKIN_PARTY_ID)
+    assert W.search_walkins("m") == ["Musa"]                       # offered again next time, one letter finds it
+    dlg = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False, walkin_name="Musa")
+    assert dlg.table.rowCount() == 1                               # payment lists only this walk-in's purchases
+    other = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False, walkin_name="Someone Else")
+    assert other.table.rowCount() == 0

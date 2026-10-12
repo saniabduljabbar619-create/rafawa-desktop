@@ -17,15 +17,17 @@ from database.services.purchase_adjustment_service import PurchaseAdjustmentServ
 from database.models.purchase_price_adjustment import PurchasePriceAdjustment
 from database.services.payment_service import PaymentService
 
-from sqlalchemy import func
+from sqlalchemy import func, true as sa_true
 
 
 class PurchasePaymentDialog(QDialog):
 
-    def __init__(self, party, user_id, parent=None, print_slip=True):
+    def __init__(self, party, user_id, parent=None, print_slip=True, walkin_name=None):
         super().__init__(parent)
 
         self.party = party
+        # a walk-in is the shared account told apart by name: list only that person's purchases
+        self.walkin_name = (walkin_name or "").strip() or None
         self.user_id = user_id
         self._last_payment_id: int = 0   # set after each recorded payment, used by Print Receipt
         self._selected_purchase_id: int = 0  # set whenever a row is selected, so Print Receipt
@@ -45,6 +47,8 @@ class PurchasePaymentDialog(QDialog):
             or getattr(party, "display_name", None) \
             or getattr(party, "party_name", "Supplier")
 
+        if self.walkin_name:
+            name = self.walkin_name
         title = QLabel(f"Pay Supplier: {name}")
         
         title.setStyleSheet("font-size:16px; font-weight:600;")
@@ -172,6 +176,7 @@ class PurchasePaymentDialog(QDialog):
             purchases = (
                 s.query(Purchase)
                 .filter(Purchase.supplier_party_id == int(self.party.id))
+                .filter(Purchase.walkin_name == self.walkin_name if self.walkin_name else sa_true())
                 .order_by(Purchase.completed_at.asc())   # FIFO
                 .all()
             )
@@ -362,6 +367,7 @@ class PurchasePaymentDialog(QDialog):
             purchases = (
                 s.query(Purchase)
                 .filter(Purchase.supplier_party_id == int(self.party.id))
+                .filter(Purchase.walkin_name == self.walkin_name if self.walkin_name else sa_true())
                 .order_by(Purchase.completed_at.asc())  # oldest first
                 .all()
             )
