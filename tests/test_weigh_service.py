@@ -311,3 +311,15 @@ def test_a_walk_in_can_be_a_single_letter_and_past_names_are_searchable():
     assert W.search_walkins("") == ["A", "Aminu"] and W.search_walkins("zz") == []
     with pytest.raises(ValueError):
         W.create_ticket(CUSTOMER_ID, "customer", walkin_name="Someone")     # a real customer is not the walk-in account
+
+
+def test_the_shared_walk_in_account_is_created_when_the_database_lacks_it():
+    from shared.config.constants import WALKIN_PARTY_ID
+    with get_session() as s:
+        s.query(Party).filter(Party.id == WALKIN_PARTY_ID).delete()
+        s.commit()
+    as_role("weigher", WEIGHER)
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa")      # used to fail on the foreign key
+    assert W.get_ticket(tid)["party_name"] == "Musa"
+    with get_session() as s:
+        assert s.get(Party, WALKIN_PARTY_ID).party_type == "walkin"

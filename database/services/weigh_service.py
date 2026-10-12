@@ -225,6 +225,12 @@ class WeighService:
                 if not is_shared_walkin(party_id, s):
                     raise ValueError("There is no shared walk-in account in this database, so a walk-in cannot be "
                                      "weighed. Register the person as a customer instead.")
+                if s.get(Party, int(party_id)) is None:                  # the account row itself was never created
+                    s.add(Party(id=int(party_id), party_type="walkin", display_name="Walk-in", is_active=True,
+                                is_customer=False, is_supplier=False))
+                    s.flush()
+                    AuditService.record("party.register", "party", int(party_id),
+                                        "Created the shared walk-in account (for a weigh ticket)", session=s)
                 who = walkin_name
             elif is_shared_walkin(party_id, s):
                 raise ValueError("Type the walk-in's name first.")
