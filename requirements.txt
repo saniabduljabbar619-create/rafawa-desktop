@@ -8,6 +8,10 @@ PySide2>=5.15,<6
 # Database ORM
 SQLAlchemy>=2.0,<3
 
+# SQLAlchemy needs greenlet. Newer greenlet releases have no prebuilt Windows wheel for Python 3.9, so pip would try
+# to compile it (needs Microsoft C++ Build Tools). 3.2.x has wheels for 3.9 and 3.10.
+greenlet>=3.0,<3.3
+
 # MySQL driver - never imported directly by name anywhere in the project,
 # but required: database/engine.py builds a "mysql+pymysql://" connection
 # string, and SQLAlchemy loads this driver dynamically based on that.
