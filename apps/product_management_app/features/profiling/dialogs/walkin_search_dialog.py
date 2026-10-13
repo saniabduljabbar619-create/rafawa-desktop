@@ -18,7 +18,8 @@ from PySide2.QtWidgets import (
 )
 from PySide2.QtCore import Qt
 
-from apps.product_management_app.app_state import state
+from apps.product_management_app.app_state import state, Customer
+from shared.config.constants import WALKIN_PARTY_ID
 
 
 class WalkinSearchDialog(QDialog):
@@ -97,11 +98,25 @@ class WalkinSearchDialog(QDialog):
             return q in hay
 
         self._matches = [w for w in state.walkins if match(w)]
+        # the names typed at the weighing screen / till: not separate accounts, but they are who the trader is
+        if q:
+            try:
+                from database.services.walkin_service import WalkinService
+                named = WalkinService.list_named(q)
+            except Exception:
+                named = []
+            for d in named:
+                w = Customer(id=WALKIN_PARTY_ID, full_name=d["name"], phone="", email="",
+                             address="Walk-in Client", status="active", notes="")
+                w.walkin_name = d["name"]
+                w.pending = d["pending"]
+                self._matches.append(w)
         self.table.setRowCount(0)
         for w in self._matches:
             row = self.table.rowCount()
             self.table.insertRow(row)
-            cells = [w.full_name, w.phone, w.status]
+            pend = getattr(w, "pending", 0)
+            cells = [w.full_name, w.phone, f"{pend} waiting for cashier" if pend else w.status]
             for c, val in enumerate(cells):
                 self.table.setItem(row, c, QTableWidgetItem(str(val or "")))
         self.btn_select.setEnabled(False)
