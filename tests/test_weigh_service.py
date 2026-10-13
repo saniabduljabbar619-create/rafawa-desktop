@@ -323,3 +323,24 @@ def test_the_shared_walk_in_account_is_created_when_the_database_lacks_it():
     assert W.get_ticket(tid)["party_name"] == "Musa"
     with get_session() as s:
         assert s.get(Party, WALKIN_PARTY_ID).party_type == "walkin"
+
+
+def test_a_walk_in_not_paid_yet_can_still_be_found_and_seen_in_his_activity():
+    from database.services.party_ledger_service import PartyLedgerService
+    from database.services.walkin_service import WalkinService
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa Kano")
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, 100)
+    _submit(tid, line, price=450)                      # sent to the cashier, nobody pays yet
+    found = WalkinService.list_named("mus")
+    assert [(d["name"], d["pending"]) for d in found] == [("Musa Kano", 1)]
+    acts = PartyLedgerService.list_walkin_activity("Musa Kano")
+    assert [(a["type"], a["status"], a["reference"]) for a in acts] == [("weighing", "pending", f"WT-{tid}")]
+    as_role("cashier", CASHIER)
+    W.finalize_ticket(tid)                             # finalized but still unpaid: now it is a purchase
+    found = WalkinService.list_named("musa")
+    assert [(d["name"], d["pending"], d["purchases"]) for d in found] == [("Musa Kano", 0, 1)]
+    assert [a["type"] for a in PartyLedgerService.list_walkin_activity("Musa Kano")] == ["purchase"]
+    assert WalkinService.list_named("zzz") == []

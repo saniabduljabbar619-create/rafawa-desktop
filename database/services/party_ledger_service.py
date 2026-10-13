@@ -1091,8 +1091,22 @@ class PartyLedgerService:
                 ORDER BY dt DESC
             """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
 
-        return [dict(r._mapping) for r in rows]
-    
+        acts = [dict(r._mapping) for r in rows]
+
+        # weighed and sent to the cashier but not finalized yet: still this walk-in's, show it
+        from database.models.weigh_ticket import WeighTicket
+        with get_session() as s:
+            pend = (s.query(WeighTicket).filter(WeighTicket.walkin_name == walkin_name)
+                    .filter(WeighTicket.status.in_(("open", "submitted"))).all())
+            for tk in pend:
+                acts.append({
+                    "dt": tk.created_at, "ledger": "crops", "type": "weighing",
+                    "reference": f"WT-{tk.id}", "summary": "Weighed - waiting for the cashier",
+                    "amount": 0, "status": "pending",
+                })
+        acts.sort(key=lambda a: str(a.get("dt") or ""), reverse=True)
+        return acts
+
     @staticmethod
     def list_walkin_crop_activity(walkin_name):
 

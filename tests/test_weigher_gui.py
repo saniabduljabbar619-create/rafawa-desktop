@@ -567,3 +567,25 @@ def test_the_screen_is_not_pulled_away_at_midnight_during_a_weighing(qapp, boxes
     v._day = date.today() - timedelta(days=1)
     v._check_new_day()
     assert v.stack.currentIndex() == 1 and v.ticket_id
+
+
+def test_walkins_screen_finds_a_walk_in_who_was_weighed_but_not_paid(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog
+    from apps.product_management_app.app_state import state
+    from shared.config.constants import WALKIN_PARTY_ID
+    monkeypatch.setattr(state, "walkins", [])          # the in-memory cache is shared between tests
+    as_role("weigher", CASHIER_A)
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa Kano")
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, 100)
+    W.set_line_price(line, 450)
+    W.submit_ticket(tid, "full")                       # sent to the cashier, never paid
+    as_role("cashier", CASHIER)
+    dlg = WalkinSearchDialog()
+    dlg.search_in.setText("mus")
+    assert dlg.table.rowCount() == 1
+    assert dlg.table.item(0, 0).text() == "Musa Kano"
+    assert "waiting for cashier" in dlg.table.item(0, 2).text()
+    dlg.table.selectRow(0)
+    dlg._confirm()
+    assert dlg.selected_walkin.walkin_name == "Musa Kano"

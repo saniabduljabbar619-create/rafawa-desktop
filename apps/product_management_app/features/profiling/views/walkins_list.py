@@ -116,7 +116,7 @@ class WalkinsListView(QWidget):
 
     def refresh(self):
         """Re-render the single current row - placeholder, or the loaded trader."""
-        if self._current_walkin is not None:
+        if self._current_walkin is not None and not getattr(self._current_walkin, "walkin_name", None):
             # trader may have been deleted elsewhere since it was loaded
             self._current_walkin = next(
                 (x for x in state.walkins if x.id == self._current_walkin.id), None
@@ -171,10 +171,14 @@ class WalkinsListView(QWidget):
         if not w:
             return
 
+        named = getattr(w, "walkin_name", None)
         menu = QMenu(self)
         act_payment = menu.addAction("Make Payment")
         act_advance = menu.addAction("Record Advance")
         act_return = menu.addAction("Go to Returns")
+        if named:        # these share one account across every walk-in, so only the name-scoped payment is safe
+            act_advance.setVisible(False)
+            act_return.setVisible(False)
         menu.addSeparator()
         act_profile = menu.addAction("Open Full Activity")
         menu.addSeparator()
@@ -195,6 +199,12 @@ class WalkinsListView(QWidget):
             self.delete_selected()
 
     def _open_payment(self, w):
+        named = getattr(w, "walkin_name", None)
+        if named:
+            from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+            PurchasePaymentDialog(w, state.require_user_id(), self, walkin_name=named).exec_()
+            self.refresh()
+            return
         from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog
         dlg = PaymentTargetDialog(party=w, user_id=state.require_user_id(), parent=self)
         dlg.exec_()
@@ -241,6 +251,11 @@ class WalkinsListView(QWidget):
             QMessageBox.information(self, "Delete Walk-in", "Search for a trader first.")
             return
 
+        if getattr(w, "walkin_name", None):
+            QMessageBox.information(self, "Delete Walk-in",
+                                    "This name comes from weighings and sales, so there is no record to delete.")
+            return
+
         ok = QMessageBox.question(
             self, "Confirm Delete", f"Delete walk-in record for '{w.full_name}'?",
             QMessageBox.Yes | QMessageBox.No
@@ -259,7 +274,9 @@ class WalkinsListView(QWidget):
         if not w:
             return
 
-        profile = CustomerProfileView(w, mode=self.mode)
+        named = getattr(w, "walkin_name", None)
+        profile = CustomerProfileView(None, mode=self.mode, walkin_name=named) if named \
+            else CustomerProfileView(w, mode=self.mode)
         profile.setWindowTitle(f"Walk-in Trader Profile - {w.full_name}")
         profile.resize(900, 560)
 
