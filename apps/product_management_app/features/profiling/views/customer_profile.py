@@ -1326,7 +1326,11 @@ class CustomerProfileView(QWidget):
 
     def _compute_totals(self):
         if not self.customer:
-            return 0, 0, 0, 0, 0, 0
+            if not self.walkin_name:
+                return 0, 0, 0, 0, 0, 0
+            from database.services.walkin_service import WalkinService
+            w = WalkinService.totals(self.walkin_name)          # just this walk-in's documents
+            return w["payable"], w["paid"], w["receivable"], w["received"], 0, 0
 
         bal = PartyBalanceService.compute(
             int(self.customer.id),

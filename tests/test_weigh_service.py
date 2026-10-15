@@ -381,3 +381,19 @@ def test_payment_receipt_is_small_and_names_the_product_and_the_balance():
     assert "PAID NOW" in text and "20,000.00" in text and "25,000.00" in text      # balance left
     assert "2 bags 100.00 kg" in text
     assert len(text.splitlines()) < 30
+
+
+def test_walk_in_names_show_in_the_drawer_and_profile_totals_are_his_alone():
+    from database.services.drawer import DrawerService
+    from database.services.payment_service import PaymentService
+    from database.services.walkin_service import WalkinService
+    res = _walkin_purchase("Musa Kano", kg=100, price=450)         # 45,000 owed to him
+    _walkin_purchase("Ladi Bello", kg=100, price=450)
+    PaymentService.record_purchase_payment(
+        purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
+        created_by_user_id=CASHIER, method="manual", notes="")
+    assert WalkinService.totals("Musa Kano") == {"payable": 25000.0, "paid": 20000.0, "receivable": 0.0, "received": 0.0}
+    assert WalkinService.totals("Ladi Bello")["payable"] == 45000.0
+    assert WalkinService.totals("nobody")["payable"] == 0
+    parties = {e["party"] for e in DrawerService.compute(CASHIER)["cash_events"] if e.get("party")}
+    assert "Musa Kano (Walk-in)" in parties and "Walk-in" not in parties

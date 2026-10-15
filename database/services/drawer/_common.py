@@ -119,6 +119,15 @@ def _party_map(s) -> "_LazyMap":
         for i, n in s.query(Party.id, Party.display_name).filter(Party.id.in_(ids)).all()})
 
 
+def _who(parties, party_id, walkin, fallback="") -> str:
+    """Name for a document's party. Every casual walk-in sits on the one shared account, so use the typed name."""
+    from shared.config.constants import WALKIN_PARTY_ID
+    w = (walkin or "").strip()
+    if int(party_id or 0) == WALKIN_PARTY_ID and w:
+        return f"{w} (Walk-in)"
+    return parties.get(party_id, w or fallback)
+
+
 def _product_map(s) -> "_LazyMap":
     """id -> (name, product_type)."""
     return _LazyMap(lambda ids: {

@@ -84,3 +84,29 @@ class WalkinService:
         res = [d for k, d in out.items() if not q or q in k]
         res.sort(key=lambda d: d["name"].lower())
         return res[:int(limit)]
+
+    @staticmethod
+    def totals(name: str):
+        """Still to pay / paid (purchases) and still to receive / received (sales) for ONE walk-in, by name."""
+        from database.models.purchase import Purchase
+        from database.models.sale import Sale
+        from database.services.document_balance import document_balances
+
+        out = {"payable": 0.0, "paid": 0.0, "receivable": 0.0, "received": 0.0}
+        name = (name or "").strip()
+        if not name:
+            return out
+        pid = WalkinService.WALKIN_PARTY_ID
+        with get_session() as s:
+            pur = [r[0] for r in s.query(Purchase.id).filter(
+                Purchase.supplier_party_id == pid, Purchase.walkin_name == name,
+                Purchase.status != "voided").all()]
+            sal = [r[0] for r in s.query(Sale.id).filter(
+                Sale.buyer_party_id == pid, Sale.walkin_name == name, Sale.status != "voided").all()]
+            for b in document_balances(s, "purchase", pur).values():
+                out["payable"] += b.balance
+                out["paid"] += min(b.settled, b.net_total)
+            for b in document_balances(s, "sale", sal).values():
+                out["receivable"] += b.balance
+                out["received"] += min(b.settled, b.net_total)
+        return {k: round(v, 2) for k, v in out.items()}

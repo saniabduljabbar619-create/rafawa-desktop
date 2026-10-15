@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .ledger import LedgerMixin
 from ._common import (
+    _who,
     Advance,
     Any,
     CashierSettlement,
@@ -395,7 +396,7 @@ class ComputeMixin:
                     ),
                     "amount": amt,
                     "method": p.method or "",
-                    "party": parties.get(party_id, walkin or ""),
+                    "party": _who(parties, party_id, walkin),
                     "doc_creator": users.get(creator_id, f"User#{creator_id}"),
                     "doc_creator_id": creator_id,
                     "cross": bool(creator_id and creator_id != int(user_id)),
@@ -570,7 +571,7 @@ class ComputeMixin:
                     ),
                     "amount": amt,
                     "method": p.method or "",
-                    "party": parties.get(party_id, walkin or ""),
+                    "party": _who(parties, party_id, walkin),
                     "doc_creator": users.get(creator_id, f"User#{creator_id}"),
                     "doc_creator_id": creator_id,
                     "cross": bool(creator_id and creator_id != int(user_id)),
@@ -808,7 +809,7 @@ class ComputeMixin:
                     "bucket": _bucket_for(et, p.entity_id),
                     "doc_no": doc_no,
                     "amount": _f(p.amount),
-                    "party": parties.get(party_id, walkin or ""),
+                    "party": _who(parties, party_id, walkin),
                     "creator": users.get(creator, f"User#{creator}"),
                     "settler": users.get(settler, f"User#{settler}"),
                     "creator_id": creator,
