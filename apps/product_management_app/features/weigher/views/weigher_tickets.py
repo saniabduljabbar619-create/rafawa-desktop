@@ -52,11 +52,12 @@ class WeigherTicketsView(QWidget):
         self.btn_refresh = QPushButton("Refresh")
         self.btn_print = QPushButton("Print Weighing Receipt")
         self.btn_print_value = QPushButton("Print Value Receipt")
+        self.btn_print_pay = QPushButton("Print Payment Receipt")
         self.btn_edit = QPushButton("Edit")
         self.btn_edit.setObjectName("PrimaryButton")
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setProperty("role", "danger")
-        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_print_value, self.btn_refresh):
+        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -68,6 +69,7 @@ class WeigherTicketsView(QWidget):
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_print.clicked.connect(lambda: self.print_selected("weighing"))
         self.btn_print_value.clicked.connect(lambda: self.print_selected("value"))
+        self.btn_print_pay.clicked.connect(lambda: self.print_selected("payment"))
         self.btn_edit.clicked.connect(self.edit_selected)
         self.btn_remove.clicked.connect(self.remove_selected)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit_selected())
@@ -116,6 +118,7 @@ class WeigherTicketsView(QWidget):
         printable = bool(t and t["status"] != "open")
         self.btn_print.setEnabled(printable)
         self.btn_print_value.setEnabled(printable)
+        self.btn_print_pay.setEnabled(printable)
 
     def edit_selected(self):
         """Correct a weighing: its rounds and prices (a finalized one opens read-only)."""

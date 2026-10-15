@@ -56,8 +56,9 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_purchase = QPushButton("Print Purchase Receipt")
         self.btn_print = QPushButton("Print Weighing Receipt")
         self.btn_print_value = QPushButton("Print Value Receipt")
+        self.btn_print_pay = QPushButton("Print Payment Receipt")
         self.btn_refresh = QPushButton("Refresh")
-        for b in (self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_refresh):
+        for b in (self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -73,6 +74,7 @@ class WeighTicketsAdminView(QWidget):
         self.btn_open.clicked.connect(self.open_selected)
         self.btn_print.clicked.connect(lambda: self.print_weigh("weighing"))
         self.btn_print_value.clicked.connect(lambda: self.print_weigh("value"))
+        self.btn_print_pay.clicked.connect(lambda: self.print_weigh("payment"))
         self.btn_print_purchase.clicked.connect(self.print_purchase)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self.open_selected())
@@ -106,6 +108,7 @@ class WeighTicketsAdminView(QWidget):
         _tid, t = self._selected()
         self.btn_print.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_value.setEnabled(bool(t and t["status"] != "open"))
+        self.btn_print_pay.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_purchase.setEnabled(bool(t and t.get("purchase_id")))
 
     def print_weigh(self, option: str):

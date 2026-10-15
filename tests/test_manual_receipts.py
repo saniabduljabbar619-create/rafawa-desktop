@@ -181,3 +181,13 @@ def test_quick_purchases_screen_and_admin_menu(qapp, boxes, monkeypatch):
     v.btn_print_sale.click()
     v.btn_print_buy.click()
     assert calls == [(r2.SALE, res["sale_id"]), (r2.PURCHASE, res["purchases"][0])]
+
+
+def test_option_3_payment_receipt_is_small_and_shows_each_product_paid_and_balance():
+    t = render_weigh_slip(dict(TICKET, payment={"status": "Part paid", "paid": 1000000, "balance": 3878000,
+                                                "total": 4878000}), SHOP, "payment")
+    for needle in ("PAYMENT RECEIPT", "WT-00128", "Sharifadden", "Paddy Rice", "N2,376,000", "Maize", "Soybean",
+                   "Total:", "N4,878,000", "PAID:", "N1,000,000", "Balance:", "N3,878,000", "Part paid", "Signature:"):
+        assert needle in t, needle
+    assert "Price/KG" not in t and "Round" not in t
+    assert len(t.splitlines()) < 32 and all(len(line) <= WIDTH for line in t.splitlines())

@@ -21,7 +21,9 @@ SUMMARY = "summary"      # legacy: totals per product
 WEIGHING = "weighing"    # Option 1 - Weighing Receipt: product + total bags + total kg
 VALUE = "value"          # Option 2 - Full Value Receipt: + price, amount and payment
 RECEIPT_TYPES = (WEIGHING, VALUE)
-RECEIPT_TITLES = {WEIGHING: "Weighing Receipt (Option 1)", VALUE: "Full Value Receipt (Option 2)"}
+PAYMENT = "payment"      # Option 3 - Payment Receipt: small, printed once there is a payment to show
+RECEIPT_TITLES = {WEIGHING: "Weighing Receipt (Option 1)", VALUE: "Full Value Receipt (Option 2)",
+                  PAYMENT: "Payment Receipt (Option 3)"}
 
 
 def _kg(v) -> str:
@@ -121,11 +123,46 @@ def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = W
     return "\n".join(out)
 
 
+def render_payment_receipt(ticket: Dict[str, Any], shop: ShopInfo) -> str:
+    """
+    Option 3 - the small payment receipt for a weighing: each product with its amount, then what was paid and
+    what is left. No rounds, no weights table. ticket is WeighService.get_ticket()'s dict.
+    """
+    out = [_center(shop.name)]
+    if shop.phone:
+        out.append(_center(shop.phone))
+    out += [_rule(), _center("PAYMENT RECEIPT"), _rule()]
+    out.append(_kv("Receipt No", ticket.get("ticket_no", "")))
+    out.append(_kv("Name", ticket.get("party_name", "")))
+    out.append(_kv("Date", _fmt_dt(datetime.now())))
+    out.append(_rule())
+    for ln in ticket.get("lines", []):
+        if not ln.get("rounds"):
+            continue
+        amount = ln.get("amount")
+        if amount is None and ln.get("unit_price"):
+            amount = float(ln["unit_price"]) * float(ln.get("kg") or 0)
+        name = ln.get("product_name", "") + (f" ({ln['grade']})" if ln.get("grade") else "")
+        right = f"N{_money(amount)}"
+        wrapped = _wrap(name, WIDTH - len(right) - 1)
+        out += wrapped[:-1]
+        out.append(_two(wrapped[-1], right))
+        out.append(f"  {_bags(ln.get('bags'))} bags  {_money(ln.get('kg'))} kg")
+    pay = ticket.get("payment") or {}
+    total = pay.get("total", ticket.get("total_amount"))
+    out += [_rule(), _two("Total:", f"N{_money(total)}"), _two("PAID:", f"N{_money(pay.get('paid'))}"),
+            _two("Balance:", f"N{_money(pay.get('balance', total))}"), _kv("Status", pay.get("status", "Unpaid")),
+            _rule(), "", "Signature: ____________________", "", _center(shop.footer_note or "Thank you"), ""]
+    return "\n".join(out)
+
+
 def render_weigh_slip(ticket: Dict[str, Any], shop: ShopInfo, receipt_type: str = FULL) -> str:
     """
     ticket is WeighService.get_ticket()'s dict. receipt_type: 'weighing' / 'value' (the two weigher receipts), or
     the older 'full' (every round) / 'summary' slips still found on tickets saved before.
     """
+    if receipt_type == PAYMENT:
+        return render_payment_receipt(ticket, shop)
     if receipt_type in RECEIPT_TYPES:
         return render_weigh_receipt(ticket, shop, receipt_type)
     out: List[str] = []
