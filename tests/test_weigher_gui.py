@@ -589,3 +589,38 @@ def test_walkins_screen_finds_a_walk_in_who_was_weighed_but_not_paid(qapp, boxes
     dlg.table.selectRow(0)
     dlg._confirm()
     assert dlg.selected_walkin.walkin_name == "Musa Kano"
+
+
+def test_walkins_screen_searches_inline_and_the_profile_can_take_payment(qapp, boxes, monkeypatch):
+    from apps.product_management_app.app_state import state
+    from apps.product_management_app.features.profiling.dialogs import purchase_payment_dialog as ppd
+    from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
+    from apps.product_management_app.features.profiling.views.walkins_list import WalkinsListView
+    from shared.config.constants import WALKIN_PARTY_ID
+    monkeypatch.setattr(state, "walkins", [])
+    as_role("weigher", CASHIER_A)
+    for nm in ("Musa Kano", "Musa Sule", "Ladi Bello"):
+        tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=nm)
+        line = W.add_line(tid, CROP_ID)
+        W.record_round(line, 2, 100)
+        W.set_line_price(line, 450)
+        W.submit_ticket(tid, "full")
+    as_role("cashier", CASHIER)
+    v = WalkinsListView(mode="cashier")
+    v.search_in.setText("musa")
+    assert [v.table.item(r, 1).text() for r in range(v.table.rowCount())] == ["Musa Kano", "Musa Sule"]
+    v.search_in.setText("zzz")
+    assert v.table.item(0, 0).text() == "No walk-in matches that."
+    v.search_in.setText("ladi")
+    v._on_cell_clicked(0, 0)
+    assert v._current_walkin.walkin_name == "Ladi Bello"
+
+    prof = CustomerProfileView(None, mode="cashier", walkin_name="Ladi Bello")
+    assert prof.btn_advance_pay.isHidden() and not prof.btn_make_payment.isHidden()
+    seen = {}
+    monkeypatch.setattr(ppd.PurchasePaymentDialog, "exec_", lambda self: seen.setdefault("who", self.walkin_name) or 0)
+    from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog
+    monkeypatch.setattr(PaymentTargetDialog, "exec_", lambda self: (
+        self.rb_purchase.setChecked(True), self.route(), 0)[-1])
+    prof.open_payment_router()
+    assert seen["who"] == "Ladi Bello"

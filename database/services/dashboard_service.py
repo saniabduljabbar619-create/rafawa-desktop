@@ -224,6 +224,15 @@ def get_admin_dashboard_snapshot(scope: str = "all"):
     }
 
 
+def _party_label(party, walkin_name) -> str:
+    """Who a document belongs to. Every casual walk-in shares one account, so tell them apart by the name typed."""
+    from database.services.walkin_account import is_shared_walkin
+    if party is not None and is_shared_walkin(party.id):
+        n = (walkin_name or "").strip()
+        return f"{n} (Walk-in)" if n else "Walk-in"
+    return party.display_name if party is not None else "Walk-in Customer"
+
+
 def get_purchase_payment_snapshot(
     role: str, 
     user_id: int | None, 
@@ -279,7 +288,7 @@ def get_purchase_payment_snapshot(
 
             rows.append({
                 "purchase_id": purchase.id,
-                "supplier": purchase.supplier.display_name,
+                "supplier": _party_label(purchase.supplier, purchase.walkin_name),
                 "total": bal.net_total,
                 "paid": min(bal.settled, bal.net_total),
                 "balance": bal.balance,
@@ -349,7 +358,7 @@ def get_sale_payment_snapshot(
 
             rows.append({
                 "sale_id": sale.id,
-                "customer": sale.buyer.display_name if sale.buyer else "Walk-in Customer",
+                "customer": _party_label(sale.buyer, sale.walkin_name),
                 "total": bal.net_total,
                 "paid": min(bal.settled, bal.net_total),
                 "balance": bal.balance,

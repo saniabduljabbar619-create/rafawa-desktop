@@ -344,3 +344,40 @@ def test_a_walk_in_not_paid_yet_can_still_be_found_and_seen_in_his_activity():
     assert [(d["name"], d["pending"], d["purchases"]) for d in found] == [("Musa Kano", 0, 1)]
     assert [a["type"] for a in PartyLedgerService.list_walkin_activity("Musa Kano")] == ["purchase"]
     assert WalkinService.list_named("zzz") == []
+
+
+def _walkin_purchase(name, kg=100, price=450):
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=name)
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, kg)
+    _submit(tid, line, price=price)
+    as_role("cashier", CASHIER)
+    return W.finalize_ticket(tid)
+
+
+def test_dashboard_lists_each_walk_in_by_name_not_as_one_lump():
+    from database.services.dashboard_service import get_purchase_payment_snapshot
+    _walkin_purchase("Musa Kano")
+    _walkin_purchase("Ladi Bello")
+    _walkin_purchase("Musa Kano")
+    as_role("admin", ADMIN_ID)
+    rows = get_purchase_payment_snapshot(role="admin", user_id=None, scope="all")["rows"]
+    names = sorted(r["supplier"] for r in rows)
+    assert names == ["Ladi Bello (Walk-in)", "Musa Kano (Walk-in)", "Musa Kano (Walk-in)"]
+
+
+def test_payment_receipt_is_small_and_names_the_product_and_the_balance():
+    from database.services.payment_service import PaymentService
+    from apps.product_management_app.features.receipts_v2.payment_slip import build_payment_slip, render_payment_slip
+    from apps.product_management_app.features.receipts_v2.shop import get_shop
+    res = _walkin_purchase("Musa Kano", kg=100, price=450)         # 45,000 owed
+    pid = PaymentService.record_purchase_payment(
+        purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
+        created_by_user_id=CASHIER, method="cash", notes="")
+    text = render_payment_slip(build_payment_slip(pid), get_shop())
+    assert "PAYMENT RECEIPT" in text and "Musa Kano" in text
+    assert "PAID NOW" in text and "20,000.00" in text and "25,000.00" in text      # balance left
+    assert "2 bags 100.00 kg" in text
+    assert len(text.splitlines()) < 30

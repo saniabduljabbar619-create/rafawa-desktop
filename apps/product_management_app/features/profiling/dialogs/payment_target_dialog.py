@@ -8,10 +8,11 @@ from PySide2.QtWidgets import (
 
 class PaymentTargetDialog(QDialog):
 
-    def __init__(self, party, user_id, parent=None):
+    def __init__(self, party, user_id, parent=None, walkin_name=None):
         super().__init__(parent)
 
         self.party = party
+        self.walkin_name = (walkin_name or "").strip() or None
         self.user_id = user_id
 
         self.setWindowTitle("Select Payment Target")
@@ -36,7 +37,10 @@ class PaymentTargetDialog(QDialog):
 
         layout.addWidget(self.rb_sale)
         layout.addWidget(self.rb_purchase)
-        layout.addWidget(self.rb_advance)
+        if not self.walkin_name:           # a walk-in has no account to hold an advance
+            layout.addWidget(self.rb_advance)
+        else:
+            self.rb_advance.setVisible(False)
 
         btns = QHBoxLayout()
 
@@ -57,13 +61,13 @@ class PaymentTargetDialog(QDialog):
 
             from apps.product_management_app.features.profiling.dialogs.sale_payment_dialog import SalePaymentDialog
 
-            dlg = SalePaymentDialog(self.party, self.user_id, self)
+            dlg = SalePaymentDialog(self.party, self.user_id, self, walkin_name=self.walkin_name)
             dlg.exec_()
 
         elif self.rb_purchase.isChecked():
 
             from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
-            dlg = PurchasePaymentDialog(self.party, self.user_id, self)
+            dlg = PurchasePaymentDialog(self.party, self.user_id, self, walkin_name=self.walkin_name)
             dlg.exec_()
 
         else:

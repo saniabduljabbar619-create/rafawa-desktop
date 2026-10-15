@@ -16,15 +16,17 @@ from database.models.advance_allocations import AdvanceAllocation
 from database.services.payment_service import PaymentService
 from database.services.sale_adjustment_service import SaleAdjustmentService
 
-from sqlalchemy import func
+from sqlalchemy import func, true as sa_true
 
 
 class SalePaymentDialog(QDialog):
 
-    def __init__(self, party, user_id, parent=None, print_slip=True):
+    def __init__(self, party, user_id, parent=None, print_slip=True, walkin_name=None):
         super().__init__(parent)
         
         self.party = party
+        # a walk-in is the shared account told apart by name: list only that person's sales
+        self.walkin_name = (walkin_name or "").strip() or None
         self.party_id = int(party.id) if party else WALKIN_PARTY_ID
         self.user_id = user_id
         self._last_payment_id: int = 0   # set after each recorded payment, used by Print Receipt
@@ -44,6 +46,8 @@ class SalePaymentDialog(QDialog):
             or getattr(party, "name", None) \
             or getattr(party, "full_name", None) \
             or "Customer"
+        if self.walkin_name:
+            name = self.walkin_name
         title = QLabel(f"Settle Sale for: {name}")
 
         title.setStyleSheet("font-size:16px; font-weight:600;")
@@ -177,6 +181,7 @@ class SalePaymentDialog(QDialog):
             sales = (
                 s.query(Sale)
                 .filter(Sale.buyer_party_id == self.party_id)
+                .filter(Sale.walkin_name == self.walkin_name if self.walkin_name else sa_true())
                 .order_by(Sale.completed_at.asc())
                 .all()
             )
@@ -381,6 +386,7 @@ class SalePaymentDialog(QDialog):
             sales = (
                 s.query(Sale)
                 .filter(Sale.buyer_party_id == self.party_id)
+                .filter(Sale.walkin_name == self.walkin_name if self.walkin_name else sa_true())
                 .order_by(Sale.completed_at.asc())  # oldest first
                 .all()
             )

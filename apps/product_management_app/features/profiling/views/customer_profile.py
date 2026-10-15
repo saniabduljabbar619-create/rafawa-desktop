@@ -266,6 +266,8 @@ class CustomerProfileView(QWidget):
         # Connect Signal Slots
         self.btn_make_payment.clicked.connect(self.open_payment_router)
         self.btn_advance_pay.clicked.connect(self.open_advance_center)
+        if not self.customer:
+            self.btn_advance_pay.setVisible(False)   # a walk-in has no account to hold an advance
 
         self.activity_table.cellDoubleClicked.connect(self._preview_document)
         self.crops_table.cellDoubleClicked.connect(self._preview_document)
@@ -1268,7 +1270,14 @@ class CustomerProfileView(QWidget):
 
     def open_payment_router(self):
         from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog
-        dlg = PaymentTargetDialog(party=self.customer, user_id=self.session_user_id, parent=self)
+        if self.walkin_name and not self.customer:
+            from types import SimpleNamespace
+            from shared.config.constants import WALKIN_PARTY_ID
+            party = SimpleNamespace(id=WALKIN_PARTY_ID, full_name=self.walkin_name, display_name=self.walkin_name)
+            dlg = PaymentTargetDialog(party=party, user_id=self.session_user_id, parent=self,
+                                      walkin_name=self.walkin_name)
+        else:
+            dlg = PaymentTargetDialog(party=self.customer, user_id=self.session_user_id, parent=self)
         dlg.exec_()
         self.refresh_all()
 
