@@ -33,7 +33,7 @@ from PySide2.QtCore import QSizeF
 
 from .receipt_models import (
     MODE_FULL, MODE_DELIVERY,
-    SALE, PURCHASE, SALE_RETURN, PURCHASE_RETURN,
+    SALE, PURCHASE, PAYMENT, SALE_RETURN, PURCHASE_RETURN,
     BOLD_MARKER,
 )
 from .receipt_render import render_receipt
@@ -226,7 +226,17 @@ def print_text(parent, text: str, *, window_title: str = "Print Receipt") -> Non
 
 def print_receipt(parent, doc_type: str, entity_id: int,
                   mode: str = MODE_FULL, *, shop=None) -> None:
-    doc = _data.build(doc_type, entity_id, shop=shop or get_shop())
+    shop = shop or get_shop()
+    if (doc_type or "").strip().lower() == PAYMENT:
+        # a payment on a sale/purchase gets the small payment receipt; anything else keeps the general one
+        try:
+            from .payment_slip import build_payment_slip, render_payment_slip
+            d = build_payment_slip(entity_id)
+            print_text(parent, render_payment_slip(d, shop), window_title=f"Payment Receipt - {d['receipt_no']}")
+            return
+        except ValueError:
+            pass
+    doc = _data.build(doc_type, entity_id, shop=shop)
     text = render_receipt(doc, mode)
     print_text(parent, text, window_title=f"{doc.title} - {doc.receipt_no}")
 

@@ -31,7 +31,7 @@ trader is loaded, so it's a no-op while the placeholder row is showing.
 from __future__ import annotations
 
 from PySide2.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QMenu, QDialog
 )
 from PySide2.QtGui import QFont
@@ -39,10 +39,10 @@ from PySide2.QtCore import Qt
 
 from apps.product_management_app.app_state import state
 from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
-from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog
+from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog, find_walkins
 from shared.uix.layout.scrollable import make_scrollable_page
 
-PLACEHOLDER_TEXT = "\U0001F50D  Walk-in space \u2014 click here to search for a trader"
+PLACEHOLDER_TEXT = "\U0001F50D  Walk-in space \u2014 type a name or phone in the box above"
 
 
 class WalkinsListView(QWidget):
@@ -68,7 +68,10 @@ class WalkinsListView(QWidget):
         # the old free-text filter bar is gone, replaced by WalkinSearchDialog.
         top = QHBoxLayout()
         root.addLayout(top)
-        top.addStretch(1)
+        self.search_in = QLineEdit()
+        self.search_in.setPlaceholderText("Search a walk-in by name or phone...")
+        self.search_in.setClearButtonEnabled(True)
+        top.addWidget(self.search_in, 1)
         self.btn_search = QPushButton("New Search")
         top.addWidget(self.btn_search)
 
@@ -96,7 +99,9 @@ class WalkinsListView(QWidget):
             self.btn_delete.setVisible(False)
 
         # Wiring
-        self.btn_search.clicked.connect(self.open_search)
+        self.btn_search.clicked.connect(self._new_search)
+        self.search_in.textChanged.connect(self._on_search_text)
+        self.table.itemSelectionChanged.connect(self._on_selection)
         self.btn_delete.clicked.connect(self.delete_selected)
         self.table.cellClicked.connect(self._on_cell_clicked)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -104,6 +109,7 @@ class WalkinsListView(QWidget):
 
         self._open_profiles = []
         self._current_walkin = None
+        self._results = []
         self.refresh()
 
     def selected_walkin_id(self):
@@ -114,8 +120,51 @@ class WalkinsListView(QWidget):
     def _selected_walkin(self):
         return self._current_walkin
 
+    def _new_search(self):
+        self._current_walkin = None
+        self.search_in.clear()
+        self.search_in.setFocus()
+        self.refresh()
+
+    def _on_search_text(self, _text):
+        self._current_walkin = None
+        self.refresh()
+
+    def _on_selection(self):
+        if not self._results:
+            return
+        row = self.table.currentRow()
+        if 0 <= row < len(self._results):
+            self._current_walkin = self._results[row]
+
+    def _render_results(self):
+        self.table.setRowCount(0)
+        for w in self._results:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            pend = getattr(w, "pending", 0)
+            status = f"{pend} waiting for cashier" if pend else w.status
+            for i, val in enumerate([str(w.id), w.full_name, w.phone, status]):
+                it = QTableWidgetItem(val)
+                if i == 0:
+                    it.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(r, i, it)
+
     def refresh(self):
-        """Re-render the single current row - placeholder, or the loaded trader."""
+        """Typed search: list the matches. Otherwise the single placeholder / loaded row."""
+        self._results = find_walkins(self.search_in.text())
+        if self.search_in.text().strip():
+            if self._results:
+                self._render_results()
+                # keep the same walk-in selected across a refresh
+                return
+            self.table.setRowCount(0)
+            self.table.insertRow(0)
+            it = QTableWidgetItem("No walk-in matches that.")
+            it.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(0, 0, it)
+            self.table.setSpan(0, 0, 1, 4)
+            return
         if self._current_walkin is not None and not getattr(self._current_walkin, "walkin_name", None):
             # trader may have been deleted elsewhere since it was loaded
             self._current_walkin = next(
@@ -147,13 +196,17 @@ class WalkinsListView(QWidget):
                 it.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(0, i, it)
 
-    def _on_cell_clicked(self, _row, _col):
-        if self._current_walkin is None:
-            self.open_search()
+    def _on_cell_clicked(self, row, _col):
+        if self._results and 0 <= row < len(self._results):
+            self._current_walkin = self._results[row]
+        elif self._current_walkin is None:
+            self.search_in.setFocus()
 
-    def _on_cell_double_clicked(self, _row, _col):
+    def _on_cell_double_clicked(self, row, _col):
+        if self._results and 0 <= row < len(self._results):
+            self._current_walkin = self._results[row]
         if self._current_walkin is None:
-            self.open_search()
+            self.search_in.setFocus()
         else:
             self.open_profile()
 
@@ -167,6 +220,8 @@ class WalkinsListView(QWidget):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
+        if self._results and row < len(self._results):
+            self._current_walkin = self._results[row]
         w = self._selected_walkin()
         if not w:
             return
@@ -201,8 +256,8 @@ class WalkinsListView(QWidget):
     def _open_payment(self, w):
         named = getattr(w, "walkin_name", None)
         if named:
-            from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
-            PurchasePaymentDialog(w, state.require_user_id(), self, walkin_name=named).exec_()
+            from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog
+            PaymentTargetDialog(party=w, user_id=state.require_user_id(), parent=self, walkin_name=named).exec_()
             self.refresh()
             return
         from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog

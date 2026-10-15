@@ -22,6 +22,26 @@ from apps.product_management_app.app_state import state, Customer
 from shared.config.constants import WALKIN_PARTY_ID
 
 
+def find_walkins(text: str):
+    """Walk-in accounts plus every typed walk-in name (weighings, sales, purchases) matching the text."""
+    q = (text or "").strip().lower()
+    if not q:
+        return []              # nothing typed yet - don't dump the whole roster
+    out = [w for w in state.walkins if q in f"{w.full_name} {w.phone}".lower()]
+    try:
+        from database.services.walkin_service import WalkinService
+        named = WalkinService.list_named(q)
+    except Exception:
+        named = []
+    for d in named:
+        w = Customer(id=WALKIN_PARTY_ID, full_name=d["name"], phone="", email="",
+                     address="Walk-in Client", status="active", notes="")
+        w.walkin_name = d["name"]
+        w.pending = d["pending"]
+        out.append(w)
+    return out
+
+
 class WalkinSearchDialog(QDialog):
     """
     exec_() as usual; on QDialog.Accepted, `self.selected_walkin` holds the
@@ -89,28 +109,7 @@ class WalkinSearchDialog(QDialog):
         self._refresh()
 
     def _refresh(self):
-        q = self.search_in.text().strip().lower()
-
-        def match(w):
-            if not q:
-                return False  # nothing typed yet - don't dump the whole roster
-            hay = f"{w.full_name} {w.phone}".lower()
-            return q in hay
-
-        self._matches = [w for w in state.walkins if match(w)]
-        # the names typed at the weighing screen / till: not separate accounts, but they are who the trader is
-        if q:
-            try:
-                from database.services.walkin_service import WalkinService
-                named = WalkinService.list_named(q)
-            except Exception:
-                named = []
-            for d in named:
-                w = Customer(id=WALKIN_PARTY_ID, full_name=d["name"], phone="", email="",
-                             address="Walk-in Client", status="active", notes="")
-                w.walkin_name = d["name"]
-                w.pending = d["pending"]
-                self._matches.append(w)
+        self._matches = find_walkins(self.search_in.text())
         self.table.setRowCount(0)
         for w in self._matches:
             row = self.table.rowCount()
