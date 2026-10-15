@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ._common import (
+    _who,
     Any,
     Dict,
     List,
@@ -72,24 +73,25 @@ class ListsMixin:
             by_party: Dict[int, Dict[str, Any]] = {}
 
             def _bucket(party_id: int, name: str):
-                if party_id not in by_party:
-                    by_party[party_id] = {
+                key = (party_id, name if "(Walk-in)" in name else "")      # each walk-in on his own row
+                if key not in by_party:
+                    by_party[key] = {
                         "party_id": party_id, "party_name": name,
                         "sales_count": 0, "sales_total": 0.0,
                         "purchases_count": 0, "purchases_total": 0.0,
                     }
-                return by_party[party_id]
+                return by_party[key]
 
             for sale in sales:
                 pid = int(sale.buyer_party_id or 0)
-                name = parties.get(pid, sale.walkin_name or f"Party#{pid}")
+                name = _who(parties, pid, sale.walkin_name, f"Party#{pid}")
                 b = _bucket(pid, name)
                 b["sales_count"] += 1
                 b["sales_total"] += _f(sale.total_amount)
 
             for pur in purchases:
                 pid = int(pur.supplier_party_id or 0)
-                name = parties.get(pid, pur.walkin_name or f"Party#{pid}")
+                name = _who(parties, pid, pur.walkin_name, f"Party#{pid}")
                 b = _bucket(pid, name)
                 b["purchases_count"] += 1
                 b["purchases_total"] += _f(pur.total_amount)
@@ -296,7 +298,7 @@ class ListsMixin:
                     party_id = int(d.supplier_party_id or 0)
                     doc_no = d.purchase_no or f"PUR-{d.id}"
 
-                party_name = parties.get(party_id, d.walkin_name or f"Party#{party_id}")
+                party_name = _who(parties, party_id, d.walkin_name, f"Party#{party_id}")
                 raw_total = _f(d.total_amount)
 
                 rows.append({
@@ -525,7 +527,7 @@ class ListsMixin:
                     "id": sid,
                     "doc_no": sale.sale_no or f"SAL-{sale.id}",
                     "when": sale.created_at,
-                    "party_name": parties.get(party_id, sale.walkin_name or f"Party#{party_id}"),
+                    "party_name": _who(parties, party_id, sale.walkin_name, f"Party#{party_id}"),
                     "amount": _f(sale.total_amount),
                     "created_by": users.get(int(sale.created_by_user_id or 0), ""),
                     "created_by_user_id": int(sale.created_by_user_id or 0),
@@ -540,7 +542,7 @@ class ListsMixin:
                     "id": pid,
                     "doc_no": pur.purchase_no or f"PUR-{pur.id}",
                     "when": pur.created_at,
-                    "party_name": parties.get(party_id, pur.walkin_name or f"Party#{party_id}"),
+                    "party_name": _who(parties, party_id, pur.walkin_name, f"Party#{party_id}"),
                     "amount": _f(pur.total_amount),
                     "created_by": users.get(int(pur.created_by_user_id or 0), ""),
                     "created_by_user_id": int(pur.created_by_user_id or 0),

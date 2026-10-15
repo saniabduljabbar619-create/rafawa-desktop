@@ -624,3 +624,14 @@ def test_walkins_screen_searches_inline_and_the_profile_can_take_payment(qapp, b
         self.rb_purchase.setChecked(True), self.route(), 0)[-1])
     prof.open_payment_router()
     assert seen["who"] == "Ladi Bello"
+
+
+def test_walk_in_profile_cards_show_what_is_owed_and_paid(qapp, boxes):
+    from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
+    from database.services.payment_service import PaymentService
+    from tests.test_weigh_service import _walkin_purchase
+    res = _walkin_purchase("Musa Kano", kg=100, price=450)
+    PaymentService.record_purchase_payment(purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
+                                           created_by_user_id=CASHIER, method="manual", notes="")
+    prof = CustomerProfileView(None, mode="cashier", walkin_name="Musa Kano")
+    assert (prof.sum_payable.text(), prof.sum_paid.text()) == ("25,000.00", "20,000.00")
