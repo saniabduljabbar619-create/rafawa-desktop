@@ -139,6 +139,8 @@ class WeighTicketReviewDialog(QDialog):
         btns.addWidget(self.btn_reject)
         btns.addWidget(self.btn_print)
         btns.addWidget(self.btn_print_value)
+        self.btn_print_pay = QPushButton("Print Payment Receipt")
+        btns.addWidget(self.btn_print_pay)
         btns.addStretch(1)
         btns.addWidget(self.btn_close)
         btns.addWidget(self.btn_finalize)
@@ -152,6 +154,7 @@ class WeighTicketReviewDialog(QDialog):
         self.btn_reject.clicked.connect(self._cancel_ticket)
         self.btn_print.clicked.connect(lambda: self._print_slip("weighing"))
         self.btn_print_value.clicked.connect(lambda: self._print_slip("value"))
+        self.btn_print_pay.clicked.connect(lambda: self._print_slip("payment"))
         self.btn_close.clicked.connect(self.reject)
 
         self._active_line = 0
