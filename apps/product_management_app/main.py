@@ -3,14 +3,60 @@ from apps.product_management_app.app_state import state
 from database.services.seed_service import SeedService
 import sys
 from dataclasses import dataclass
-from PySide2.QtWidgets import QApplication, QMainWindow, QStackedWidget
-from PySide2.QtCore import Qt
+from PySide2.QtWidgets import (QApplication, QDialog, QFrame, QMainWindow, QScrollArea, QStackedWidget,
+                               QTableView)
+from PySide2.QtCore import QEvent, QObject, Qt
 from shared.uix.layout.shell import AppShell
 from apps.product_management_app.routes import Router
 from apps.product_management_app.launcher import LauncherView
 from apps.product_management_app.workspaces import build_workspaces
 from apps.product_management_app.services.cloud_sync_worker import CloudSyncWorker
 from shared.uix.theme import APP_STYLESHEET
+
+
+def _scrolled(view):
+    """
+    Host a screen inside a scroll area. A screen whose contents are taller/wider than the window used to push
+    the whole window past the edge of the monitor (or get cut off with nothing to scroll); now the window keeps
+    its size and the screen scrolls instead.
+    """
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.NoFrame)
+    area.setWidget(view)
+    return area
+
+
+class _FitToScreen(QObject):
+    """Keeps every dialog / pop-up window inside the monitor it opens on (shrinks one that is too big)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Show and isinstance(obj, QDialog) and obj.isWindow():
+            try:
+                screen = QApplication.screenAt(obj.mapToGlobal(obj.rect().center())) or QApplication.primaryScreen()
+                avail = screen.availableGeometry()
+                max_w, max_h = int(avail.width() * 0.96), int(avail.height() * 0.94)
+                if obj.minimumWidth() > max_w:
+                    obj.setMinimumWidth(max_w)
+                if obj.minimumHeight() > max_h:
+                    obj.setMinimumHeight(max_h)
+                if obj.width() > max_w or obj.height() > max_h:
+                    obj.resize(min(obj.width(), max_w), min(obj.height(), max_h))
+                    obj.move(avail.left() + (avail.width() - obj.width()) // 2,
+                             avail.top() + (avail.height() - obj.height()) // 2)
+            except Exception:
+                pass
+        return False
+
+
+class _FitTables(QObject):
+    """The first time any table is shown, size its columns to their content (see shared.uix.widgets.table_fit)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Show and isinstance(obj, QTableView) and not obj.property("autofit_done"):
+            from shared.uix.widgets.table_fit import autofit
+            autofit(obj)
+        return False
 
 
 class ProductManagementMainWindow(QMainWindow):
@@ -24,7 +70,10 @@ class ProductManagementMainWindow(QMainWindow):
         # those same DB round trips for no benefit, doubling that part of
         # startup latency.
 
-        self.resize(1280, 820)
+        # never bigger than the screen it opens on, and small enough to snap into half a monitor
+        avail = QApplication.primaryScreen().availableGeometry()
+        self.setMinimumSize(760, 520)
+        self.resize(min(1280, avail.width()), min(820, avail.height()))
 
         # Workspace registry
         self.workspaces = build_workspaces()
@@ -55,9 +104,9 @@ class ProductManagementMainWindow(QMainWindow):
 
 
 
-        self._root_stack.addWidget(self.launcher)  # index 0
+        self._root_stack.addWidget(_scrolled(self.launcher))  # index 0
         self._root_stack.addWidget(self.shell)     # index 1
-        self._root_stack.setCurrentWidget(self.launcher)
+        self._root_stack.setCurrentIndex(0)
 
         # Router for the active workspace
         self.router = Router()
@@ -132,8 +181,9 @@ class ProductManagementMainWindow(QMainWindow):
             self.shell.stack.removeWidget(w)
             w.deleteLater()
 
-        self.shell.stack.addWidget(view)
-        self.shell.stack.setCurrentWidget(view)
+        host = _scrolled(view)
+        self.shell.stack.addWidget(host)
+        self.shell.stack.setCurrentWidget(host)
 
     def _logout_and_return(self):
         # Phase 3.1: logout clears the session
@@ -161,7 +211,7 @@ class ProductManagementMainWindow(QMainWindow):
             w.deleteLater()
 
         # Switch back to launcher
-        self._root_stack.setCurrentWidget(self.launcher)
+        self._root_stack.setCurrentIndex(0)
 
     def closeEvent(self, event):
         # Stop the sync worker and genuinely wait for its current sleep/
@@ -244,9 +294,13 @@ def run():
     app.setStyle("Fusion")
     from shared.uix.theme import apply_theme
     apply_theme(app)
+    fit = _FitToScreen(app)
+    app.installEventFilter(fit)
+    tables = _FitTables(app)
+    app.installEventFilter(tables)
     win = ProductManagementMainWindow()
     win.setWindowTitle(f"Rafawa Desktop {__version__}")
-    win.show()
+    win.showMaximized()
     _warn_if_schema_outdated(win)
     _notify_if_update_available(win)
     _auto_backup_in_background()

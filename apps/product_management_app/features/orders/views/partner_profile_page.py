@@ -97,14 +97,19 @@ class PartnerProfilePage(QWidget):
         self.btn_open = QPushButton("Open order")
         self.btn_open.setObjectName("msBig")
         foot.addWidget(self.btn_open)
+        self.btn_delete = QPushButton("Delete order")
+        self.btn_delete.setProperty("role", "danger")
+        self.btn_delete.setVisible(is_admin)
+        foot.addWidget(self.btn_delete)
         foot.addStretch(1)
-        h = QLabel("Double-click an order to open its sheet")
+        h = QLabel("Double-click an order to open its sheet  -  only draft or cancelled orders can be deleted")
         h.setObjectName("msHint")
         foot.addWidget(h)
         root.addLayout(foot)
 
         self.btn_new.clicked.connect(self.new_order.emit)
         self.btn_open.clicked.connect(self._open_selected)
+        self.btn_delete.clicked.connect(self._delete_selected)
         self.table.cellDoubleClicked.connect(lambda r, _c: self._open_row(r))
         self.reload()
 
@@ -145,4 +150,19 @@ class PartnerProfilePage(QWidget):
             return
         self._open_row(row)
 
-
+    def _delete_selected(self) -> None:
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._rows)):
+            QMessageBox.information(self, "Delete order", "Select an order first.")
+            return
+        r = self._rows[row]
+        ok = QMessageBox.question(self, "Delete order", f"Delete order {r['order_no']} for good?",
+                                  QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        try:
+            OrderSheetService.delete_order(self.kind, int(r["id"]))
+        except Exception as e:
+            QMessageBox.warning(self, "Delete order", str(e))
+            return
+        self.reload()

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from database.models.company import Company
 from database.models.product import Product
+from database.models.purchase_order_supplier import PurchaseOrderSupplier
 from database.models.order_review import OrderReview
 from database.models.purchase_order import PurchaseOrder
 from database.models.purchase_order_item import PurchaseOrderItem
@@ -278,6 +280,53 @@ class OrderSheetService:
             AuditService.record(f"{kind}_order.cancel", f"{kind}_order", int(order_id),
                                 "Order cancelled" + (f": {reason}" if reason else ""), session=s)
             s.commit()
+
+    @staticmethod
+    @require_admin
+    def delete_order(kind: str, order_id: int) -> None:
+        """Remove a draft or cancelled order for good. Once it is on the road or confirmed, stock and money have
+        moved, so those can only be reverted / corrected - never deleted."""
+        cfg = _CFG[_check(kind)]
+        oid = int(order_id)
+        with get_session() as s:
+            order = s.get(cfg["Order"], oid)
+            if order is None:
+                raise ValueError("Order not found.")
+            if order.status not in ("draft", "cancelled"):
+                raise ValueError(f"Only a draft or cancelled order can be deleted - this one is '{order.status}'. "
+                                 "Revert it to draft (or correct it) first.")
+            no = order.order_no
+            s.query(cfg["Item"]).filter(getattr(cfg["Item"], cfg["fk"]) == oid).delete(synchronize_session=False)
+            s.query(OrderReview).filter(OrderReview.order_type == cfg["pay"], OrderReview.order_id == oid) \
+                .delete(synchronize_session=False)
+            s.delete(order)
+            AuditService.record(f"{kind}_order.delete", f"{kind}_order", oid, f"Order {no} deleted", session=s)
+            s.commit()
+
+    @staticmethod
+    @require_admin
+    def delete_partner(kind: str, partner_id: int) -> str:
+        """
+        Remove a company / supplier from the lists (they are one shared pool, so both copies go). Order history is
+        kept and still shows their name. Refused while an order of theirs is still a draft or on the road.
+        Returns the name that was removed.
+        """
+        _check(kind)
+        p = OrderSheetService.partner(kind, partner_id)
+        if not p:
+            raise ValueError("Not found.")
+        busy = [r for r in OrderSheetService.orders_of(kind, int(partner_id)) if r["status"] in ("draft", "in_transit")]
+        if busy:
+            raise ValueError(f"{p['name']} still has {len(busy)} order(s) in progress "
+                             f"({', '.join(r['order_no'] for r in busy[:3])}). Delete, cancel or finish them first.")
+        key = p["name"].strip().lower()
+        with get_session() as s:
+            for model in (Company, PurchaseOrderSupplier):
+                for row in s.query(model).filter(func.lower(model.name) == key).all():
+                    row.is_active = False
+            AuditService.record("partner.delete", f"{kind}_partner", int(partner_id), f"{p['name']} removed", session=s)
+            s.commit()
+        return p["name"]
 
     # ------------------------------------------------------------------ delivery result
     @staticmethod

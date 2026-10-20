@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Dict, Optional
 from datetime import date, datetime as _dt
 
-from sqlalchemy import func
+from sqlalchemy import and_, false as sa_false, func, or_, true as sa_true
 
 from database.session import get_session
 from database.services.document_balance import document_balances, offset_totals
@@ -36,6 +36,35 @@ def _doc_payment_status(net_total: float, settled: float, balance: float) -> str
     if balance > 0:
         return "partial"
     return "paid"
+
+
+def _group_activity(rows: List[Dict]) -> List[Dict]:
+    """
+    Newest first, but a sale/purchase is followed directly by its own payments (oldest first), so each document
+    "carries its tail". A group is dated by its latest event. A settlement marker sorts ABOVE the row that
+    settled the balance (same instant), so nothing sits after a marker unless it is genuinely newer activity.
+    """
+    docs = {r["reference"]: r for r in rows if r.get("type") in ("sale", "purchase")}
+    tails: Dict[str, List[Dict]] = {}
+    singles: List[Dict] = []
+    for r in rows:
+        if r.get("type") == "payment" and r.get("reference") in docs:
+            tails.setdefault(r["reference"], []).append(r)
+        elif r.get("type") not in ("sale", "purchase"):
+            singles.append(r)
+
+    def _t(r):
+        return r.get("dt") or _dt.min
+
+    groups = []                                  # (anchor, priority, [rows])
+    for ref, doc in docs.items():
+        pays = sorted(tails.get(ref, []), key=_t)
+        anchor = max([_t(doc)] + [_t(p) for p in pays])
+        groups.append((anchor, 1, [doc] + pays))
+    for r in singles:
+        groups.append((_t(r), 2 if r.get("type") == "settlement_marker" else 1, [r]))
+    groups.sort(key=lambda g: (g[0], g[1]), reverse=True)
+    return [r for _a, _p, rs in groups for r in rs]
 
 
 def _party_wide_running_balances(
@@ -166,8 +195,11 @@ class PartyLedgerService:
         limit: int = 500,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        walkin_name: Optional[str] = None,
     ) -> List[Dict]:
         """
+        walkin_name: for the shared walk-in account only - restrict everything to that one walk-in's documents.
+
         One row per REAL business event. A sale/purchase's payments are no
         longer split out as their own separate rows here - each sale and
         purchase carries its own running Paid/Balance/Status instead (the
@@ -202,6 +234,7 @@ class PartyLedgerService:
             purchases = (
                 s.query(Purchase)
                 .filter(Purchase.supplier_party_id == party_id)
+                .filter(Purchase.walkin_name == walkin_name if walkin_name else sa_true())
                 .all()
             )
             purchase_ids = [int(p.id) for p in purchases]
@@ -316,6 +349,7 @@ class PartyLedgerService:
             sales = (
                 s.query(Sale)
                 .filter(Sale.buyer_party_id == party_id)
+                .filter(Sale.walkin_name == walkin_name if walkin_name else sa_true())
                 .all()
             )
             sale_ids = [int(s1.id) for s1 in sales]
@@ -422,6 +456,7 @@ class PartyLedgerService:
             pr = (
                 s.query(PurchaseReturn)
                 .filter(PurchaseReturn.party_id == party_id)
+                .filter(PurchaseReturn.purchase_id.in_(purchase_ids or [0]) if walkin_name else sa_true())
                 .all()
             )
 
@@ -448,6 +483,7 @@ class PartyLedgerService:
             sr = (
                 s.query(SaleReturn)
                 .filter(SaleReturn.party_id == party_id)
+                .filter(SaleReturn.sale_id.in_(sale_ids or [0]) if walkin_name else sa_true())
                 .all()
             )
 
@@ -474,6 +510,7 @@ class PartyLedgerService:
             adv = (
                 s.query(Advance)
                 .filter(Advance.party_id == party_id)
+                .filter(sa_false() if walkin_name else sa_true())          # a walk-in has no advance account
                 .all()
             )
 
@@ -520,6 +557,9 @@ class PartyLedgerService:
                 .filter(Payment.party_id == party_id)
                 .filter(Payment.entity_type.in_(("sale", "purchase")))
                 .filter(Payment.status != "voided")
+                .filter(or_(and_(Payment.entity_type == "sale", Payment.entity_id.in_(sale_ids or [0])),
+                            and_(Payment.entity_type == "purchase", Payment.entity_id.in_(purchase_ids or [0])))
+                        if walkin_name else sa_true())
                 .all()
             )
             payer_ids = {int(p.created_by_user_id) for p in pay_rows if p.created_by_user_id}
@@ -601,9 +641,7 @@ class PartyLedgerService:
                     "balance_before": None, "balance_after": None, "status": "payables",
                 })
 
-        rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
-
-        return rows[:limit]
+        return _group_activity(rows)[:limit]
     
 
     # --------------------------------------------------
@@ -1054,58 +1092,38 @@ class PartyLedgerService:
 
 
     @staticmethod
-    def list_walkin_activity(walkin_name):
-
-        from database.session import get_session
-        from sqlalchemy import text
-
-        with get_session() as s:
-
-            rows = s.execute(text("""
-                SELECT
-                    completed_at AS dt,
-                    'crops' AS ledger,
-                    'sale' AS type,
-                    CONCAT('SAL-', id) AS reference,
-                    walkin_name AS summary,
-                    total_amount AS amount,
-                    status
-                FROM sales
-                WHERE buyer_party_id = :wid
-                AND walkin_name = :name
-
-                UNION ALL
-
-                SELECT
-                    completed_at,
-                    'crops',
-                    'purchase',
-                    CONCAT('PUR-', id),
-                    walkin_name,
-                    total_amount,
-                    status
-                FROM purchases
-                WHERE supplier_party_id = :wid
-                AND walkin_name = :name
-
-                ORDER BY dt DESC
-            """), {"name": walkin_name, "wid": WALKIN_PARTY_ID}).fetchall()
-
-        acts = [dict(r._mapping) for r in rows]
-
-        # weighed and sent to the cashier but not finalized yet: still this walk-in's, show it
+    def list_walkin_activity(walkin_name, limit: int = 500):
+        """One walk-in's activity, laid out exactly like a registered customer's (documents with their payments,
+        returns, settled markers), plus his weighings still waiting for the cashier."""
         from database.models.weigh_ticket import WeighTicket
+        from database.session import get_session
+
+        acts = PartyLedgerService.list_activity_details(
+            WALKIN_PARTY_ID, limit=10 ** 6, walkin_name=walkin_name)
+
+        # a purchase that came from a weighing says which one, so same-name walk-ins can be told apart
+        pur_ids = [int(a["reference"].split("-")[-1]) for a in acts
+                   if a.get("type") == "purchase" and str(a.get("reference", "")).startswith("PUR-")]
         with get_session() as s:
+            tix = {int(pid): (tno or f"WT-{int(tid):05d}") for pid, tid, tno in
+                   s.query(WeighTicket.purchase_id, WeighTicket.id, WeighTicket.ticket_no)
+                   .filter(WeighTicket.purchase_id.in_(pur_ids or [0])).all()}
             pend = (s.query(WeighTicket).filter(WeighTicket.walkin_name == walkin_name)
                     .filter(WeighTicket.status.in_(("open", "submitted"))).all())
-            for tk in pend:
-                acts.append({
-                    "dt": tk.created_at, "ledger": "crops", "type": "weighing",
-                    "reference": f"WT-{tk.id}", "summary": "Weighed - waiting for the cashier",
-                    "amount": 0, "status": "pending",
-                })
-        acts.sort(key=lambda a: str(a.get("dt") or ""), reverse=True)
-        return acts
+            pending = [{
+                "dt": tk.created_at, "ledger": "crops", "type": "weighing",
+                "reference": tk.ticket_no or f"WT-{int(tk.id):05d}", "summary": "Weighed - waiting for the cashier",
+                "total": 0, "paid": None, "balance": None, "status": "pending",
+            } for tk in pend]
+        for a in acts:
+            if a.get("type") == "purchase" and a.get("reference", "").startswith("PUR-"):
+                tag = tix.get(int(a["reference"].split("-")[-1]))
+                if tag:
+                    a["summary"] = f"{walkin_name} ({tag})"
+        acts += pending
+        # waiting weighings are the newest things on his account; keep the rest in their grouped order
+        acts.sort(key=lambda a: 0 if a.get("type") == "weighing" else 1)
+        return acts[:limit]
 
     @staticmethod
     def list_walkin_crop_activity(walkin_name):

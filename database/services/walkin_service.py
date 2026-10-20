@@ -57,31 +57,43 @@ class WalkinService:
 
     @staticmethod
     def list_named(q: str = "", limit: int = 50):
-        """Every named walk-in we know of (sales, purchases, and weighings still waiting for the cashier),
-        with counts, so one who was weighed but not paid yet can still be found."""
+        """Every named walk-in we know of (sales, purchases, and weighings), with counts and weighing numbers, so
+        one who was weighed but not paid yet can still be found - by name, or by weighing ID (12, WT-00012)."""
+        import re
         from database.models.weigh_ticket import WeighTicket
 
         q = (q or "").strip().lower()
+        digits = re.sub(r"\D", "", q)
         out = {}
 
-        def _add(name, key, n):
+        def _row(name):
             name = (name or "").strip()
             if not name:
-                return
-            d = out.setdefault(name.lower(), {"name": name, "sales": 0, "purchases": 0, "pending": 0})
-            d[key] += int(n or 0)
+                return None
+            return out.setdefault(name.lower(), {"name": name, "sales": 0, "purchases": 0, "pending": 0, "refs": []})
 
         for t in WalkinService.list_traders():
-            _add(t["name"], "sales", t["sales"])
-            _add(t["name"], "purchases", t["purchases"])
+            d = _row(t["name"])
+            if d:
+                d["sales"] += int(t["sales"] or 0)
+                d["purchases"] += int(t["purchases"] or 0)
+        id_hits = set()                                    # names whose weighing matches the ID typed
         with get_session() as s:
-            rows = (s.query(WeighTicket.walkin_name, func.count(WeighTicket.id))
-                    .filter(WeighTicket.walkin_name.isnot(None))
-                    .filter(WeighTicket.status.in_(("open", "submitted")))
-                    .group_by(WeighTicket.walkin_name).all())
-        for name, n in rows:
-            _add(name, "pending", n)
-        res = [d for k, d in out.items() if not q or q in k]
+            rows = (s.query(WeighTicket.id, WeighTicket.ticket_no, WeighTicket.walkin_name, WeighTicket.status)
+                    .filter(WeighTicket.walkin_name.isnot(None)).filter(WeighTicket.status != "cancelled")
+                    .order_by(WeighTicket.id.asc()).all())
+        for tid, tno, name, status in rows:
+            d = _row(name)
+            if not d:
+                continue
+            ref = tno or f"WT-{int(tid):05d}"
+            d["refs"].append(ref)
+            if status in ("open", "submitted"):
+                d["pending"] += 1
+            if q and ((digits and int(digits) == int(tid) and (q.isdigit() or q.startswith("wt")))
+                      or (q.startswith("wt") and q in ref.lower())):
+                id_hits.add(name.strip().lower())
+        res = [d for k, d in out.items() if not q or q in k or k in id_hits]
         res.sort(key=lambda d: d["name"].lower())
         return res[:int(limit)]
 

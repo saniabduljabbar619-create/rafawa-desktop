@@ -337,7 +337,7 @@ def test_a_walk_in_not_paid_yet_can_still_be_found_and_seen_in_his_activity():
     found = WalkinService.list_named("mus")
     assert [(d["name"], d["pending"]) for d in found] == [("Musa Kano", 1)]
     acts = PartyLedgerService.list_walkin_activity("Musa Kano")
-    assert [(a["type"], a["status"], a["reference"]) for a in acts] == [("weighing", "pending", f"WT-{tid}")]
+    assert [(a["type"], a["status"], a["reference"]) for a in acts] == [("weighing", "pending", f"WT-{tid:05d}")]
     as_role("cashier", CASHIER)
     W.finalize_ticket(tid)                             # finalized but still unpaid: now it is a purchase
     found = WalkinService.list_named("musa")
@@ -397,3 +397,28 @@ def test_walk_in_names_show_in_the_drawer_and_profile_totals_are_his_alone():
     assert WalkinService.totals("nobody")["payable"] == 0
     parties = {e["party"] for e in DrawerService.compute(CASHIER)["cash_events"] if e.get("party")}
     assert "Musa Kano (Walk-in)" in parties and "Walk-in" not in parties
+
+
+def test_walk_ins_with_the_same_name_can_be_found_by_weighing_id():
+    from database.services.party_ledger_service import PartyLedgerService
+    from database.services.walkin_service import WalkinService
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    ids = []
+    for nm in ("Musa", "Musa", "Ladi"):
+        tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=nm)
+        line = W.add_line(tid, CROP_ID)
+        W.record_round(line, 2, 100)
+        _submit(tid, line, price=450)
+        ids.append(tid)
+    for q in (str(ids[2]), f"WT-{ids[2]:05d}", f"wt-{ids[2]:05d}"):
+        assert [d["name"] for d in WalkinService.list_named(q)] == ["Ladi"], q
+    musa = [d for d in WalkinService.list_named("musa")][0]
+    assert musa["pending"] == 2 and musa["refs"] == [f"WT-{ids[0]:05d}", f"WT-{ids[1]:05d}"]
+    assert [d["name"] for d in WalkinService.list_named(str(ids[1]))] == ["Musa"]
+    assert WalkinService.list_named("9999") == []
+    as_role("cashier", CASHIER)
+    res = W.finalize_ticket(ids[0])
+    acts = PartyLedgerService.list_walkin_activity("Musa")
+    assert any(a["type"] == "purchase" and f"WT-{ids[0]:05d}" in a["summary"] for a in acts)
+    assert any(a["type"] == "weighing" and a["reference"] == f"WT-{ids[1]:05d}" for a in acts) and res

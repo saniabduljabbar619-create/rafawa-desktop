@@ -646,7 +646,7 @@ class CustomerProfileView(QWidget):
             cols = [
                 self._format_dt_bankstyle(a.get("dt")),
                 a.get("ledger", ""),
-                a.get("type", ""),
+                ("   \u21b3 " if a.get("type") == "payment" else "") + str(a.get("type", "")),
                 ref_str,
                 a.get("summary", ""),
                 f"{total_val:,.2f}",

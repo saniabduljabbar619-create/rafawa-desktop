@@ -392,3 +392,43 @@ def test_correction_button_is_admin_only_and_hidden_before_confirmation(qapp, bo
     v2 = _hub("cashier")
     v2.open_order("sales", c, so)
     assert _sheet(v2).btn_correct.isHidden()
+
+
+def test_a_company_or_supplier_can_be_deleted_unless_an_order_is_still_in_progress(qapp, boxes):
+    c, p, so, po = _seed()                                                # so is on the road, po is a draft
+    v = _hub()
+    v.show_tab("sales")
+    pl = v._pages["sales"]
+    pl.reload()
+    row = next(r for r in range(pl.table.rowCount()) if pl.table.item(r, 1).text() == "Acme Foods")
+    pl.table.selectRow(row)
+    pl.btn_delete.click()
+    assert boxes[-1][0] == "warning" and "in progress" in boxes[-1][1]    # refused: an order is still on the road
+    assert {x["name"] for x in CompanyService.search("")} == {"Acme Foods", "Farm Co"}
+    O.revert("sales", so)                                                # a dispatched order is reverted, then cancelled
+    O.cancel("sales", so)
+    pl.reload()
+    row = next(r for r in range(pl.table.rowCount()) if pl.table.item(r, 1).text() == "Acme Foods")
+    pl.table.selectRow(row)
+    pl.btn_delete.click()
+    assert {x["name"] for x in CompanyService.search("")} == {"Farm Co"}
+    assert {x["name"] for x in PurchaseOrderSupplierService.search("")} == {"Farm Co"}   # one shared pool: gone from both
+    # the same name can be added again later
+    assert CompanyService.create("Acme Foods", ADMIN_ID)
+    assert {x["name"] for x in PurchaseOrderSupplierService.search("")} == {"Acme Foods", "Farm Co"}
+
+
+def test_only_a_draft_or_cancelled_order_can_be_deleted(qapp, boxes):
+    c, p, so, po = _seed()
+    with pytest.raises(ValueError):
+        O.delete_order("sales", so)                                       # on the road
+    O.revert("sales", so)
+    O.delete_order("sales", so)                                           # back to a draft -> deletable
+    assert O.orders_of("sales", c) == []
+    O.cancel("purchase", po)
+    O.delete_order("purchase", po)
+    assert O.orders_of("purchase", p) == []
+    set_session(UserSession(user_id=CASHIER_A, username="alice", role="cashier"))
+    from shared.auth.permissions import PermissionDenied
+    with pytest.raises(PermissionDenied):
+        O.delete_partner("sales", c)
