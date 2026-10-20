@@ -21,6 +21,10 @@ class Party(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # A walk-in is their own person with their own ID: WKN-00001 (met at the till), WT-WKN-00001 (met at the
+    # weighing scale). Phone is optional, so this code - not the name or phone - is what tells two walk-ins apart.
+    walkin_code: Mapped[str] = mapped_column(String(24), nullable=True, unique=True)
+
     # Capability flags, independent of party_type. A real business can be
     # BOTH - we buy from them AND occasionally sell to them (a fertilizer
     # dealer who also buys surplus crops, for example). party_type stays

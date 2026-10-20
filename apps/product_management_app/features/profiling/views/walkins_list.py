@@ -39,10 +39,10 @@ from PySide2.QtCore import Qt
 
 from apps.product_management_app.app_state import state
 from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
-from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog, find_walkins, weighings_text
+from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog, contact_text, find_walkins
 from shared.uix.layout.scrollable import make_scrollable_page
 
-PLACEHOLDER_TEXT = "\U0001F50D  Walk-in space \u2014 type a name, phone or weighing ID in the box above"
+PLACEHOLDER_TEXT = "\U0001F50D  Walk-in space \u2014 type a name, phone, ID or weighing number in the box above"
 
 
 class WalkinsListView(QWidget):
@@ -69,7 +69,7 @@ class WalkinsListView(QWidget):
         top = QHBoxLayout()
         root.addLayout(top)
         self.search_in = QLineEdit()
-        self.search_in.setPlaceholderText("Search a walk-in by name, phone or weighing ID (e.g. 12 or WT-00012)...")
+        self.search_in.setPlaceholderText("Search a walk-in by name, phone, ID (WKN-00012, WT-WKN-00001) or weighing number...")
         self.search_in.setClearButtonEnabled(True)
         top.addWidget(self.search_in, 1)
         self.btn_search = QPushButton("New Search")
@@ -144,7 +144,7 @@ class WalkinsListView(QWidget):
             self.table.insertRow(r)
             pend = getattr(w, "pending", 0)
             status = f"{pend} waiting for cashier" if pend else w.status
-            for i, val in enumerate([str(w.id), w.full_name, w.phone or weighings_text(w), status]):
+            for i, val in enumerate([getattr(w, "code", "") or str(w.id), w.full_name, contact_text(w), status]):
                 it = QTableWidgetItem(val)
                 if i == 0:
                     it.setTextAlignment(Qt.AlignCenter)

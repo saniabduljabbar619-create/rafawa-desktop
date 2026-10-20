@@ -282,7 +282,7 @@ def test_weigher_can_correct_own_round_and_the_round_limits_still_apply():
         W.update_round(rnd["id"], weight_kg=1)                  # and never another weigher's
 
 
-def test_walk_in_ticket_needs_a_name_and_finalizes_under_it():
+def test_walk_in_ticket_needs_a_name_and_finalizes_under_their_own_profile():
     from database.models.purchase import Purchase
     from shared.config.constants import WALKIN_PARTY_ID
     as_role("weigher", WEIGHER)
@@ -292,37 +292,51 @@ def test_walk_in_ticket_needs_a_name_and_finalizes_under_it():
     line = W.add_line(tid, CROP_ID)
     W.record_round(line, 2, 100)
     _submit(tid, line, price=450)
-    assert W.get_ticket(tid)["party_name"] == "Alhaji Sule"
+    t = W.get_ticket(tid)
+    assert t["party_name"] == "Alhaji Sule" and t["party_code"] == "WT-WKN-00001" and t["party_id"] != WALKIN_PARTY_ID
     as_role("cashier", CASHIER)
     res = W.finalize_ticket(tid)
     with get_session() as s:
-        assert s.get(Purchase, res["purchase_id"]).walkin_name == "Alhaji Sule"
-    assert [p["name"] for p in W.search_parties("", customers_only=True)] == ["Customer One"] or \
-        all(p["kind"] != "supplier" for p in W.search_parties("", customers_only=True))
+        p = s.get(Purchase, res["purchase_id"])
+        assert p.supplier_party_id == t["party_id"] and p.walkin_name is None
+    assert all(p["kind"] != "supplier" for p in W.search_parties("", customers_only=True))
 
 
-def test_a_walk_in_can_be_a_single_letter_and_past_names_are_searchable():
+def test_two_walk_ins_with_the_same_name_are_two_people_with_their_own_ids():
     from shared.config.constants import WALKIN_PARTY_ID
     as_role("weigher", WEIGHER)
-    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="A")
-    assert W.get_ticket(tid)["party_name"] == "A"
-    W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Aminu")
-    assert W.search_walkins("a") == ["A", "Aminu"] and W.search_walkins("min") == ["Aminu"]
-    assert W.search_walkins("") == ["A", "Aminu"] and W.search_walkins("zz") == []
-    with pytest.raises(ValueError):
-        W.create_ticket(CUSTOMER_ID, "customer", walkin_name="Someone")     # a real customer is not the walk-in account
+    a = W.get_ticket(W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa"))
+    b = W.get_ticket(W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa"))
+    assert a["party_id"] != b["party_id"] and (a["party_code"], b["party_code"]) == ("WT-WKN-00001", "WT-WKN-00002")
+    c = W.new_walkin("Musa", "0803")                                     # also by hand, phone optional
+    assert c["code"] == "WT-WKN-00003" and c["id"] not in (a["party_id"], b["party_id"])
+    assert {w["code"] for w in W.search_walkins("musa")} == {"WT-WKN-00001", "WT-WKN-00002", "WT-WKN-00003"}
 
 
-def test_the_shared_walk_in_account_is_created_when_the_database_lacks_it():
+def test_a_walk_in_can_be_a_single_letter_and_found_by_name_phone_code_id_or_weighing_number():
+    from shared.config.constants import WALKIN_PARTY_ID
+    as_role("weigher", WEIGHER)
+    ta = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="A")
+    assert W.get_ticket(ta)["party_name"] == "A"
+    tb = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Aminu")
+    W.new_walkin("Bala", "0701")
+    names = lambda q: [w["name"] for w in W.search_walkins(q)]               # noqa: E731
+    assert names("a") == ["A", "Aminu", "Bala"] and names("min") == ["Aminu"] and names("0701") == ["Bala"]
+    assert names("") == [] and names("zz") == []
+    assert names("WT-WKN-00002") == ["Aminu"] and names("wt-wkn-00001") == ["A"]          # by ID code
+    assert names(str(tb)) == ["Aminu"] and names(f"WT-{tb:05d}") == ["Aminu"]            # by a weighing's number
+    pid = W.get_ticket(ta)["party_id"]
+    assert names(str(pid)) == ["A"]                                                       # by ID number
+
+
+def test_a_weighing_walk_in_does_not_need_the_shared_walk_in_account():
     from shared.config.constants import WALKIN_PARTY_ID
     with get_session() as s:
         s.query(Party).filter(Party.id == WALKIN_PARTY_ID).delete()
         s.commit()
     as_role("weigher", WEIGHER)
-    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa")      # used to fail on the foreign key
+    tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa")
     assert W.get_ticket(tid)["party_name"] == "Musa"
-    with get_session() as s:
-        assert s.get(Party, WALKIN_PARTY_ID).party_type == "walkin"
 
 
 def test_a_walk_in_not_paid_yet_can_still_be_found_and_seen_in_his_activity():
@@ -331,19 +345,20 @@ def test_a_walk_in_not_paid_yet_can_still_be_found_and_seen_in_his_activity():
     from shared.config.constants import WALKIN_PARTY_ID
     as_role("weigher", WEIGHER)
     tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa Kano")
+    pid = W.get_ticket(tid)["party_id"]
     line = W.add_line(tid, CROP_ID)
     W.record_round(line, 2, 100)
     _submit(tid, line, price=450)                      # sent to the cashier, nobody pays yet
-    found = WalkinService.list_named("mus")
-    assert [(d["name"], d["pending"]) for d in found] == [("Musa Kano", 1)]
-    acts = PartyLedgerService.list_walkin_activity("Musa Kano")
+    assert [(d["name"], d["code"]) for d in WalkinService.search("mus")] == [("Musa Kano", "WT-WKN-00001")]
+    assert WalkinService.weighings_for([pid])[pid] == [(f"WT-{tid:05d}", "submitted")]
+    acts = PartyLedgerService.list_activity_details(pid)
     assert [(a["type"], a["status"], a["reference"]) for a in acts] == [("weighing", "pending", f"WT-{tid:05d}")]
     as_role("cashier", CASHIER)
     W.finalize_ticket(tid)                             # finalized but still unpaid: now it is a purchase
-    found = WalkinService.list_named("musa")
-    assert [(d["name"], d["pending"], d["purchases"]) for d in found] == [("Musa Kano", 0, 1)]
-    assert [a["type"] for a in PartyLedgerService.list_walkin_activity("Musa Kano")] == ["purchase"]
-    assert WalkinService.list_named("zzz") == []
+    acts = PartyLedgerService.list_activity_details(pid)
+    assert [(a["type"], a["status"]) for a in acts] == [("purchase", "unpaid")]
+    assert f"WT-{tid:05d}" in acts[0]["summary"]       # says which weighing it came from
+    assert WalkinService.search("zzz") == []
 
 
 def _walkin_purchase(name, kg=100, price=450):
@@ -357,15 +372,15 @@ def _walkin_purchase(name, kg=100, price=450):
     return W.finalize_ticket(tid)
 
 
-def test_dashboard_lists_each_walk_in_by_name_not_as_one_lump():
+def test_dashboard_lists_each_walk_in_with_their_own_id_not_as_one_lump():
     from database.services.dashboard_service import get_purchase_payment_snapshot
     _walkin_purchase("Musa Kano")
     _walkin_purchase("Ladi Bello")
-    _walkin_purchase("Musa Kano")
+    _walkin_purchase("Musa Kano")                                   # a different man with the same name
     as_role("admin", ADMIN_ID)
     rows = get_purchase_payment_snapshot(role="admin", user_id=None, scope="all")["rows"]
-    names = sorted(r["supplier"] for r in rows)
-    assert names == ["Ladi Bello (Walk-in)", "Musa Kano (Walk-in)", "Musa Kano (Walk-in)"]
+    assert sorted(r["supplier"] for r in rows) == [
+        "Ladi Bello (WT-WKN-00002)", "Musa Kano (WT-WKN-00001)", "Musa Kano (WT-WKN-00003)"]
 
 
 def test_payment_receipt_is_small_and_names_the_product_and_the_balance():
@@ -377,48 +392,48 @@ def test_payment_receipt_is_small_and_names_the_product_and_the_balance():
         purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
         created_by_user_id=CASHIER, method="cash", notes="")
     text = render_payment_slip(build_payment_slip(pid), get_shop())
-    assert "PAYMENT RECEIPT" in text and "Musa Kano" in text
+    assert "PAYMENT RECEIPT" in text and "Musa Kano (WT-WKN-00001)" in text
     assert "PAID NOW" in text and "20,000.00" in text and "25,000.00" in text      # balance left
     assert "2 bags 100.00 kg" in text
     assert len(text.splitlines()) < 30
 
 
-def test_walk_in_names_show_in_the_drawer_and_profile_totals_are_his_alone():
+def test_walk_ins_show_in_the_drawer_with_their_ids():
     from database.services.drawer import DrawerService
     from database.services.payment_service import PaymentService
-    from database.services.walkin_service import WalkinService
-    res = _walkin_purchase("Musa Kano", kg=100, price=450)         # 45,000 owed to him
-    _walkin_purchase("Ladi Bello", kg=100, price=450)
+    res = _walkin_purchase("Musa Kano", kg=100, price=450)
+    _walkin_purchase("Musa Kano", kg=100, price=450)
     PaymentService.record_purchase_payment(
         purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
         created_by_user_id=CASHIER, method="manual", notes="")
-    assert WalkinService.totals("Musa Kano") == {"payable": 25000.0, "paid": 20000.0, "receivable": 0.0, "received": 0.0}
-    assert WalkinService.totals("Ladi Bello")["payable"] == 45000.0
-    assert WalkinService.totals("nobody")["payable"] == 0
     parties = {e["party"] for e in DrawerService.compute(CASHIER)["cash_events"] if e.get("party")}
-    assert "Musa Kano (Walk-in)" in parties and "Walk-in" not in parties
+    assert "Musa Kano (WT-WKN-00001)" in parties and "Walk-in" not in parties
+    assert not any("WT-WKN-00002" in p for p in parties)            # the other Musa has no cash event
 
 
-def test_walk_ins_with_the_same_name_can_be_found_by_weighing_id():
-    from database.services.party_ledger_service import PartyLedgerService
+def test_a_weighing_walk_in_can_return_a_product_like_any_other_walk_in():
+    from database.models.purchase_item import PurchaseItem
+    from database.models.purchase_return import PurchaseReturn
+    from database.services.return_service import ReturnService
+    res = _walkin_purchase("Musa Kano", kg=100, price=450)
+    as_role("admin", ADMIN_ID)
+    with get_session() as s:
+        item = s.query(PurchaseItem).filter(PurchaseItem.purchase_id == res["purchase_id"]).first()
+        item_id = int(item.id)
+    rid = ReturnService.create_return(document_type="purchase", document_id=res["purchase_id"], item_id=item_id,
+                                      qty_kg=40, qty_bags=1, reason="bad quality", created_by_user_id=ADMIN_ID)
+    with get_session() as s:
+        assert s.get(PurchaseReturn, rid).party_id == res["party_id"]     # on his own profile, not the shared one
+
+
+def test_walk_ins_met_at_the_till_get_their_own_WKN_id_and_are_found_by_it():
+    from apps.product_management_app.app_state import state
     from database.services.walkin_service import WalkinService
-    from shared.config.constants import WALKIN_PARTY_ID
-    as_role("weigher", WEIGHER)
-    ids = []
-    for nm in ("Musa", "Musa", "Ladi"):
-        tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=nm)
-        line = W.add_line(tid, CROP_ID)
-        W.record_round(line, 2, 100)
-        _submit(tid, line, price=450)
-        ids.append(tid)
-    for q in (str(ids[2]), f"WT-{ids[2]:05d}", f"wt-{ids[2]:05d}"):
-        assert [d["name"] for d in WalkinService.list_named(q)] == ["Ladi"], q
-    musa = [d for d in WalkinService.list_named("musa")][0]
-    assert musa["pending"] == 2 and musa["refs"] == [f"WT-{ids[0]:05d}", f"WT-{ids[1]:05d}"]
-    assert [d["name"] for d in WalkinService.list_named(str(ids[1]))] == ["Musa"]
-    assert WalkinService.list_named("9999") == []
-    as_role("cashier", CASHIER)
-    res = W.finalize_ticket(ids[0])
-    acts = PartyLedgerService.list_walkin_activity("Musa")
-    assert any(a["type"] == "purchase" and f"WT-{ids[0]:05d}" in a["summary"] for a in acts)
-    assert any(a["type"] == "weighing" and a["reference"] == f"WT-{ids[1]:05d}" for a in acts) and res
+    a = state.get_or_lazy_create_walkin("Ali", "")
+    b = state.get_or_lazy_create_walkin("Ali", "")                  # same name, no phone -> a different person
+    c = state.get_or_lazy_create_walkin("Ali", "0803")
+    d = state.get_or_lazy_create_walkin("Someone Else", "0803")     # same phone -> the same person as c
+    assert len({a, b, c}) == 3 and d == c
+    assert [w["code"] for w in WalkinService.search("ali")] == ["WKN-00001", "WKN-00002", "WKN-00003"]
+    assert [w["name"] for w in WalkinService.search("wkn-00002")] == ["Ali"]
+    assert W.new_walkin("Musa")["code"] == "WT-WKN-00001"           # the weighing series is separate

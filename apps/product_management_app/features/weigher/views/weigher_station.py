@@ -280,19 +280,14 @@ class WeigherStationView(QWidget):
             self._load_party_list(select_id=dlg.party["id"])
 
     def _start_walkin(self):
-        """Ask for the walk-in's name (a single name is fine; names used before can be picked) and start weighing."""
-        try:
-            past = WeighService.search_walkins("")
-        except Exception:
-            past = []
-        name, ok = QInputDialog.getItem(self, "Walk-in", "Walk-in's name:", past, 0, True)
-        name = (name or "").strip()
-        if not ok:
+        """Pick a walk-in already on file or add a new one (own profile, own WT-WKN- ID), then start weighing."""
+        from apps.product_management_app.features.weigher.dialogs.walkin_pick_dialog import WalkinPickDialog
+        dlg = WalkinPickDialog(self)
+        if dlg.exec_() != dlg.Accepted or not dlg.walkin:
             return
-        if not name:
-            self._msg("Type the walk-in's name first.")
-            return
-        self._begin({"walkin": True, "name": name})
+        w = dlg.walkin
+        label = f"{w['name']} ({w['code']})" if w.get("code") else w["name"]
+        self._begin({"id": w["id"], "name": label, "phone": w.get("phone", ""), "kind": "customer"})
 
     def start_ticket(self):
         items = self.party_list.selectedItems()
@@ -303,13 +298,7 @@ class WeigherStationView(QWidget):
 
     def _begin(self, party):
         try:
-            if party.get("walkin"):
-                from shared.config.constants import WALKIN_PARTY_ID
-                name = party["name"]
-                self.ticket_id = WeighService.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=name)
-                party = {"id": WALKIN_PARTY_ID, "name": name, "phone": "", "kind": "customer"}
-            else:
-                self.ticket_id = WeighService.create_ticket(party["id"], "customer")
+            self.ticket_id = WeighService.create_ticket(party["id"], "customer")
         except Exception as e:
             self._msg(str(e))
             return
@@ -503,7 +492,7 @@ class WeigherStationView(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         self.party_avatar_holder.addWidget(avatar(t["party_name"], 40))
-        self.lbl_party.setText(t["party_name"])
+        self.lbl_party.setText(t["party_name"] + (f"  [{t['party_code']}]" if t.get("party_code") else ""))
         self.lbl_ticket.setText(f"{t['ticket_no']}  -  {t['party_role'].title()}  -  {t['party_phone']}")
 
         keep = self.active_line_id

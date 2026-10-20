@@ -61,6 +61,7 @@ class Customer:
     status: str   # active/inactive
     notes: str
     is_supplier: bool = False
+    code: str = ""          # walk-ins only: WKN-00001 / WT-WKN-00001
 
 
 @dataclass
@@ -169,6 +170,7 @@ class AppState:
                 address=str(r.address or "Walk-in Client"),
                 status="active" if bool(r.is_active) else "inactive",
                 notes="",
+                code=str(r.walkin_code or ""),
             )
             for r in rows
         ]
@@ -1033,16 +1035,8 @@ class AppState:
             if row:
                 return int(row.id)
 
-            new_walkin = Party(
-                party_type="walkin",
-                display_name=name,
-                phone=phone or None,
-                address="Walk-in Client",
-                is_active=True
-            )
-            s.add(new_walkin)
-            s.flush()
-            assigned_id = int(new_walkin.id)
+            from database.services.walkin_service import WalkinService
+            assigned_id = WalkinService.create(name, phone, source="till", session=s)["id"]
             s.commit()
             
             # Synchronize walkins state matrix cache automatically

@@ -183,7 +183,7 @@ class WeighTicketReviewDialog(QDialog):
                 w.setParent(None)
                 w.deleteLater()
         self.avatar_holder.addWidget(avatar(t["party_name"], 40))
-        self.lbl_party.setText(f"{t['party_name']}  ({t['party_role']})")
+        self.lbl_party.setText(f"{t['party_name']}{'  [' + t['party_code'] + ']' if t.get('party_code') else ''}  ({t['party_role']})")
         when = t["submitted_at"] or t["created_at"]
         bits = [t["ticket_no"], f"weighed by {t['weigher_name']}",
                 when.strftime("%Y-%m-%d %H:%M") if when else "", t["party_phone"]]

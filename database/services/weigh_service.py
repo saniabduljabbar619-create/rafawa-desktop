@@ -143,26 +143,22 @@ class WeighService:
 
     @staticmethod
     @require_role(*ANY_STAFF)
-    def search_walkins(q: str = "", limit: int = 15) -> List[str]:
-        """Walk-in names used before (on weighings, sales or purchases), matched on any part of the name."""
-        q = (q or "").strip().lower()
-        names: Dict[str, str] = {}
+    def search_walkins(q: str = "", limit: int = 30) -> List[Dict[str, Any]]:
+        """Walk-ins already on file (name, phone, WKN-/WT-WKN- code, ID number or a weighing's number)."""
+        from database.services.walkin_service import WalkinService
+        return WalkinService.search(q, limit=limit)
+
+    @staticmethod
+    @require_role(*WEIGH_ROLES)
+    def new_walkin(name: str, phone: str = "") -> Dict[str, Any]:
+        """Register someone met at the scale: their own profile and their own WT-WKN- ID."""
+        from database.services.walkin_service import WalkinService
         with get_session() as s:
-            rows = s.query(WeighTicket.walkin_name).filter(WeighTicket.walkin_name.isnot(None)).distinct().all()
-        for (n,) in rows:
-            n = (n or "").strip()
-            if n:
-                names.setdefault(n.lower(), n)
-        try:
-            from database.services.walkin_service import WalkinService
-            for t in WalkinService.list_traders():
-                n = (t.get("name") or "").strip()
-                if n:
-                    names.setdefault(n.lower(), n)
-        except Exception:
-            pass
-        out = sorted((n for k, n in names.items() if not q or q in k), key=str.lower)
-        return out[:int(limit)]
+            w = WalkinService.create(name, phone, source="weighing", session=s)
+            AuditService.record("party.register", "party", w["id"], f"Walk-in {w['code']} {w['name']!r} registered at "
+                                "the scale", session=s)
+            s.commit()
+        return w
 
     @staticmethod
     @require_role(*ANY_STAFF)
@@ -233,24 +229,21 @@ class WeighService:
             raise ValueError("party_role must be customer or supplier.")
         walkin_name = (walkin_name or "").strip()
         with get_session() as s:
-            if walkin_name:                                          # a walk-in: the shared account, told apart by name
-                if not is_shared_walkin(party_id, s):
-                    raise ValueError("There is no shared walk-in account in this database, so a walk-in cannot be "
-                                     "weighed. Register the person as a customer instead.")
-                if s.get(Party, int(party_id)) is None:                  # the account row itself was never created
-                    s.add(Party(id=int(party_id), party_type="walkin", display_name="Walk-in", is_active=True,
-                                is_customer=False, is_supplier=False))
-                    s.flush()
-                    AuditService.record("party.register", "party", int(party_id),
-                                        "Created the shared walk-in account (for a weigh ticket)", session=s)
-                who = walkin_name
+            if walkin_name and is_shared_walkin(party_id, s):
+                # asked for "a walk-in called X": that is a new person with their own ID (not the shared account)
+                from database.services.walkin_service import WalkinService
+                w = WalkinService.create(walkin_name, source="weighing", session=s)
+                AuditService.record("party.register", "party", w["id"],
+                                    f"Walk-in {w['code']} {w['name']!r} registered at the scale", session=s)
+                party_id, who = w["id"], f"{w['name']} ({w['code']})"
             elif is_shared_walkin(party_id, s):
-                raise ValueError("Type the walk-in's name first.")
+                raise ValueError("Pick or add the walk-in first.")
             else:
                 p = s.get(Party, int(party_id))
                 if p is None or not p.is_active:
                     raise ValueError("Select a registered customer or a walk-in first.")
-                walkin_name, who = None, p.display_name
+                who = p.display_name + (f" ({p.walkin_code})" if p.walkin_code else "")
+            walkin_name = None
             t = WeighTicket(party_id=int(party_id), party_role=party_role, status="open",
                             weigher_user_id=_uid(), walkin_name=walkin_name)
             s.add(t)
@@ -475,6 +468,7 @@ class WeighService:
             "id": int(t.id), "ticket_no": t.ticket_no or _ticket_no(t.id), "status": t.status,
             "party_id": int(t.party_id), "party_name": t.walkin_name or (t.party.display_name if t.party else ""),
             "walkin_name": t.walkin_name or "",
+            "party_code": (t.party.walkin_code if t.party else "") or "",
             "party_phone": (t.party.phone if t.party else "") or "", "party_role": t.party_role,
             "weigher_user_id": int(t.weigher_user_id), "weigher_name": uname(t.weigher_user_id),
             "created_at": t.created_at, "submitted_at": t.submitted_at, "receipt_type": t.receipt_type or "weighing",

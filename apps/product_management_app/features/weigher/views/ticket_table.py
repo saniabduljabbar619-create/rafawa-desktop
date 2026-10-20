@@ -48,7 +48,7 @@ def fill_ticket_table(table: QTableWidget, rows) -> None:
         table.insertRow(r)
         when = t.get("submitted_at") or t.get("created_at")
         vals = [t["ticket_no"], when.strftime("%Y-%m-%d %H:%M") if when else "",
-                f"{t['party_name']}  ({t['party_role']})", t.get("products", ""),
+                f"{t['party_name']}{' [' + t['party_code'] + ']' if t.get('party_code') else ''}  ({t['party_role']})", t.get("products", ""),
                 fmt_bags(t["total_bags"]), f"{t['total_kg']:,.2f}"]
         if show_weigher:
             vals.append(t.get("weigher_name", ""))

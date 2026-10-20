@@ -225,12 +225,15 @@ def get_admin_dashboard_snapshot(scope: str = "all"):
 
 
 def _party_label(party, walkin_name) -> str:
-    """Who a document belongs to. Every casual walk-in shares one account, so tell them apart by the name typed."""
+    """Who a document belongs to. A walk-in carries their ID so two people with one name are told apart."""
     from database.services.walkin_account import is_shared_walkin
-    if party is not None and is_shared_walkin(party.id):
+    if party is None:
+        return "Walk-in Customer"
+    if is_shared_walkin(party.id):                                  # the old shared account: typed name only
         n = (walkin_name or "").strip()
         return f"{n} (Walk-in)" if n else "Walk-in"
-    return party.display_name if party is not None else "Walk-in Customer"
+    code = getattr(party, "walkin_code", None)
+    return f"{party.display_name} ({code})" if code else party.display_name
 
 
 def get_purchase_payment_snapshot(

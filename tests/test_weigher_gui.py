@@ -463,18 +463,33 @@ def test_one_letter_lists_matching_customers(qapp, boxes):
     assert _rows(v) == []
 
 
-def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes, monkeypatch):
+def _walkin_dialog(monkeypatch, name=None, phone="", pick=None):
+    """Drive the walk-in dialog without a real window: add a new walk-in, or pick one already on file."""
+    from apps.product_management_app.features.weigher.dialogs.walkin_pick_dialog import WalkinPickDialog
+
+    def fake(self):
+        if pick is not None:
+            self.search.setText(pick)
+            self.found.setCurrentRow(0)
+            self._pick()
+        elif name is not None:
+            self.name.setText(name)
+            self.phone.setText(phone)
+            self._add()
+        return self.Accepted if self.walkin else self.Rejected
+    monkeypatch.setattr(WalkinPickDialog, "exec_", fake)
+
+
+def test_a_single_name_walk_in_is_their_own_profile_goes_to_the_cashier_and_payment(qapp, boxes, monkeypatch):
     from database.models.party import Party
     from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
     from shared.config.constants import WALKIN_PARTY_ID
     v = _station()
-    asked = []
-    monkeypatch.setattr(QInputDialog, "getItem",
-                        staticmethod(lambda *a, **k: (asked.append(a[3]), ("Musa", True))[1]))   # one name, no surname
-    v.btn_walkin.click()                                           # the separate Walk-in button asks for the name
-    assert asked == [[]]
+    _walkin_dialog(monkeypatch, name="Musa")                       # one name, no surname, no phone
+    v.btn_walkin.click()
     t = W.get_ticket(v.ticket_id)
-    assert v.stack.currentIndex() == 1 and t["party_name"] == "Musa" and t["walkin_name"] == "Musa"
+    assert v.stack.currentIndex() == 1 and t["party_name"] == "Musa" and t["party_code"] == "WT-WKN-00001"
+    assert t["party_id"] != WALKIN_PARTY_ID                         # their own profile, never the shared account
     line = W.add_line(v.ticket_id, CROP_ID)
     W.record_round(line, 2, 100)
     W.set_line_price(line, 450)
@@ -484,21 +499,42 @@ def test_a_single_name_walk_in_goes_to_the_cashier_and_payment(qapp, boxes, monk
     res = W.finalize_ticket(v.ticket_id)
     with get_session() as s:
         p = s.get(Purchase, res["purchase_id"])
-        assert p.supplier_party_id == WALKIN_PARTY_ID and p.walkin_name == "Musa"
-        party = s.get(Party, WALKIN_PARTY_ID)
-    assert W.search_walkins("m") == ["Musa"]                       # offered again next time, one letter finds it
-    dlg = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False, walkin_name="Musa")
-    assert dlg.table.rowCount() == 1                               # payment lists only this walk-in's purchases
-    other = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False, walkin_name="Someone Else")
+        assert p.supplier_party_id == t["party_id"]
+        party = s.get(Party, t["party_id"])
+    assert [w["name"] for w in W.search_walkins("m")] == ["Musa"]  # one letter finds him next time
+    dlg = PurchasePaymentDialog(party=party, user_id=CASHIER, print_slip=False)
+    assert dlg.table.rowCount() == 1
+
+    # a second person with the SAME name is a different walk-in with a different ID and their own purchases
+    as_role("weigher", CASHIER_A)
+    v2 = _station()
+    _walkin_dialog(monkeypatch, name="Musa")
+    v2.btn_walkin.click()
+    t2 = W.get_ticket(v2.ticket_id)
+    assert t2["party_code"] == "WT-WKN-00002" and t2["party_id"] != t["party_id"]
+    with get_session() as s:
+        other = PurchasePaymentDialog(party=s.get(Party, t2["party_id"]), user_id=CASHIER, print_slip=False)
     assert other.table.rowCount() == 0
+
+
+def test_an_existing_walk_in_can_be_picked_again_by_id(qapp, boxes, monkeypatch):
+    v = _station()
+    _walkin_dialog(monkeypatch, name="Musa")
+    v.btn_walkin.click()
+    first = W.get_ticket(v.ticket_id)
+    W.cancel_ticket(v.ticket_id, "test")
+    v2 = _station()
+    _walkin_dialog(monkeypatch, pick="WT-WKN-00001")                # found by his ID code
+    v2.btn_walkin.click()
+    assert W.get_ticket(v2.ticket_id)["party_id"] == first["party_id"]
 
 
 def test_walk_in_button_with_no_name_or_cancel_starts_nothing(qapp, boxes, monkeypatch):
     v = _station()
-    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("Musa", False)))   # cancelled
+    _walkin_dialog(monkeypatch)                                     # closed without doing anything
     v.btn_walkin.click()
     assert v.stack.currentIndex() == 0 and not v.ticket_id
-    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("   ", True)))      # nothing typed
+    _walkin_dialog(monkeypatch, name="   ")                         # nothing typed
     v.btn_walkin.click()
     assert v.stack.currentIndex() == 0 and not v.ticket_id and any("name" in m.lower() for _k, m in boxes)
 
@@ -571,9 +607,7 @@ def test_the_screen_is_not_pulled_away_at_midnight_during_a_weighing(qapp, boxes
 
 def test_walkins_screen_finds_a_walk_in_who_was_weighed_but_not_paid(qapp, boxes, monkeypatch):
     from apps.product_management_app.features.profiling.dialogs.walkin_search_dialog import WalkinSearchDialog
-    from apps.product_management_app.app_state import state
     from shared.config.constants import WALKIN_PARTY_ID
-    monkeypatch.setattr(state, "walkins", [])          # the in-memory cache is shared between tests
     as_role("weigher", CASHIER_A)
     tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name="Musa Kano")
     line = W.add_line(tid, CROP_ID)
@@ -584,54 +618,69 @@ def test_walkins_screen_finds_a_walk_in_who_was_weighed_but_not_paid(qapp, boxes
     dlg = WalkinSearchDialog()
     dlg.search_in.setText("mus")
     assert dlg.table.rowCount() == 1
-    assert dlg.table.item(0, 0).text() == "Musa Kano"
-    assert "waiting for cashier" in dlg.table.item(0, 2).text()
+    assert dlg.table.item(0, 0).text() == "WT-WKN-00001" and dlg.table.item(0, 1).text() == "Musa Kano"
+    assert "waiting for cashier" in dlg.table.item(0, 3).text()
     dlg.table.selectRow(0)
     dlg._confirm()
-    assert dlg.selected_walkin.walkin_name == "Musa Kano"
+    assert dlg.selected_walkin.full_name == "Musa Kano" and dlg.selected_walkin.code == "WT-WKN-00001"
 
 
-def test_walkins_screen_searches_inline_and_the_profile_can_take_payment(qapp, boxes, monkeypatch):
-    from apps.product_management_app.app_state import state
-    from apps.product_management_app.features.profiling.dialogs import purchase_payment_dialog as ppd
-    from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
-    from apps.product_management_app.features.profiling.views.walkins_list import WalkinsListView
-    from shared.config.constants import WALKIN_PARTY_ID
-    monkeypatch.setattr(state, "walkins", [])
+def _weigh_walkin(name, kg=100, price=450):
     as_role("weigher", CASHIER_A)
-    for nm in ("Musa Kano", "Musa Sule", "Ladi Bello"):
-        tid = W.create_ticket(WALKIN_PARTY_ID, "customer", walkin_name=nm)
-        line = W.add_line(tid, CROP_ID)
-        W.record_round(line, 2, 100)
-        W.set_line_price(line, 450)
-        W.submit_ticket(tid, "full")
+    w = W.new_walkin(name)
+    tid = W.create_ticket(w["id"], "customer")
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, kg)
+    W.set_line_price(line, price)
+    W.submit_ticket(tid, "full")
+    return w, tid
+
+
+def test_walkins_screen_searches_inline_by_name_id_and_weighing_number(qapp, boxes, monkeypatch):
+    from apps.product_management_app.app_state import state
+    from apps.product_management_app.features.profiling.views.walkins_list import WalkinsListView
+    monkeypatch.setattr(state, "walkins", [])
+    people = {nm: _weigh_walkin(nm) for nm in ("Musa Kano", "Musa Sule", "Ladi Bello")}
     as_role("cashier", CASHIER)
     v = WalkinsListView(mode="cashier")
+    names = lambda: [v.table.item(r, 1).text() for r in range(v.table.rowCount())]          # noqa: E731
     v.search_in.setText("musa")
-    assert [v.table.item(r, 1).text() for r in range(v.table.rowCount())] == ["Musa Kano", "Musa Sule"]
+    assert names() == ["Musa Kano", "Musa Sule"] and v.table.item(0, 0).text() == "WT-WKN-00001"
     v.search_in.setText("zzz")
     assert v.table.item(0, 0).text() == "No walk-in matches that."
-    v.search_in.setText("ladi")
+    v.search_in.setText("WT-WKN-00003")                                  # by ID code
+    assert names() == ["Ladi Bello"]
+    v.search_in.setText(str(people["Musa Sule"][1]))                     # by weighing number
+    assert names() == ["Musa Sule"] and "WT-" in v.table.item(0, 2).text()
     v._on_cell_clicked(0, 0)
-    assert v._current_walkin.walkin_name == "Ladi Bello"
+    assert v._current_walkin.id == people["Musa Sule"][0]["id"]
 
-    prof = CustomerProfileView(None, mode="cashier", walkin_name="Ladi Bello")
-    assert prof.btn_advance_pay.isHidden() and not prof.btn_make_payment.isHidden()
-    seen = {}
-    monkeypatch.setattr(ppd.PurchasePaymentDialog, "exec_", lambda self: seen.setdefault("who", self.walkin_name) or 0)
+
+def test_a_walk_in_profile_takes_payment_returns_and_shows_pending_weighings(qapp, boxes, monkeypatch):
+    from apps.product_management_app.app_state import Customer
+    from apps.product_management_app.features.profiling.dialogs import purchase_payment_dialog as ppd
     from apps.product_management_app.features.profiling.dialogs.payment_target_dialog import PaymentTargetDialog
-    monkeypatch.setattr(PaymentTargetDialog, "exec_", lambda self: (
-        self.rb_purchase.setChecked(True), self.route(), 0)[-1])
-    prof.open_payment_router()
-    assert seen["who"] == "Ladi Bello"
-
-
-def test_walk_in_profile_cards_show_what_is_owed_and_paid(qapp, boxes):
     from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
     from database.services.payment_service import PaymentService
-    from tests.test_weigh_service import _walkin_purchase
-    res = _walkin_purchase("Musa Kano", kg=100, price=450)
-    PaymentService.record_purchase_payment(purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
+    w, tid = _weigh_walkin("Ladi Bello")
+    me = Customer(id=w["id"], full_name="Ladi Bello", phone="", email="", address="", status="active", notes="",
+                  code=w["code"])
+    as_role("cashier", CASHIER)
+    prof = CustomerProfileView(me, mode="cashier")
+    assert prof.activity_table.item(0, 3).text() == f"WT-{tid:05d}"       # the weighing waiting for the cashier
+    res = W.finalize_ticket(tid)                                          # cashier finalizes, still unpaid
+    PaymentService.record_purchase_payment(purchase_id=res["purchase_id"], party_id=w["id"], amount=20000,
                                            created_by_user_id=CASHIER, method="manual", notes="")
-    prof = CustomerProfileView(None, mode="cashier", walkin_name="Musa Kano")
+    prof = CustomerProfileView(me, mode="cashier")
     assert (prof.sum_payable.text(), prof.sum_paid.text()) == ("25,000.00", "20,000.00")
+    seen = {}
+    monkeypatch.setattr(ppd.PurchasePaymentDialog, "exec_", lambda self: seen.setdefault("pid", int(self.party.id)) or 0)
+    monkeypatch.setattr(PaymentTargetDialog, "exec_", lambda self: (self.rb_purchase.setChecked(True), self.route(), 0)[-1])
+    prof.open_payment_router()
+    assert seen["pid"] == w["id"]
+    # "Go to Returns" from the Walk-ins screen opens the returns screen for this very person
+    from apps.product_management_app.features.profiling.views.admin_returns import AdminReturnsView
+    rv = AdminReturnsView(mode="cashier", preselect_party_id=w["id"])
+    assert "WT-WKN-00001" in rv.customer_cb.currentText()
+
+

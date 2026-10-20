@@ -114,9 +114,10 @@ class _LazyMap(dict):
 
 
 def _party_map(s) -> "_LazyMap":
+    """id -> name; a walk-in's ID code is added so two people with one name are told apart."""
     return _LazyMap(lambda ids: {
-        int(i): (n or f"Party#{i}")
-        for i, n in s.query(Party.id, Party.display_name).filter(Party.id.in_(ids)).all()})
+        int(i): (f"{n} ({code})" if code else (n or f"Party#{i}"))
+        for i, n, code in s.query(Party.id, Party.display_name, Party.walkin_code).filter(Party.id.in_(ids)).all()})
 
 
 def _who(parties, party_id, walkin, fallback="") -> str:

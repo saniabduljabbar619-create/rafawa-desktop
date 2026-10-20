@@ -338,7 +338,8 @@ class AdminReturnsView(QWidget):
         preselect_index = None
         for i, c in enumerate(rows):
             lbl = "[Walk-in] " if str(c.party_type).strip().lower() == "walkin" else "[Regular] "
-            self.customer_cb.addItem(f"{lbl}{c.display_name} (#_ID:{c.id})", c.id)
+            ident = getattr(c, "walkin_code", None) or f"#_ID:{c.id}"
+            self.customer_cb.addItem(f"{lbl}{c.display_name} ({ident})", c.id)
             if self._preselect_party_id and c.id == self._preselect_party_id:
                 preselect_index = i
 

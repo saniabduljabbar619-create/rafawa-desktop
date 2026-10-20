@@ -78,8 +78,8 @@ class ComputeMixin:
             users = {int(u.id): (u.username or f"User#{u.id}")
                      for u in s.query(User).all()}
             parties = _LazyMap(lambda ids: {
-                int(p.id): (p.display_name or f"Party#{p.id}")
-                for p in s.query(Party.id, Party.display_name)
+                int(p.id): (f"{p.display_name} ({p.walkin_code})" if p.walkin_code else (p.display_name or f"Party#{p.id}"))
+                for p in s.query(Party.id, Party.display_name, Party.walkin_code)
                 .filter(Party.id.in_(ids)).all()})
 
             # -------- creator maps for documents (id -> creator, party, no),
