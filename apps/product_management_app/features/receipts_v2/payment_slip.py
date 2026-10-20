@@ -52,6 +52,8 @@ def build_payment_slip(payment_id: int) -> Dict[str, Any]:
         party_id = doc.buyer_party_id if kind == "sale" else doc.supplier_party_id
         party = s.get(Party, party_id) if party_id else None
         name = (party.display_name if party else "")
+        if party is not None and party.walkin_code:
+            name = f"{name} ({party.walkin_code})"
         if party is not None and is_shared_walkin(party.id) and (doc.walkin_name or "").strip():
             name = doc.walkin_name.strip()
         if kind == "sale":

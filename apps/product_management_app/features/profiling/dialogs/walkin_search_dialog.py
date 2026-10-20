@@ -22,6 +22,11 @@ from apps.product_management_app.app_state import state, Customer
 from shared.config.constants import WALKIN_PARTY_ID
 
 
+def contact_text(w) -> str:
+    """Phone and/or weighing numbers, whichever there are."""
+    return "  ".join(x for x in (w.phone, weighings_text(w)) if x)
+
+
 def weighings_text(w) -> str:
     """The weighing numbers behind a typed walk-in name, newest last: 'WT-00012, WT-00015 (+2 more)'."""
     refs = list(getattr(w, "refs", None) or [])
@@ -32,14 +37,29 @@ def weighings_text(w) -> str:
 
 
 def find_walkins(text: str):
-    """Walk-in accounts plus every typed walk-in name (weighings, sales, purchases) matching the text."""
-    q = (text or "").strip().lower()
+    """
+    Every walk-in matching the text: name, phone, ID code (WKN-00012 / WT-WKN-00001), ID number, or the number of
+    one of their weighings. Each is their own profile. (Names typed on the old shared walk-in account, if any are
+    left, are listed too.)
+    """
+    q = (text or "").strip()
     if not q:
         return []              # nothing typed yet - don't dump the whole roster
-    out = [w for w in state.walkins if q in f"{w.full_name} {w.phone}".lower()]
+    from database.services.walkin_service import WalkinService
+    out = []
     try:
-        from database.services.walkin_service import WalkinService
-        named = WalkinService.list_named(q)
+        found = WalkinService.search(q)
+        weighed = WalkinService.weighings_for([w["id"] for w in found])
+    except Exception:
+        found, weighed = [], {}
+    for d in found:
+        w = Customer(id=d["id"], full_name=d["name"], phone=d["phone"], email="", address="Walk-in Client",
+                     status="active", notes="", code=d["code"])
+        w.refs = [r for r, _s in weighed.get(d["id"], [])]
+        w.pending = sum(1 for _r, st in weighed.get(d["id"], []) if st in ("open", "submitted"))
+        out.append(w)
+    try:
+        named = WalkinService.list_named(q)           # leftovers on the shared account
     except Exception:
         named = []
     for d in named:
@@ -75,7 +95,7 @@ class WalkinSearchDialog(QDialog):
         title.setStyleSheet("font-size: 15px; font-weight: 800;")
         layout.addWidget(title)
 
-        hint = QLabel("Type a name, phone number or weighing ID (e.g. 12 or WT-00012), then pick the match.")
+        hint = QLabel("Type a name, phone, ID (WKN-00012 / WT-WKN-00001) or a weighing number (e.g. 12), then pick the match.")
         hint.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(hint)
 
@@ -87,8 +107,8 @@ class WalkinSearchDialog(QDialog):
         search_row.addWidget(self.search_in, 1)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Full Name", "Phone / Weighings", "Status"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["ID", "Full Name", "Phone / Weighings", "Status"])
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -125,7 +145,8 @@ class WalkinSearchDialog(QDialog):
             row = self.table.rowCount()
             self.table.insertRow(row)
             pend = getattr(w, "pending", 0)
-            cells = [w.full_name, w.phone or weighings_text(w), f"{pend} waiting for cashier" if pend else w.status]
+            cells = [getattr(w, "code", "") or f"#{w.id}", w.full_name, contact_text(w),
+                     f"{pend} waiting for cashier" if pend else w.status]
             for c, val in enumerate(cells):
                 self.table.setItem(row, c, QTableWidgetItem(str(val or "")))
         self.btn_select.setEnabled(False)

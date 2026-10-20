@@ -7,6 +7,7 @@ from datetime import date, datetime as _dt
 
 from sqlalchemy import and_, false as sa_false, func, or_, true as sa_true
 
+from database.models.party import Party
 from database.session import get_session
 from database.services.document_balance import document_balances, offset_totals
 from shared.config.constants import WALKIN_PARTY_ID
@@ -641,6 +642,28 @@ class PartyLedgerService:
                     "balance_before": None, "balance_after": None, "status": "payables",
                 })
 
+        # weighings: which one a purchase came from, and (for a walk-in) the ones still waiting for the cashier
+        from database.models.weigh_ticket import WeighTicket
+        with get_session() as s:
+            pur_refs = [int(r["reference"].split("-")[-1]) for r in rows
+                        if r.get("type") == "purchase" and str(r.get("reference", "")).startswith("PUR-")]
+            tix = {int(pid): (tno or f"WT-{int(tid):05d}") for pid, tid, tno in
+                   s.query(WeighTicket.purchase_id, WeighTicket.id, WeighTicket.ticket_no)
+                   .filter(WeighTicket.purchase_id.in_(pur_refs or [0])).all()}
+            for r in rows:
+                if r.get("type") == "purchase" and r.get("summary") == "Purchase":
+                    tag = tix.get(int(str(r["reference"]).split("-")[-1]))
+                    if tag:
+                        r["summary"] = f"Purchase ({tag})"
+            is_walkin = (s.query(Party.party_type).filter(Party.id == party_id).scalar() == "walkin")
+            if is_walkin and not walkin_name:
+                for tk in (s.query(WeighTicket).filter(WeighTicket.party_id == party_id)
+                           .filter(WeighTicket.status.in_(("open", "submitted"))).all()):
+                    if _in_range(tk.created_at):
+                        rows.append({"dt": tk.created_at, "ledger": "crops", "type": "weighing",
+                                     "reference": tk.ticket_no or f"WT-{int(tk.id):05d}",
+                                     "summary": "Weighed - waiting for the cashier", "total": 0, "paid": None,
+                                     "balance": None, "status": "pending"})
         return _group_activity(rows)[:limit]
     
 

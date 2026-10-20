@@ -3,9 +3,118 @@ from sqlalchemy import func, text
 from shared.config.constants import WALKIN_PARTY_ID
 from database.services.walkin_account import is_shared_walkin
 
+TILL_PREFIX = "WKN"             # met at the till (sales / purchases):   WKN-00001
+WEIGH_PREFIX = "WT-WKN"         # met at the weighing scale:             WT-WKN-00001
+
+
 class WalkinService:
 
     WALKIN_PARTY_ID = WALKIN_PARTY_ID
+
+    # ------------------------------------------------------------------ identities
+    @staticmethod
+    def next_code(s, prefix: str) -> str:
+        """The next free walk-in code in a series: WKN-00001, WKN-00002 ... (WT-WKN-00001 for the weighing scale)."""
+        from database.models.party import Party
+        top = 0
+        for (c,) in s.query(Party.walkin_code).filter(Party.walkin_code.like(f"{prefix}-%")).all():
+            tail = (c or "")[len(prefix) + 1:]
+            if tail.isdigit():
+                top = max(top, int(tail))
+        return f"{prefix}-{top + 1:05d}"
+
+    @staticmethod
+    def create(name: str, phone: str = "", source: str = "till", session=None) -> dict:
+        """A brand-new walk-in with their own ID. A name is enough; phone is optional and never identifies anyone."""
+        from database.models.party import Party
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Type the walk-in's name first.")
+        prefix = WEIGH_PREFIX if source == "weighing" else TILL_PREFIX
+
+        def _make(s):
+            row = Party(party_type="walkin", display_name=name, phone=(phone or "").strip() or None,
+                        address="Walk-in Client", is_active=True, is_customer=False, is_supplier=False,
+                        walkin_code=WalkinService.next_code(s, prefix))
+            s.add(row)
+            s.flush()
+            return {"id": int(row.id), "code": row.walkin_code, "name": row.display_name, "phone": row.phone or "",
+                    "source": source}
+
+        if session is not None:
+            return _make(session)
+        with get_session() as s:
+            out = _make(s)
+            s.commit()
+            return out
+
+    @staticmethod
+    def code_of(party_id) -> str:
+        from database.models.party import Party
+        with get_session() as s:
+            row = s.query(Party.walkin_code).filter(Party.id == int(party_id or 0)).first()
+        return (row[0] or "") if row else ""
+
+    @staticmethod
+    def search(q: str = "", limit: int = 40) -> list:
+        """
+        Individual walk-ins matching a name, phone, walk-in code (WKN-00012 / WT-WKN-00001), their ID number, or
+        the number of one of their weighings (WT-00012). Nothing typed: nothing (the list can be long).
+        """
+        import re
+        from database.models.party import Party
+        from database.models.weigh_ticket import WeighTicket
+
+        q = (q or "").strip()
+        if not q:
+            return []
+        low = q.lower()
+        digits = re.sub(r"\D", "", q)
+        with get_session() as s:
+            ids = set()
+            like = f"%{q}%"
+            for (i,) in s.query(Party.id).filter(Party.party_type == "walkin", Party.id != WALKIN_PARTY_ID).filter(
+                    (Party.display_name.ilike(like)) | (Party.phone.ilike(like)) | (Party.walkin_code.ilike(like))):
+                ids.add(int(i))
+            if digits:
+                n = int(digits)
+                if low.isdigit() or low.startswith("wt"):
+                    for (pid,) in s.query(WeighTicket.party_id).filter(WeighTicket.id == n):
+                        ids.add(int(pid))                    # a weighing's number leads to that person
+                if low.isdigit():
+                    ids.add(n)                               # or their own ID number
+            rows = []
+            if ids:
+                rows = (s.query(Party).filter(Party.id.in_(ids), Party.party_type == "walkin",
+                                              Party.id != WALKIN_PARTY_ID).order_by(Party.display_name.asc()).all())
+            return [{"id": int(p.id), "code": p.walkin_code or "", "name": p.display_name, "phone": p.phone or "",
+                     "source": "weighing" if (p.walkin_code or "").startswith(WEIGH_PREFIX) else "till"}
+                    for p in rows][:int(limit)]
+
+    @staticmethod
+    def weighings_for(party_ids) -> dict:
+        """{party_id: [(weighing no, status), ...]} for several walk-ins at once, oldest first."""
+        from database.models.weigh_ticket import WeighTicket
+        ids = [int(i) for i in party_ids]
+        out = {i: [] for i in ids}
+        if not ids:
+            return out
+        with get_session() as s:
+            for pid, tid, tno, status in (s.query(WeighTicket.party_id, WeighTicket.id, WeighTicket.ticket_no,
+                                                  WeighTicket.status)
+                                          .filter(WeighTicket.party_id.in_(ids)).filter(WeighTicket.status != "cancelled")
+                                          .order_by(WeighTicket.id.asc()).all()):
+                out[int(pid)].append((tno or f"WT-{int(tid):05d}", status))
+        return out
+
+    @staticmethod
+    def weighings_of(party_id: int) -> list:
+        """The weighing numbers of one walk-in, oldest first."""
+        from database.models.weigh_ticket import WeighTicket
+        with get_session() as s:
+            return [tno or f"WT-{int(tid):05d}" for tid, tno in
+                    s.query(WeighTicket.id, WeighTicket.ticket_no).filter(WeighTicket.party_id == int(party_id))
+                    .filter(WeighTicket.status != "cancelled").order_by(WeighTicket.id.asc()).all()]
 
     @staticmethod
     def list_traders():
