@@ -16,6 +16,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func
+
 from database.models.company import Company
 from database.models.purchase_order import PurchaseOrder
 from database.models.purchase_order_item import PurchaseOrderItem
@@ -48,6 +50,16 @@ def _line_value(ptype: str, weight, bags, price) -> float:
 class OrderHubService:
 
     # ------------------------------------------------------------------ shared partners
+    @staticmethod
+    def reactivate_partner(name: str) -> None:
+        """A removed company/supplier name is being added again: bring back both copies of it."""
+        key = (name or "").strip().lower()
+        with get_session() as s:
+            for model in (Company, PurchaseOrderSupplier):
+                for row in s.query(model).filter(func.lower(model.name) == key).all():
+                    row.is_active = True
+            s.commit()
+
     @staticmethod
     def sync_partners() -> int:
         """Make every active company a supplier and every active supplier a company. Idempotent."""

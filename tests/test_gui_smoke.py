@@ -240,9 +240,9 @@ def test_customers_directory_shows_balances_and_filters(qapp, world):
     assert v.table.rowCount() == 1
     v.filter_seg.set_key("inactive"); v.refresh()
     assert v.table.rowCount() == 0 and not v.empty_lbl.isHidden()
-    v.filter_seg.set_key("all"); v.search_in.setText("zzz")
+    v.filter_seg.set_key("all"); v.search_in.setText("zzz"); v._search_timer.stop(); v.refresh()   # typing waits ~0.2 s
     assert v.table.rowCount() == 0
-    v.search_in.setText("one")
+    v.search_in.setText("one"); v._search_timer.stop(); v.refresh()
     v.table.selectRow(0)
     assert v.selected_customer_id() == 1
 

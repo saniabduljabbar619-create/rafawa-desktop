@@ -99,3 +99,35 @@ def test_date_range_accepts_a_single_day():
     today = date.today()
     out = DrawerService.compute(CASHIER_A, today, today)
     assert out["cards"]["sales_net"] == 20000
+
+
+def test_activity_groups_each_document_with_its_payments_and_the_settled_marker_sits_on_top():
+    a = make_sale()                                           # 20000
+    pay("sale", a["sale_id"], CUSTOMER_ID, "in", 5000)
+    b = make_sale()
+    pay("sale", b["sale_id"], CUSTOMER_ID, "in", 20000)       # pays part of b ... and nothing is settled yet
+    pay("sale", a["sale_id"], CUSTOMER_ID, "in", 15000)       # now both documents are fully paid
+    rows = PartyLedgerService.list_activity_details(CUSTOMER_ID)
+    kinds = [(r["type"], r["reference"]) for r in rows]
+    sa, sb = f"SAL-{a['sale_id']}", f"SAL-{b['sale_id']}"
+    # the document first, then its own payments (oldest first)
+    ia = kinds.index(("sale", sa))
+    assert [k[0] for k in kinds[ia:ia + 3]] == ["sale", "payment", "payment"] and kinds[ia + 1][1] == sa
+    ib = kinds.index(("sale", sb))
+    assert kinds[ib + 1] == ("payment", sb)
+    # the marker comes immediately before (above) the payment that balanced everything, nothing newer follows
+    im = next(i for i, r in enumerate(rows) if r["type"] == "settlement_marker")
+    assert im == 0 and rows[im]["summary"] == "Receivables Settled"
+
+
+def test_walk_in_activity_shows_documents_payments_and_the_marker_like_a_customer():
+    from database.services.walkin_service import WalkinService
+    from shared.config.constants import WALKIN_PARTY_ID
+    res = make_sale(buyer=WALKIN_PARTY_ID, walkin_name="Musa Kano")       # 20000
+    make_sale(buyer=WALKIN_PARTY_ID, walkin_name="Ladi Bello")
+    pay("sale", res["sale_id"], WALKIN_PARTY_ID, "in", 20000)
+    acts = PartyLedgerService.list_walkin_activity("Musa Kano")
+    assert [(a["type"], a.get("status")) for a in acts] == [
+        ("settlement_marker", "receivables"), ("sale", "paid"), ("payment", "")]
+    assert WalkinService.totals("Musa Kano")["receivable"] == 0
+    assert [a["type"] for a in PartyLedgerService.list_walkin_activity("Ladi Bello")] == ["sale"]

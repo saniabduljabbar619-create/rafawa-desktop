@@ -22,6 +22,15 @@ from apps.product_management_app.app_state import state, Customer
 from shared.config.constants import WALKIN_PARTY_ID
 
 
+def weighings_text(w) -> str:
+    """The weighing numbers behind a typed walk-in name, newest last: 'WT-00012, WT-00015 (+2 more)'."""
+    refs = list(getattr(w, "refs", None) or [])
+    if not refs:
+        return ""
+    shown = ", ".join(refs[-2:])
+    return shown + (f" (+{len(refs) - 2} more)" if len(refs) > 2 else "")
+
+
 def find_walkins(text: str):
     """Walk-in accounts plus every typed walk-in name (weighings, sales, purchases) matching the text."""
     q = (text or "").strip().lower()
@@ -38,6 +47,7 @@ def find_walkins(text: str):
                      address="Walk-in Client", status="active", notes="")
         w.walkin_name = d["name"]
         w.pending = d["pending"]
+        w.refs = d.get("refs", [])
         out.append(w)
     return out
 
@@ -65,7 +75,7 @@ class WalkinSearchDialog(QDialog):
         title.setStyleSheet("font-size: 15px; font-weight: 800;")
         layout.addWidget(title)
 
-        hint = QLabel("Type a name or phone number, then pick the match.")
+        hint = QLabel("Type a name, phone number or weighing ID (e.g. 12 or WT-00012), then pick the match.")
         hint.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(hint)
 
@@ -78,7 +88,7 @@ class WalkinSearchDialog(QDialog):
         layout.addLayout(search_row)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Full Name", "Phone", "Status"])
+        self.table.setHorizontalHeaderLabels(["Full Name", "Phone / Weighings", "Status"])
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -115,7 +125,7 @@ class WalkinSearchDialog(QDialog):
             row = self.table.rowCount()
             self.table.insertRow(row)
             pend = getattr(w, "pending", 0)
-            cells = [w.full_name, w.phone, f"{pend} waiting for cashier" if pend else w.status]
+            cells = [w.full_name, w.phone or weighings_text(w), f"{pend} waiting for cashier" if pend else w.status]
             for c, val in enumerate(cells):
                 self.table.setItem(row, c, QTableWidgetItem(str(val or "")))
         self.btn_select.setEnabled(False)

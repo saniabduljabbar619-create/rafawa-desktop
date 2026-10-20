@@ -111,6 +111,10 @@ class PartnersPage(QWidget):
         self.btn_open = QPushButton("Open profile")
         self.btn_open.setObjectName("msBig")
         foot.addWidget(self.btn_open)
+        self.btn_delete = QPushButton("Delete " + ("company" if kind == "sales" else "supplier"))
+        self.btn_delete.setProperty("role", "danger")
+        self.btn_delete.setVisible(is_admin)
+        foot.addWidget(self.btn_delete)
         foot.addStretch(1)
         h = QLabel("Double-click a name to see their orders")
         h.setObjectName("msHint")
@@ -119,6 +123,7 @@ class PartnersPage(QWidget):
 
         self.btn_new.clicked.connect(self._new)
         self.btn_open.clicked.connect(self._open_selected)
+        self.btn_delete.clicked.connect(self._delete_selected)
         self.search.textChanged.connect(lambda *_: self.reload())
         self.table.cellDoubleClicked.connect(lambda r, _c: self._open_row(r))
 
@@ -158,6 +163,26 @@ class PartnersPage(QWidget):
             QMessageBox.information(self, "Orders", "Select one first.")
             return
         self._open_row(row)
+
+    def _delete_selected(self) -> None:
+        row = self.table.currentRow()
+        if not (0 <= row < len(self._rows)):
+            QMessageBox.information(self, "Delete", "Select one first.")
+            return
+        r = self._rows[row]
+        word = "company" if self.kind == "sales" else "supplier"
+        ok = QMessageBox.question(
+            self, "Delete " + word,
+            f"Delete {word} '{r['name']}'?\n\nThey are removed from the Companies and Suppliers lists. Their past "
+            f"orders ({r['orders']}) are kept in the history.", QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        try:
+            OrderSheetService.delete_partner(self.kind, int(r["id"]))
+        except Exception as e:
+            QMessageBox.warning(self, "Delete " + word, str(e))
+            return
+        self.reload()
 
     def _new(self) -> None:
         dlg = PartnerDialog(self.kind, self)

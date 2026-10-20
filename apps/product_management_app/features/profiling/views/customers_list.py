@@ -3,12 +3,13 @@ from PySide2.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QMenu, QHeaderView,
     QAbstractItemView,
 )
-from PySide2.QtCore import Qt
+from PySide2.QtCore import Qt, QTimer
 
 from apps.product_management_app.app_state import state
 from database.services.customer_directory_service import CustomerDirectoryService
 from database.services.supplier_profile_service import SupplierProfileService
-from shared.uix.widgets.cards import KpiCard, Segmented, avatar, chip, money
+from shared.uix.widgets.cards import KpiCard, Segmented, money
+from shared.uix.widgets.table_cells import ChipDelegate, NameDelegate, ROLE_BADGE, ROLE_SUB, ROLE_TONE
 from shared.uix.widgets.dialogs import CustomerFormDialog
 from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
 from shared.uix.layout.scrollable import make_scrollable_page
@@ -112,6 +113,14 @@ class CustomersListView(QWidget):
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 56)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        # amounts and status size to their text, so no digit of a balance is ever cut off
+        for col in (4, 5, 6):
+            hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        hh.setMinimumSectionSize(90)
+        self.table.setItemDelegateForColumn(1, NameDelegate(self.table))
+        chips = ChipDelegate(self.table)
+        for col in (4, 5, 6):
+            self.table.setItemDelegateForColumn(col, chips)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         layout.addWidget(self.table, 1)
 
@@ -142,7 +151,11 @@ class CustomersListView(QWidget):
 
         # Wiring
         self.btn_refresh.clicked.connect(self.refresh)
-        self.search_in.textChanged.connect(self.refresh)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search_in.textChanged.connect(lambda _t: self._search_timer.start())      # not on every keystroke
         self.filter_seg.changed.connect(lambda _k: self.refresh())
 
         self.btn_add.clicked.connect(self.add_customer)
@@ -166,37 +179,6 @@ class CustomersListView(QWidget):
             return None
 
     # ----- rendering -------------------------------------------------------------
-    def _name_cell(self, c):
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(10)
-        lay.addWidget(avatar(c.full_name, 34))
-        col = QVBoxLayout()
-        col.setSpacing(0)
-        name = QLabel(c.full_name)
-        name.setStyleSheet("font-weight:600; font-size:13px; background:transparent;")
-        sub = QLabel(c.email or c.address or "")
-        sub.setStyleSheet("color:#9ca3af; font-size:11px; background:transparent;")
-        col.addWidget(name)
-        if sub.text():
-            col.addWidget(sub)
-        lay.addLayout(col, 1)
-        if c.is_supplier:
-            lay.addWidget(chip("Supplier", "blue"))
-        w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        return w
-
-    @staticmethod
-    def _chip_cell(text, tone):
-        w = QWidget()
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(6, 0, 6, 0)
-        lay.addWidget(chip(text, tone), 0, Qt.AlignVCenter)
-        lay.addStretch(1)
-        w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        return w
-
     def refresh(self):
         q = self.search_in.text().strip().lower()
         mode = self.filter_seg.key()
@@ -238,37 +220,40 @@ class CustomersListView(QWidget):
         items = [c for c in all_c if match(c)]
         self.subtitle.setText(f"{len(items)} of {len(all_c)} customers shown")
         self.empty_lbl.setVisible(not items)
-        self.table.setRowCount(0)
-        for c in items:
-            sm = summary(c)
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(items))
+            for row, c in enumerate(items):
+                sm = summary(c)
+                idi = QTableWidgetItem(str(c.id))
+                idi.setTextAlignment(Qt.AlignCenter)
+                idi.setForeground(Qt.gray)
+                self.table.setItem(row, 0, idi)
 
-            idi = QTableWidgetItem(str(c.id))
-            idi.setTextAlignment(Qt.AlignCenter)
-            idi.setForeground(Qt.gray)
-            self.table.setItem(row, 0, idi)
-            self.table.setItem(row, 1, QTableWidgetItem(""))
-            self.table.setCellWidget(row, 1, self._name_cell(c))
-            self.table.setItem(row, 2, QTableWidgetItem(c.phone or ""))
-            days = CustomerDirectoryService.days_since(sm["last_sale_at"])
-            last = QTableWidgetItem(_last_sale_text(days))
-            if days is None:
-                last.setForeground(Qt.gray)
-            self.table.setItem(row, 3, last)
+                name = QTableWidgetItem(c.full_name)
+                name.setData(ROLE_SUB, c.email or c.address or "")
+                name.setData(ROLE_BADGE, "Supplier" if c.is_supplier else "")
+                self.table.setItem(row, 1, name)
+                self.table.setItem(row, 2, QTableWidgetItem(c.phone or ""))
+                days = CustomerDirectoryService.days_since(sm["last_sale_at"])
+                last = QTableWidgetItem(_last_sale_text(days))
+                if days is None:
+                    last.setForeground(Qt.gray)
+                self.table.setItem(row, 3, last)
 
-            self.table.setItem(row, 4, QTableWidgetItem(""))
-            owe = sm["receivable"]
-            self.table.setCellWidget(row, 4, self._chip_cell(
-                money(owe) if owe > 0.005 else "Settled", "red" if owe > 0.005 else "grey"))
-            self.table.setItem(row, 5, QTableWidgetItem(""))
-            dep = sm["deposit"]
-            self.table.setCellWidget(row, 5, self._chip_cell(
-                money(dep) if dep > 0.005 else "-", "green" if dep > 0.005 else "grey"))
-            self.table.setItem(row, 6, QTableWidgetItem(""))
-            active = str(c.status).lower() == "active"
-            self.table.setCellWidget(row, 6, self._chip_cell(
-                "Active" if active else str(c.status).title(), "green" if active else "amber"))
+                owe, dep = sm["receivable"], sm["deposit"]
+                active = str(c.status).lower() == "active"
+                for col, text, tone in (
+                    (4, money(owe) if owe > 0.005 else "Settled", "red" if owe > 0.005 else "grey"),
+                    (5, money(dep) if dep > 0.005 else "-", "green" if dep > 0.005 else "grey"),
+                    (6, "Active" if active else str(c.status).title(), "green" if active else "amber"),
+                ):
+                    it = QTableWidgetItem(text)
+                    it.setData(ROLE_TONE, tone)
+                    self.table.setItem(row, col, it)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def add_customer(self):
         dlg = CustomerFormDialog(self, title="Add Customer")

@@ -68,6 +68,24 @@ class PurchaseOrderSupplierService:
                 f"select it from search instead of creating a duplicate."
             )
 
+        # a name that was removed earlier comes back (its old orders stay attached to it)
+        with get_session() as s:
+            old = s.query(PurchaseOrderSupplier).filter(PurchaseOrderSupplier.name.ilike(name)).first()
+            if old is not None:
+                old.is_active = True
+                old.address = (address or "").strip() or old.address
+                old.phone = (phone or "").strip() or old.phone
+                old.contact_person = (contact_person or "").strip() or old.contact_person
+                s.flush()
+                revived = int(old.id)
+            else:
+                revived = 0
+        if revived:
+            from database.services.order_hub_service import OrderHubService
+            OrderHubService.reactivate_partner(name)
+            OrderHubService.sync_partners()
+            return revived
+
         with get_session() as s:
             sup = PurchaseOrderSupplier(
                 name=name,
