@@ -148,7 +148,7 @@ def test_sales_order_whole_life_on_one_sheet(qapp, boxes):
     type_cell(pg.grid, "rprice", "100", row=0)
     assert pg.lines[0]["acc_qty"] == 450
     run = pg.grid.table
-    assert run.item(0, 8).text() == "450" and run.item(0, 9).text() == "45,000.00"      # accepted / amount (auto)
+    assert run.item(0, 9).text() == "450" and run.item(0, 10).text() == "45,000.00"      # accepted / amount (auto)
     type_cell(pg.grid, "rej", "999", row=0)
     assert "more than" in pg.msg.text() and pg.lines[0]["rej_qty"] == 50
     pg.btn_confirm.click()
@@ -432,3 +432,26 @@ def test_only_a_draft_or_cancelled_order_can_be_deleted(qapp, boxes):
     from shared.auth.permissions import PermissionDenied
     with pytest.raises(PermissionDenied):
         O.delete_partner("sales", c)
+
+
+def test_a_product_typed_by_hand_is_matched_and_the_line_total_and_date_are_filled(qapp, boxes):
+    from datetime import datetime
+    c = CompanyService.create("Acme Foods", ADMIN_ID)
+    v = _hub()
+    v.open_order("sales", c, None)
+    pg = _sheet(v)
+    type_cell(pg.grid, "product", "maize")                          # typed in lower case, not picked from the list
+    type_cell(pg.grid, "bags", "300")
+    type_cell(pg.grid, "kg", "38000")
+    type_cell(pg.grid, "price", "350")
+    assert pg.order_id and pg.stage == "draft"                       # saved: the typed name was understood
+    line = O.detail("sales", pg.order_id)["lines"][0]
+    assert line["name"] == "Maize" and line["kg"] == 38000 and line["price"] == 350
+    headers = [pg.grid.table.horizontalHeaderItem(j).text() for j in range(pg.grid.table.columnCount())]
+    assert "Date" in headers and any("Line total" in h for h in headers)
+    j_date = next(j for j, h in enumerate(headers) if h == "Date")
+    j_total = next(j for j, h in enumerate(headers) if "Line total" in h)
+    assert pg.grid.table.item(0, j_date).text() == datetime.now().strftime("%d/%m/%Y")
+    assert pg.grid.table.item(0, j_total).text() == "13,300,000.00" and pg.k_value.val.text() == "13,300,000.00"
+    type_cell(pg.grid, "product", "zzz-unknown")
+    assert "product" in pg.msg.text().lower()                         # an unknown name still asks to pick one

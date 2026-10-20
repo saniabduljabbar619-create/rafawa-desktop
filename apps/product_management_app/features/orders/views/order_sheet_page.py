@@ -396,6 +396,12 @@ class OrderSheetPage(QWidget):
                 "rcv": "" if l.get("rcv_qty") is None else l["rcv_qty"], "rej": "" if l.get("rej_qty") is None else l["rej_qty"],
                 "rprice": "" if l.get("rcv_price") is None else l["rcv_price"]}
 
+    def _line_date(self) -> str:
+        """Lines carry the day the order was made (today for one not saved yet)."""
+        from datetime import datetime
+        d = (self.d or {}).get("created_at") if isinstance(getattr(self, "d", None), dict) else None
+        return (d or datetime.now()).strftime("%d/%m/%Y")
+
     @staticmethod
     def _line_total(l: Dict[str, Any]) -> float:
         return l["price"] * (l["bags"] if l["type"] == "fertilizer" else l["kg"])
@@ -414,7 +420,8 @@ class OrderSheetPage(QWidget):
                 {"key": "price", "label": "Price (₦)\nper kg / per bag", "type": "money", "width": 150,
                  "readonly": not self.is_admin},
             ]
-            computed = [{"key": "total", "label": "Line total\nauto", "width": 160}]
+            computed = [{"key": "date", "label": "Date", "width": 110},
+                        {"key": "total", "label": "Line total\nauto", "width": 160}]
             kw = dict(first_edit_key="product", placeholder_key="product", defaults={},
                       ready=self._ready_line, on_add=self._add_line, on_edit=self._edit_line,
                       on_remove=self._remove_line, allow_add=self.is_admin,
@@ -432,7 +439,8 @@ class OrderSheetPage(QWidget):
                 {"key": "rej", "label": "Rejected\nqty", "type": "number", "width": 100, "readonly": lock},
                 {"key": "rprice", "label": w["price"], "type": "money", "width": 140, "readonly": lock},
             ]
-            computed = [{"key": "acc", "label": "Accepted\nauto", "width": 110},
+            computed = [{"key": "date", "label": "Date", "width": 110},
+                        {"key": "acc", "label": "Accepted\nauto", "width": 110},
                         {"key": "amount", "label": "Line amount\nauto", "width": 150}]
             kw = dict(first_edit_key="rcv", ready=None, on_add=None, on_edit=self._edit_result, allow_add=False,
                       hint=("Enter, for each line, how much " + ("the company received" if self.kind == "sales" else "we received")
@@ -448,7 +456,7 @@ class OrderSheetPage(QWidget):
                 acc = f"{a:,.2f}".rstrip("0").rstrip(".")
                 if l.get("rcv_price") is not None:
                     amount = money(a * l["rcv_price"])
-            comp = {"total": money(self._line_total(l)), "acc": acc, "amount": amount}
+            comp = {"date": self._line_date(), "total": money(self._line_total(l)), "acc": acc, "amount": amount}
             rows.append({"id": i, "cells": cells, "computed": comp,
                          "tip": ""})
         totals: Dict[str, str] = {}
@@ -478,10 +486,26 @@ class OrderSheetPage(QWidget):
         self.changed.emit()
 
     # ---------------------------------------------------------------- draft editing
+    def _find_product_id(self, text: str):
+        """The product a cell's text means: the exact list entry, or - typed by hand - its name / SKU in any
+        capitals, or a part of it that only one product has ('paddy' -> 'Paddy Rice  (CROP-PADDY)')."""
+        t = (text or "").strip()
+        if not t:
+            return None
+        if t in self.labels:
+            return self.labels[t]
+        low = t.lower()
+        for lab, pid in self.labels.items():
+            p = self.products[pid]
+            if low in (lab.strip().lower(), str(p["name"]).strip().lower(), str(p.get("sku", "")).strip().lower()):
+                return pid
+        part = {pid for lab, pid in self.labels.items() if low in lab.lower()}
+        return next(iter(part)) if len(part) == 1 else None
+
     def _product(self, label: str) -> Dict[str, Any]:
-        pid = self.labels.get((label or "").strip())
+        pid = self._find_product_id(label)
         if pid is None:
-            raise ValueError("Pick the product from the list.")
+            raise ValueError("Pick the product from the list (or type its name).")
         return self.products[pid]
 
     def _ready_line(self, v: Dict[str, Any]) -> str:
