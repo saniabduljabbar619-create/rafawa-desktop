@@ -7,6 +7,9 @@ An order as a sheet - Sales Order or Purchase Order, one screen for the whole li
     Order lines tab   type the lines into the grid (draft); enter what the other side actually received,
                       rejected and the price (on the road); read the final figures (confirmed)
     Payments tab      type a payment into the last row; remove = void (with a reason)
+    Money tab         cash they gave us / we gave them, outside the order price; can be applied to the order
+    Expenses tab      what we paid for this order (driver, fuel, food ...), charged to the partner or our own cost,
+                      with the repayments they make
     History tab       who did what, and when, including payments
 
 Stage actions sit in the toolbar (Dispatch / Mark in transit, Fill from order, Confirm delivery, Revert,
@@ -24,6 +27,7 @@ from PySide2.QtWidgets import (
     QTabBar, QVBoxLayout, QWidget,
 )
 
+from database.services.order_money_service import EXPENSE_CATEGORIES, OrderMoneyService
 from database.services.order_sheet_service import REVIEW_CATEGORIES, OrderSheetService, estimate
 from shared.auth.permissions import PermissionDenied
 from shared.uix.widgets.cards import avatar, chip, money
@@ -38,6 +42,8 @@ STAGES = {
 STATUS_TEXT = {"draft": "Draft", "in_transit": "On the road", "confirmed": "Confirmed", "cancelled": "Cancelled"}
 STATUS_TONE = {"draft": "grey", "in_transit": "blue", "confirmed": "green", "cancelled": "red"}
 METHOD_OPTIONS = ["Cash", "Transfer", "POS", "Cheque"]
+MONEY_WAYS = ["They gave us", "We gave them"]
+EXPENSE_CHARGE = ["Charge to partner", "Our cost"]
 WORDS = {
     "sales": {"partner": "Company", "go": "Dispatch", "go_done": "Dispatched", "rcv": "Company received",
               "price": "Company price (₦)", "confirm": "Confirm delivery", "ordered": "Dispatched"},
@@ -177,10 +183,16 @@ class OrderSheetPage(QWidget):
         self.slot_pay = QWidget()
         self.slot_pay.setLayout(QVBoxLayout())
         self.slot_pay.layout().setContentsMargins(0, 0, 0, 0)
+        self.slot_money = QWidget()
+        self.slot_money.setLayout(QVBoxLayout())
+        self.slot_money.layout().setContentsMargins(0, 0, 0, 0)
+        self.slot_exp = QWidget()
+        self.slot_exp.setLayout(QVBoxLayout())
+        self.slot_exp.layout().setContentsMargins(0, 0, 0, 0)
         self.slot_hist = QWidget()
         self.slot_hist.setLayout(QVBoxLayout())
         self.slot_hist.layout().setContentsMargins(0, 0, 0, 0)
-        for s in (self.slot_lines, self.slot_pay, self.slot_hist):
+        for s in (self.slot_lines, self.slot_pay, self.slot_money, self.slot_exp, self.slot_hist):
             self.stack.addWidget(s)
 
         tabs = QHBoxLayout()
@@ -190,7 +202,7 @@ class OrderSheetPage(QWidget):
         self.tabs.setExpanding(False)
         self.tabs.setDrawBase(False)
         self.tabs.setElideMode(Qt.ElideNone)
-        for text in ("Order lines", "Payments", "History"):
+        for text in ("Order lines", "Payments", "Money", "Expenses", "History"):
             self.tabs.addTab(text)
         tabs.addWidget(self.tabs)
         tabs.addStretch(1)
@@ -211,6 +223,8 @@ class OrderSheetPage(QWidget):
         self.notes.editingFinished.connect(self._header_changed)
         self.grid: SheetGrid = None
         self.pay_grid: SheetGrid = None
+        self.money_grid: SheetGrid = None
+        self.exp_grid: SheetGrid = None
 
     # ================================================================== state
     @property
@@ -237,6 +251,8 @@ class OrderSheetPage(QWidget):
         self._render_buttons()
         self._build_lines_grid()
         self._build_pay_grid()
+        self._build_money_grid()
+        self._build_exp_grid()
         self._build_history()
 
     # ================================================================== header
@@ -716,6 +732,184 @@ class OrderSheetPage(QWidget):
 
     def _void_pay(self, pay_id: int, reason: str) -> None:
         OrderSheetService.void_payment(pay_id, reason)
+
+    # ================================================================== money given / received
+    def _tab_with_buttons(self, grid: SheetGrid, *buttons: QPushButton) -> QWidget:
+        holder = QWidget()
+        lay = QVBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        if buttons:
+            row = QHBoxLayout()
+            for b in buttons:
+                row.addWidget(b)
+            row.addStretch(1)
+            lay.addLayout(row)
+        grid.setMinimumHeight(260)                # always usable; the screen scrolls if the window is short
+        lay.addWidget(grid, 1)
+        return holder
+
+    def _build_money_grid(self) -> None:
+        d = self.d
+        can = bool(d) and d["status"] != "cancelled"
+        cols = [
+            {"key": "date", "label": "Date", "type": "date", "width": 110, "readonly": True},
+            {"key": "direction", "label": "Which way", "type": "choice", "options": MONEY_WAYS, "width": 150},
+            {"key": "amount", "label": "Amount (₦)", "type": "money", "width": 150},
+            {"key": "method", "label": "How", "type": "choice", "options": METHOD_OPTIONS, "width": 110},
+            {"key": "note", "label": "Note", "type": "text", "width": 300, "stretch": True},
+            {"key": "by", "label": "By", "type": "text", "width": 110, "readonly": True},
+        ]
+        rows = []
+        entries = OrderMoneyService.list_money(self.kind, order_id=self.order_id) if d else []
+        for m in entries:
+            voided = m["status"] == "voided"
+            rows.append({"id": m["id"], "removed": voided, "locked": True,
+                         "cells": {"date": m["date"].isoformat() if m["date"] else "",
+                                   "direction": MONEY_WAYS[0] if m["direction"] == "in" else MONEY_WAYS[1],
+                                   "amount": m["amount"], "method": m["method"].title(), "note": m["note"],
+                                   "by": m["by"]},
+                         "computed": {"state": "Applied to the order" if m["status"] == "applied" else ""},
+                         "tip": ("Voided: " + m["void_reason"]) if voided else ""})
+        live = [m for m in entries if m["status"] != "voided"]
+        net = sum(m["amount"] if m["direction"] == "in" else -m["amount"] for m in live)
+        hint = ("Cash they gave us, or we gave them, on this order - outside the order price and not part of the "
+                "cash drawer. Type it in the last row. “Apply to the order's payments” turns a row into a normal "
+                "payment (" + ("money they gave us" if self.kind == "sales" else "money we gave them") + "). "
+                "Remove a row to void it - a reason is required.") if can else (
+            "Save the order first." if not d else "This order was cancelled.")
+        grid = SheetGrid(columns=cols, computed=[{"key": "state", "label": "Status", "width": 170}],
+                         first_edit_key="amount", placeholder_key="amount",
+                         defaults={"date": date.today().isoformat(), "direction": MONEY_WAYS[0], "method": "Cash"},
+                         ready=self._ready_money, on_add=self._add_money, on_edit=None, on_remove=self._void_money,
+                         reload=self._refresh, hint=hint, allow_add=can, notify=self.say)
+        grid.set_rows(rows, {"amount": f"net {money(net)}"})
+        self.btn_apply_money = QPushButton("Apply selected to this order's payments")
+        self.btn_apply_money.setVisible(can)
+        self.btn_apply_money.clicked.connect(self._apply_money)
+        self._swap(self.slot_money, self._tab_with_buttons(grid, self.btn_apply_money))
+        self.money_grid = grid
+
+    def _ready_money(self, v) -> str:
+        try:
+            a = _num(v.get("amount"))
+        except ValueError:
+            return "The amount must be a number."
+        return "" if a and a > 0 else "Now type the amount."
+
+    def _add_money(self, v) -> None:
+        way = "in" if (v.get("direction") or MONEY_WAYS[0]) == MONEY_WAYS[0] else "out"
+        OrderMoneyService.add_money(self.kind, self.partner_id, way, _num(v.get("amount")), order_id=self.order_id,
+                                    method=(v.get("method") or "Cash").lower(), note=v.get("note", ""))
+
+    def _void_money(self, money_id: int, reason: str) -> None:
+        OrderMoneyService.void_money(money_id, reason)
+
+    def _apply_money(self) -> None:
+        row = None
+        if self.money_grid:
+            tbl = self.money_grid.table
+            r = tbl.currentRow()
+            if r < 0 and tbl.selectedItems():
+                r = tbl.selectedItems()[0].row()
+            row = self.money_grid.rows[r] if 0 <= r < len(self.money_grid.rows) else None
+        if row is None or row.get("removed"):
+            self.say("Click the money row you want to apply first.")
+            return
+        try:
+            OrderMoneyService.apply_to_order(row["id"], self.order_id)
+        except (ValueError, PermissionDenied) as e:
+            self.say(str(e))
+            return
+        self.say("Applied - it is now a payment on this order.", bad=False)
+        self._refresh()
+
+    # ================================================================== expenses for this order
+    def _build_exp_grid(self) -> None:
+        d = self.d
+        can = bool(d) and d["status"] != "cancelled"
+        default_charge = EXPENSE_CHARGE[0] if self.kind == "purchase" else EXPENSE_CHARGE[1]
+        cols = [
+            {"key": "date", "label": "Date", "type": "date", "width": 110, "readonly": True},
+            {"key": "category", "label": "What for", "type": "choice", "editable": True,
+             "options": EXPENSE_CATEGORIES, "width": 150},
+            {"key": "description", "label": "Details", "type": "text", "width": 240, "stretch": True},
+            {"key": "amount", "label": "Amount (₦)", "type": "money", "width": 140},
+            {"key": "paid_to", "label": "Paid to", "type": "text", "width": 130},
+            {"key": "charge", "label": "Charge", "type": "choice", "options": EXPENSE_CHARGE, "width": 160},
+            {"key": "method", "label": "How", "type": "choice", "options": METHOD_OPTIONS, "width": 100},
+            {"key": "by", "label": "By", "type": "text", "width": 100, "readonly": True},
+        ]
+        rows = []
+        exps = OrderMoneyService.list_expenses(self.kind, order_id=self.order_id) if d else []
+        for e in exps:
+            voided = e["status"] == "voided"
+            rows.append({"id": e["id"], "removed": voided, "locked": True,
+                         "cells": {"date": e["date"].isoformat() if e["date"] else "", "category": e["category"],
+                                   "description": e["description"], "amount": e["amount"], "paid_to": e["paid_to"],
+                                   "charge": EXPENSE_CHARGE[0] if e["recoverable"] else EXPENSE_CHARGE[1],
+                                   "method": e["method"].title(), "by": e["by"]},
+                         "computed": {"back": money(e["recovered"]) if e["recoverable"] and not voided else "",
+                                      "left": (money(e["left"]) if e["recoverable"] and not voided else
+                                               ("" if voided else "our cost"))},
+                         "tip": ("Voided: " + e["void_reason"]) if voided else e["no"]})
+        live = [e for e in exps if e["status"] != "voided"]
+        totals = {"amount": money(sum(e["amount"] for e in live)),
+                  "back": money(sum(e["recovered"] for e in live)), "left": money(sum(e["left"] for e in live))}
+        hint = ("What we paid for this order - the driver, fuel, food ... Type it in the last row. “Charge to "
+                "partner” means they will pay us back (it is not part of the order value); “Our cost” stays ours. "
+                "Use Record repayment when they pay some back. Remove a row to void it - a reason is required."
+                ) if can else ("Save the order first." if not d else "This order was cancelled.")
+        grid = SheetGrid(columns=cols, computed=[{"key": "back", "label": "Paid back", "width": 120},
+                                                 {"key": "left", "label": "Still owed", "width": 120}],
+                         first_edit_key="category", placeholder_key="category",
+                         defaults={"date": date.today().isoformat(), "category": EXPENSE_CATEGORIES[0],
+                                   "charge": default_charge, "method": "Cash"},
+                         ready=self._ready_expense, on_add=self._add_expense, on_edit=None,
+                         on_remove=self._void_expense, reload=self._refresh, hint=hint, allow_add=can,
+                         notify=self.say)
+        grid.set_rows(rows, totals)
+        self.btn_repay = QPushButton("Record repayment…")
+        self.btn_repay.setVisible(can)
+        self.btn_repay.clicked.connect(self._repay)
+        self._swap(self.slot_exp, self._tab_with_buttons(grid, self.btn_repay))
+        self.exp_grid = grid
+
+    def _ready_expense(self, v) -> str:
+        try:
+            a = _num(v.get("amount"))
+        except ValueError:
+            return "The amount must be a number."
+        return "" if a and a > 0 else "Now type the amount."
+
+    def _add_expense(self, v) -> None:
+        default_charge = EXPENSE_CHARGE[0] if self.kind == "purchase" else EXPENSE_CHARGE[1]
+        OrderMoneyService.add_expense(
+            self.kind, self.order_id, v.get("category") or EXPENSE_CATEGORIES[0], _num(v.get("amount")),
+            v.get("description", ""), recoverable=(v.get("charge") or default_charge) == EXPENSE_CHARGE[0],
+            paid_to=v.get("paid_to", ""), method=(v.get("method") or "Cash").lower())
+
+    def _void_expense(self, expense_id: int, reason: str) -> None:
+        OrderMoneyService.void_expense(expense_id, reason)
+
+    def _repay(self) -> None:
+        from apps.product_management_app.features.orders.dialogs.repayment_dialog import RepaymentDialog
+        owed = sum(e["left"] for e in OrderMoneyService.list_expenses(self.kind, order_id=self.order_id)
+                   if e["status"] == "active")
+        if owed <= 0.005:
+            self.say("Nothing is owed back on this order.", bad=False)
+            return
+        dlg = RepaymentDialog(owed, self, who=self.partner.get("name", "They"))
+        if dlg.exec_() != dlg.Accepted or not dlg.values:
+            return
+        try:
+            OrderMoneyService.record_recovery(dlg.values["amount"], kind=self.kind, order_id=self.order_id,
+                                              method=dlg.values["method"], note=dlg.values["note"])
+        except (ValueError, PermissionDenied) as e:
+            self.say(str(e))
+            return
+        self.say("Repayment recorded.", bad=False)
+        self._refresh()
 
     # ================================================================== history
     def _build_history(self) -> None:

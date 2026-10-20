@@ -28,6 +28,7 @@ from .ledger_settlement_marker import LedgerSettlementMarker    # "everything se
 from .driver import Driver                                      # reusable driver record for Sales/Purchase Order dispatch
 from .company import Company                                     # Sales Order buyer - never a customer, isolated from Party
 from .order_payment import OrderPayment                          # shared payment table for Sales/Purchase Orders
+from .order_money import OrderMoney, OrderExpense, OrderExpenseRecovery   # money given/received + per-order expenses
 from .purchase_order_supplier import PurchaseOrderSupplier        # PO supplier - isolated from Party, mirroring Company
 from .purchase_order import PurchaseOrder                         # Purchase Order header
 from .purchase_order_item import PurchaseOrderItem                 # Purchase Order line items
