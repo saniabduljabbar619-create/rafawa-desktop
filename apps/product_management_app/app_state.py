@@ -127,6 +127,7 @@ class AppState:
             rows = (
                 s.query(Party)
                 .filter(Party.is_customer == True)  # noqa: E712
+                .filter(Party.party_type != "walkin")            # a walk-in is never a registered customer
                 .filter(Party.is_active == True)  # noqa: E712
                 .order_by(Party.id.desc())
                 .all()

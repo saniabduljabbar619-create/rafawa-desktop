@@ -57,7 +57,9 @@ class WeigherTicketsView(QWidget):
         self.btn_edit.setObjectName("PrimaryButton")
         self.btn_remove = QPushButton("Remove")
         self.btn_remove.setProperty("role", "danger")
-        for b in (self.btn_edit, self.btn_remove, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
+        self.btn_move = QPushButton("Change customer")
+        self.btn_move.setToolTip("Weighed for the wrong person? Move the whole weighing to the right one")
+        for b in (self.btn_edit, self.btn_move, self.btn_remove, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -72,6 +74,7 @@ class WeigherTicketsView(QWidget):
         self.btn_print_pay.clicked.connect(lambda: self.print_selected("payment"))
         self.btn_edit.clicked.connect(self.edit_selected)
         self.btn_remove.clicked.connect(self.remove_selected)
+        self.btn_move.clicked.connect(self.move_selected)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit_selected())
         self.table.itemSelectionChanged.connect(self._buttons)
         self.refresh()
@@ -115,6 +118,7 @@ class WeigherTicketsView(QWidget):
         ok = bool(t and t["status"] in EDITABLE)
         self.btn_edit.setEnabled(ok)
         self.btn_remove.setEnabled(ok)
+        self.btn_move.setEnabled(ok)
         printable = bool(t and t["status"] != "open")
         self.btn_print.setEnabled(printable)
         self.btn_print_value.setEnabled(printable)
@@ -130,6 +134,16 @@ class WeigherTicketsView(QWidget):
             WeighTicketReviewDialog)
         WeighTicketReviewDialog(tid, parent=self, mode="weigher").exec_()
         self.refresh()
+
+    def move_selected(self):
+        """Weighed for the wrong person: move the whole weighing to someone else."""
+        tid, t = self._selected()
+        if not tid:
+            QMessageBox.information(self, "Change customer", "Select a weighing first.")
+            return
+        from apps.product_management_app.features.weigher.dialogs.reassign_dialog import move_weighing
+        if move_weighing(self, tid):
+            self.refresh()
 
     def remove_selected(self):
         tid, t = self._selected()

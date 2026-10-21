@@ -141,6 +141,8 @@ class WeighTicketReviewDialog(QDialog):
         btns.addWidget(self.btn_print_value)
         self.btn_print_pay = QPushButton("Print Payment Receipt")
         btns.addWidget(self.btn_print_pay)
+        self.btn_move = QPushButton("Change customer")
+        btns.addWidget(self.btn_move)
         btns.addStretch(1)
         btns.addWidget(self.btn_close)
         btns.addWidget(self.btn_finalize)
@@ -155,6 +157,7 @@ class WeighTicketReviewDialog(QDialog):
         self.btn_print.clicked.connect(lambda: self._print_slip("weighing"))
         self.btn_print_value.clicked.connect(lambda: self._print_slip("value"))
         self.btn_print_pay.clicked.connect(lambda: self._print_slip("payment"))
+        self.btn_move.clicked.connect(self._move)
         self.btn_close.clicked.connect(self.reject)
 
         self._active_line = 0
@@ -188,6 +191,9 @@ class WeighTicketReviewDialog(QDialog):
         bits = [t["ticket_no"], f"weighed by {t['weigher_name']}",
                 when.strftime("%Y-%m-%d %H:%M") if when else "", t["party_phone"]]
         self.lbl_meta.setText("   -   ".join(b for b in bits if b))
+        from shared.auth.permissions import current_role
+        self.btn_move.setEnabled(t["status"] in ("open", "submitted")
+                                 or (t["status"] == "finalized" and current_role() in ("admin", "pm")))
         while self.status_holder.count():
             w = self.status_holder.takeAt(0).widget()
             if w:
@@ -406,6 +412,11 @@ class WeighTicketReviewDialog(QDialog):
             QMessageBox.warning(self, "Cancel Ticket", str(e))
             return
         self.accept()
+
+    def _move(self):
+        from apps.product_management_app.features.weigher.dialogs.reassign_dialog import move_weighing
+        if move_weighing(self, self.ticket_id):
+            self.reload(self._active_line)
 
     def _print_slip(self, option: str = "weighing"):
         try:
