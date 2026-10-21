@@ -437,3 +437,81 @@ def test_walk_ins_met_at_the_till_get_their_own_WKN_id_and_are_found_by_it():
     assert [w["code"] for w in WalkinService.search("ali")] == ["WKN-00001", "WKN-00002", "WKN-00003"]
     assert [w["name"] for w in WalkinService.search("wkn-00002")] == ["Ali"]
     assert W.new_walkin("Musa")["code"] == "WT-WKN-00001"           # the weighing series is separate
+
+
+def test_walk_ins_never_appear_in_the_suppliers_or_customers_lists():
+    from apps.product_management_app.app_state import state
+    from database.services.supplier_profile_service import SupplierProfileService
+    res = _walkin_purchase("Musa Kano")
+    with get_session() as s:
+        p = s.get(Party, res["party_id"])
+        p.is_supplier = p.is_customer = True                    # even if a flag was set wrongly
+        s.commit()
+    assert "Musa Kano" not in [x["name"] for x in SupplierProfileService.list_all()]
+    assert "Musa Kano" not in [x["name"] for x in SupplierProfileService.active_suppliers()]
+    state._load_customers_from_db()
+    assert all(c.full_name != "Musa Kano" for c in state.customers)
+    as_role("weigher", WEIGHER)
+    assert all(x["name"] != "Musa Kano" for x in W.search_parties("", customers_only=False))
+
+
+def _ticket_for(party_id, kg=100, price=450, role="customer", submit=True):
+    as_role("weigher", WEIGHER)
+    tid = W.create_ticket(party_id, role)
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, kg)
+    if submit:
+        _submit(tid, line, price=price)
+    return tid
+
+
+def test_a_weighing_can_be_moved_to_another_customer_or_a_new_walk_in_before_finalizing():
+    tid = _ticket_for(CUSTOMER_ID)                                  # weighed for the wrong customer
+    t = W.reassign_ticket(tid, new_party_id=SUPPLIER_ID, reason="wrong man")
+    assert t["party_id"] == SUPPLIER_ID and t["party_role"] == "supplier" and "moved from Customer One" in t["notes"]
+    assert "wrong man" in t["notes"] and t["total_kg"] == 100       # every product weighed comes along
+    t = W.reassign_ticket(tid, new_walkin_name="Ladi Bello", new_walkin_phone="0803")
+    assert t["party_name"] == "Ladi Bello" and t["party_code"] == "WT-WKN-00001" and t["party_role"] == "customer"
+    with pytest.raises(ValueError):
+        W.reassign_ticket(tid, new_party_id=t["party_id"])          # already on him
+    with pytest.raises(ValueError):
+        W.reassign_ticket(tid)                                      # says nothing about who
+    from shared.config.constants import WALKIN_PARTY_ID
+    with pytest.raises(ValueError):
+        W.reassign_ticket(tid, new_party_id=WALKIN_PARTY_ID)        # not the shared account
+    as_role("cashier", CASHIER)
+    res = W.finalize_ticket(tid)                                    # finalizes under the new person
+    assert res["party_id"] == t["party_id"]
+
+
+def test_a_weigher_can_only_move_their_own_tickets():
+    tid = _ticket_for(CUSTOMER_ID)
+    as_role("weigher", WEIGHER_2)
+    with pytest.raises(PermissionDenied):
+        W.reassign_ticket(tid, new_party_id=SUPPLIER_ID)
+    as_role("cashier", CASHIER)
+    assert W.reassign_ticket(tid, new_party_id=SUPPLIER_ID)["party_id"] == SUPPLIER_ID      # a cashier may
+
+
+def test_a_finalized_weighing_moves_with_its_purchase_only_for_an_admin_and_while_nothing_is_paid():
+    from database.models.purchase import Purchase
+    from database.models.stock_movement import StockMovement
+    from database.services.payment_service import PaymentService
+    tid = _ticket_for(CUSTOMER_ID)
+    as_role("cashier", CASHIER)
+    res = W.finalize_ticket(tid)
+    with pytest.raises(PermissionDenied):
+        W.reassign_ticket(tid, new_walkin_name="Ladi")              # a cashier cannot, once it is a purchase
+    as_role("admin", ADMIN_ID)
+    pay = PaymentService.record_purchase_payment(purchase_id=res["purchase_id"], party_id=CUSTOMER_ID, amount=1000,
+                                                 created_by_user_id=ADMIN_ID, method="manual", notes="")
+    with pytest.raises(ValueError):
+        W.reassign_ticket(tid, new_walkin_name="Ladi")              # paid: void that first
+    PaymentService.void_payment(pay, ADMIN_ID, "wrong person")
+    t = W.reassign_ticket(tid, new_walkin_name="Ladi", reason="it was Ladi")
+    with get_session() as s:
+        pur = s.get(Purchase, res["purchase_id"])
+        assert pur.supplier_party_id == t["party_id"] and pur.walkin_name is None
+        moved = s.query(StockMovement).filter(StockMovement.reference_type == "purchase_item",
+                                              StockMovement.party_id == t["party_id"]).count()
+        assert moved >= 1

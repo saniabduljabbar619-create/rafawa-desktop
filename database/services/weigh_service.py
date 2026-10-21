@@ -128,7 +128,7 @@ class WeighService:
         """Customers and suppliers (customers only when asked), matched on name or phone."""
         q = (q or "").strip().lower()
         with get_session() as s:
-            query = s.query(Party).filter(Party.is_active.is_(True),
+            query = s.query(Party).filter(Party.is_active.is_(True), Party.party_type != "walkin",
                                           Party.is_customer.is_(True) if customers_only
                                           else or_(Party.is_customer.is_(True), Party.is_supplier.is_(True)))
             if q:
@@ -413,6 +413,103 @@ class WeighService:
                                 f"{t.ticket_no} cancelled" + (f": {t.cancel_reason}" if t.cancel_reason else ""),
                                 session=s)
             s.commit()
+
+    # ------------------------------------------------------------------ routing: weighed for the wrong person
+    @staticmethod
+    @require_role(*ANY_STAFF)
+    def reassign_ticket(ticket_id: int, new_party_id: Optional[int] = None, new_walkin_name: str = "",
+                        new_walkin_phone: str = "", reason: str = "") -> Dict[str, Any]:
+        """
+        Everything on this weighing belongs to someone else: move the whole ticket (every product weighed) to another
+        customer / supplier / walk-in - an existing one, or a brand-new walk-in made from a name.
+
+        Before it is finalized this just changes whose ticket it is. After finalizing, only an admin may do it, and only
+        while nothing has been paid, returned or set off against the purchase (void those first): the purchase and its
+        stock record move to the new person. The move is written to the audit log and the ticket notes.
+        """
+        from database.models.advance_allocations import AdvanceAllocation
+        from database.models.document_offset import DocumentOffset
+        from database.models.payment import Payment
+        from database.models.purchase import Purchase
+        from database.models.purchase_item import PurchaseItem
+        from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+        from database.models.purchase_return import PurchaseReturn
+        from database.models.stock_movement import StockMovement
+        from database.services.walkin_service import WalkinService
+
+        with get_session() as s:
+            t = WeighService._load_ticket(s, ticket_id, lock=True)
+            if t.status == "cancelled":
+                raise ValueError("This ticket was removed - there is nothing to move.")
+            if _is_weigher() and int(t.weigher_user_id) != _uid():
+                raise PermissionDenied("Only your own tickets can be moved.")
+            if t.status == "finalized":
+                if current_role() not in ("admin", "pm"):
+                    raise PermissionDenied("Once it is finalized only an admin can move a weighing to another person.")
+            old = s.get(Party, int(t.party_id))
+            old_label = (old.display_name + (f" ({old.walkin_code})" if old and old.walkin_code else "")) if old else "?"
+
+            # ---- who it goes to
+            if new_party_id:
+                new = s.get(Party, int(new_party_id))
+                if new is None or not new.is_active or is_shared_walkin(new.id, s):
+                    raise ValueError("Pick a customer, supplier or walk-in to move it to.")
+                if int(new.id) == int(t.party_id):
+                    raise ValueError("That is the same person it is already on.")
+            elif (new_walkin_name or "").strip():
+                made = WalkinService.create(new_walkin_name, new_walkin_phone, source="weighing", session=s)
+                new = s.get(Party, int(made["id"]))
+                AuditService.record("party.register", "party", int(new.id),
+                                    f"Walk-in {new.walkin_code} {new.display_name!r} registered at the scale", session=s)
+            else:
+                raise ValueError("Pick who it should move to, or type a walk-in's name.")
+            new_label = new.display_name + (f" ({new.walkin_code})" if new.walkin_code else "")
+
+            # ---- a finalized weighing is a purchase: only while nothing hangs on it
+            if t.status == "finalized" and t.purchase_id:
+                pid = int(t.purchase_id)
+                item_ids = [int(i) for (i,) in s.query(PurchaseItem.id).filter(PurchaseItem.purchase_id == pid)]
+                busy = []
+                if s.query(Payment.id).filter(Payment.entity_type == "purchase", Payment.entity_id == pid,
+                                              Payment.status != "voided").first():
+                    busy.append("a payment")
+                if s.query(AdvanceAllocation.id).filter(AdvanceAllocation.entity_type == "purchase",
+                                                        AdvanceAllocation.entity_id == pid).first():
+                    busy.append("an advance applied to it")
+                if s.query(PurchaseReturn.id).filter(PurchaseReturn.purchase_id == pid).first():
+                    busy.append("a return")
+                if s.query(PurchasePriceAdjustment.id).filter(PurchasePriceAdjustment.purchase_id == pid).first():
+                    busy.append("a price adjustment")
+                if s.query(DocumentOffset.id).filter(DocumentOffset.purchase_id == pid).first():
+                    busy.append("a set-off")
+                if busy:
+                    raise ValueError(f"The purchase already has {', '.join(busy)}. Void or reverse that first, "
+                                     "then move the weighing.")
+                pur = s.get(Purchase, pid)
+                pur.supplier_party_id, pur.walkin_name = int(new.id), None
+                if item_ids:
+                    s.query(StockMovement).filter(StockMovement.reference_type == "purchase_item",
+                                                  StockMovement.reference_id.in_(item_ids)) \
+                        .update({StockMovement.party_id: int(new.id)}, synchronize_session=False)
+                if t.party_role == "supplier" and new.party_type != "walkin" and not new.is_supplier:
+                    new.is_supplier = True
+
+            # ---- the ticket itself
+            t.party_id, t.walkin_name = int(new.id), None
+            if new.party_type == "walkin":
+                t.party_role = "customer"
+            elif new.is_supplier and not new.is_customer:
+                t.party_role = "supplier"
+            elif new.is_customer and not new.is_supplier:
+                t.party_role = "customer"
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            line = f"[{stamp}] moved from {old_label} to {new_label}" + (f": {reason.strip()}" if (reason or "").strip() else "")
+            t.notes = ((t.notes + "\n") if t.notes else "") + line
+            AuditService.record("weigh.reassign", "weigh_ticket", int(t.id), f"{t.ticket_no} {line[line.index(']') + 2:]}",
+                                session=s)
+            s.commit()
+            tid = int(t.id)
+        return WeighService.get_ticket(tid)
 
     # ------------------------------------------------------------------ reading
     @staticmethod

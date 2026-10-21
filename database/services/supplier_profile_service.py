@@ -160,6 +160,7 @@ class SupplierProfileService:
             rows = s.execute(
                 select(Party)
                 .where(Party.is_supplier == True)  # noqa: E712
+                .where(Party.party_type != "walkin")               # walk-ins are never suppliers
                 .where(Party.is_customer == False)  # noqa: E712
                 .where(Party.is_active == True)  # noqa: E712
                 .order_by(Party.display_name)
@@ -183,6 +184,7 @@ class SupplierProfileService:
             rows = s.execute(
                 select(Party)
                 .where(Party.is_supplier == True)  # noqa: E712
+                .where(Party.party_type != "walkin")
                 .order_by(Party.display_name)
             ).scalars().all()
             for p in rows:
@@ -211,6 +213,7 @@ class SupplierProfileService:
         with get_session() as s:
             parties = s.execute(
                 select(Party).where(Party.is_supplier == True)  # noqa: E712
+                .where(Party.party_type != "walkin")
             ).scalars().all()
 
             last_at_by_pid: Dict[int, Any] = {}

@@ -78,9 +78,9 @@ def upgrade() -> None:
             {"s": SHARED, "n": n}).scalar()
         bind.execute(sa.text(
             "INSERT INTO parties (party_type, display_name, address, is_active, is_customer, is_supplier, walkin_code, "
-            "created_at, updated_at) VALUES ('walkin', :n, 'Walk-in Client', 1, :c, :sp, :code, "
+            "created_at, updated_at) VALUES ('walkin', :n, 'Walk-in Client', 1, 0, 0, :code, "
             "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"),
-            {"n": n, "c": 1 if buys else 0, "sp": 1 if sups else 0, "code": code})
+            {"n": n, "code": code})
         new_id = bind.execute(sa.text("SELECT id FROM parties WHERE walkin_code = :c"), {"c": code}).scalar()
         p = {"s": SHARED, "n": n, "new": new_id}
         bind.execute(sa.text("UPDATE purchases SET supplier_party_id = :new WHERE supplier_party_id = :s "

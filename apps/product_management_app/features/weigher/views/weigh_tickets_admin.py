@@ -57,8 +57,9 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print = QPushButton("Print Weighing Receipt")
         self.btn_print_value = QPushButton("Print Value Receipt")
         self.btn_print_pay = QPushButton("Print Payment Receipt")
+        self.btn_move = QPushButton("Change customer")
         self.btn_refresh = QPushButton("Refresh")
-        for b in (self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
+        for b in (self.btn_move, self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -76,6 +77,7 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_value.clicked.connect(lambda: self.print_weigh("value"))
         self.btn_print_pay.clicked.connect(lambda: self.print_weigh("payment"))
         self.btn_print_purchase.clicked.connect(self.print_purchase)
+        self.btn_move.clicked.connect(self.move_selected)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self.open_selected())
         self.refresh()
@@ -110,6 +112,19 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_value.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_pay.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_purchase.setEnabled(bool(t and t.get("purchase_id")))
+        from shared.auth.permissions import current_role
+        self.btn_move.setEnabled(bool(t and (t["status"] in ("open", "submitted")
+                                             or (t["status"] == "finalized" and current_role() in ("admin", "pm")))))
+
+    def move_selected(self):
+        """Weighed for the wrong person: move the whole weighing to someone else."""
+        tid, _t = self._selected()
+        if not tid:
+            QMessageBox.information(self, "Change customer", "Select a ticket first.")
+            return
+        from apps.product_management_app.features.weigher.dialogs.reassign_dialog import move_weighing
+        if move_weighing(self, tid):
+            self.refresh()
 
     def print_weigh(self, option: str):
         """The weigher's receipt (Option 1 weighing / Option 2 full value) - only when asked for."""

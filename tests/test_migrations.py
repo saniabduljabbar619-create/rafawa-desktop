@@ -25,7 +25,7 @@ def test_fresh_database_gets_full_schema_at_head(tmp_path):
     t = _tables(url)
     assert {"users", "sales", "payments", "audit_logs", "alembic_version",
             "weigh_tickets", "weigh_ticket_lines", "weigh_rounds", "expenses", "document_offsets", "debt_people", "debt_entries", "expenditures", "order_reviews", "debt_payments"} <= t
-    assert "0015" in _alembic(url, "current").stderr + _alembic(url, "current").stdout
+    assert "0016" in _alembic(url, "current").stderr + _alembic(url, "current").stdout
 
 
 def test_existing_installation_is_upgraded_in_place(tmp_path):
@@ -90,6 +90,7 @@ def test_0014_gives_each_walk_in_a_code_and_splits_the_shared_account_by_name(tm
                                  (11, "walkin", "Walk-in")):
             c.execute(sa.text("INSERT INTO parties (id, party_type, display_name) VALUES (:i, :t, :n)"),
                       {"i": pid, "t": ptype, "n": name})
+        c.execute(sa.text("UPDATE parties SET is_supplier = 1, is_customer = 1 WHERE id = 7"))   # wrongly flagged earlier
         # shared account: two different names bought at the till, one weighed name, plus a real customer's sale
         c.execute(sa.text("INSERT INTO sales VALUES (1, 11, 'Musa'), (2, 11, 'Ladi'), (3, 1, NULL)"))
         c.execute(sa.text("INSERT INTO purchases VALUES (1, 11, 'Musa'), (2, 11, 'Sule'), (3, 1, NULL)"))
@@ -116,4 +117,5 @@ def test_0014_gives_each_walk_in_a_code_and_splits_the_shared_account_by_name(tm
         assert q("SELECT party_id FROM purchase_returns") == [(sule,)]
         assert q("SELECT party_id FROM sale_returns") == [(musa,)]
         assert q("SELECT COUNT(*) FROM parties WHERE id = 11")[0][0] == 1  # the shared account itself stays
+        assert q("SELECT COUNT(*) FROM parties WHERE party_type = 'walkin' AND (is_customer = 1 OR is_supplier = 1)")[0][0] == 0
     assert _alembic(url, "upgrade", "head").returncode == 0                # idempotent: nothing left to split

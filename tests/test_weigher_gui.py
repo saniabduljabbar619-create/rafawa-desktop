@@ -684,3 +684,43 @@ def test_a_walk_in_profile_takes_payment_returns_and_shows_pending_weighings(qap
     assert "WT-WKN-00001" in rv.customer_cb.currentText()
 
 
+
+
+def test_change_customer_moves_a_weighing_from_the_finalize_list_and_the_review_dialog(qapp, boxes, monkeypatch):
+    from apps.product_management_app.features.weigher.dialogs import reassign_dialog as rdlg
+    from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
+    from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
+    from tests.conftest import CUSTOMER_ID, SUPPLIER_ID
+    as_role("weigher", CASHIER_A)
+    tid = W.create_ticket(CUSTOMER_ID, "customer")                  # started on the wrong customer
+    line = W.add_line(tid, CROP_ID)
+    W.record_round(line, 2, 100)
+    W.set_line_price(line, 450)
+    W.submit_ticket(tid, "weighing")
+    v = WeigherTicketsView()
+    v.table.setCurrentCell(0, 0)
+    assert v.btn_move.isEnabled()
+
+    def pick_supplier(self):                                        # the dialog: pick a person from the list
+        self.search.setText("Supplier One")
+        self.found.setCurrentRow(0)
+        self.why.setText("wrong man")
+        self._accept()
+        return self.Accepted
+    monkeypatch.setattr(rdlg.ReassignDialog, "exec_", pick_supplier)
+    v.btn_move.click()
+    t = W.get_ticket(tid)
+    assert t["party_id"] == SUPPLIER_ID and "wrong man" in t["notes"] and any("Moved to" in m for _k, m in boxes)
+    # and to a brand-new walk-in, from the ticket dialog
+    from apps.product_management_app.features.weigher.dialogs import walkin_pick_dialog as wpd
+
+    def new_walkin(self):
+        self.name.setText("Ladi")
+        self._add()
+        return self.Accepted
+    monkeypatch.setattr(wpd.WalkinPickDialog, "exec_", new_walkin)
+    monkeypatch.setattr(rdlg.ReassignDialog, "exec_", lambda self: (self._pick_walkin(), self._accept(), self.Accepted)[-1])
+    dlg = WeighTicketReviewDialog(tid, mode="weigher")
+    assert dlg.btn_move.isEnabled()
+    dlg.btn_move.click()
+    assert W.get_ticket(tid)["party_name"] == "Ladi" and "Ladi" in dlg.lbl_party.text()
