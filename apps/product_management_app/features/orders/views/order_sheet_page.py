@@ -36,8 +36,8 @@ from apps.product_management_app.features.debt_center.views.people_page import k
 from apps.product_management_app.features.debt_center.views.sheet_grid import SheetGrid
 
 STAGES = {
-    "sales": ["Draft", "Dispatched", "Delivered & confirmed", "Paid"],
-    "purchase": ["Draft", "In transit", "Received & confirmed", "Paid"],
+    "sales": ["1  Draft", "2  On the road", "3  Delivered", "4  Paid"],
+    "purchase": ["1  Draft", "2  On the road", "3  Received", "4  Paid"],
 }
 STATUS_TEXT = {"draft": "Draft", "in_transit": "On the road", "confirmed": "Confirmed", "cancelled": "Cancelled"}
 STATUS_TONE = {"draft": "grey", "in_transit": "blue", "confirmed": "green", "cancelled": "red"}
@@ -46,9 +46,11 @@ MONEY_WAYS = ["They gave us", "We gave them"]
 EXPENSE_CHARGE = ["Charge to partner", "Our cost"]
 WORDS = {
     "sales": {"partner": "Company", "go": "Dispatch", "go_done": "Dispatched", "rcv": "Company received",
-              "price": "Company price (₦)", "confirm": "Confirm delivery", "ordered": "Dispatched"},
+              "price": "Company price (₦)", "confirm": "Confirm delivery", "ordered": "Sent",
+              "plain": "Sales order - we sell to this company"},
     "purchase": {"partner": "Supplier", "go": "Mark in transit", "go_done": "On the road", "rcv": "We received",
-                 "price": "Price paid (₦)", "confirm": "Confirm receipt", "ordered": "Ordered"},
+                 "price": "Price paid (₦)", "confirm": "Confirm receipt", "ordered": "Ordered",
+                 "plain": "Purchase order - we buy from this supplier"},
 }
 
 
@@ -112,21 +114,22 @@ class OrderSheetPage(QWidget):
         self.lbl_next = QLabel("")
         self.lbl_next.setObjectName("dcSub")
         self.lbl_next.setWordWrap(True)
+        self.lbl_next.setStyleSheet("color:#1c2333; font-size:13.5px; font-weight:600;")
         root.addWidget(self.lbl_next)
 
         kp = QHBoxLayout()
         kp.setSpacing(10)
         self.k_value = kpi("Order value", dark=True)
-        self.k_paid = kpi("Paid")
-        self.k_balance = kpi("Balance")
-        self.k_lines = kpi("Lines")
+        self.k_paid = kpi("Paid so far")
+        self.k_balance = kpi("Still to pay" if self.kind == "purchase" else "Still to receive")
+        self.k_lines = kpi("Products")
         for k in (self.k_value, self.k_paid, self.k_balance, self.k_lines):
             kp.addWidget(k, 1)
         root.addLayout(kp)
 
         info = QHBoxLayout()
         info.setSpacing(8)
-        self.lbl_expected = QLabel("Expected delivery")
+        self.lbl_expected = QLabel("Expected delivery (optional)")
         self.lbl_expected.setObjectName("dcSub")
         self.chk_expected = QCheckBox()
         self.expected = QDateEdit(QDate.currentDate())
@@ -202,8 +205,13 @@ class OrderSheetPage(QWidget):
         self.tabs.setExpanding(False)
         self.tabs.setDrawBase(False)
         self.tabs.setElideMode(Qt.ElideNone)
-        for text in ("Order lines", "Payments", "Money", "Expenses", "History"):
+        for text, tip in (("Products", "The products on this order, with their quantity and price"),
+                          ("Payments", "Money that pays this order's price"),
+                          ("Money", "Cash they gave us / we gave them, outside this order's price"),
+                          ("Expenses", "What we paid for this order (driver, fuel, food ...)"),
+                          ("History", "Everything that happened to this order, in order")):
             self.tabs.addTab(text)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
         tabs.addWidget(self.tabs)
         tabs.addStretch(1)
         root.addLayout(tabs)
@@ -270,7 +278,7 @@ class OrderSheetPage(QWidget):
         name = QLabel(f"{title}  -  {self.partner['name']}")
         name.setStyleSheet("font-size:19px; font-weight:800; color:#1c2333;")
         sub = QLabel("  -  ".join(x for x in (self.partner.get("phone"), self.partner.get("address")) if x)
-                     or f"{self.w['partner']} details not set")
+                     or self.w["plain"])
         sub.setObjectName("dcSub")
         box.addWidget(name)
         box.addWidget(sub)
@@ -297,7 +305,8 @@ class OrderSheetPage(QWidget):
         d = self.d
         value = d["total"] if d else estimate(self.kind, self.lines)
         self.k_value.val.setText(money(value))
-        self.k_value.cap.setText("Order value" + (" (estimate)" if (not d or d["estimated"]) else " (final)"))
+        self.k_value.cap.setText("Order value" + (" - not final until delivery is confirmed" if (not d or d["estimated"])
+                                                  else " (final)"))
         self.k_paid.val.setText(money(d["paid"] if d else 0))
         if d and d["balance"] is not None and d["overpaid"] > 0.005:
             self.k_balance.val.setText(money(d["overpaid"]))
@@ -307,7 +316,8 @@ class OrderSheetPage(QWidget):
             self.k_balance.cap.setText("Still to pay" if self.kind == "purchase" else "Still to receive")
         else:
             self.k_balance.val.setText("-")
-            self.k_balance.cap.setText("Balance after confirmation")
+            self.k_balance.cap.setText(("Still to pay" if self.kind == "purchase" else "Still to receive")
+                                       + " - known once delivery is confirmed")
         self.k_lines.val.setText(str(len(self.lines)))
 
     def _render_info(self) -> None:
@@ -340,9 +350,9 @@ class OrderSheetPage(QWidget):
         draft = st in ("new", "draft")
         self.btn_add.setVisible(adm and draft)
         self.btn_remove.setVisible(adm and draft)
-        self.btn_go.setVisible(adm and st == "draft")
+        self.btn_go.setVisible(False)                 # the big button beside the steps does this - one place only
         self.btn_fill.setVisible(st == "in_transit")
-        self.btn_confirm.setVisible(st == "in_transit")
+        self.btn_confirm.setVisible(False)
         self.btn_revert.setVisible(adm and st == "in_transit")
         self.btn_cancel.setVisible(adm and st == "draft")
         self.btn_correct.setVisible(adm and st == "confirmed")
@@ -350,29 +360,36 @@ class OrderSheetPage(QWidget):
 
     # ================================================================== what happens next
     def _render_next(self) -> None:
+        """One plain sentence saying where the order is and the single thing to do next."""
         st, adm, w = self.stage, self.is_admin, self.w
         d = self.d
         if st == "new":
-            text, hint, show = "", "Add the lines below. The order is saved as a draft as soon as the first line is complete.", False
+            text, hint, show = "", "Step 1 of 4 - Add the products below. The order is saved as a draft as soon as the first line is complete.", False
         elif st == "draft":
             show = adm
             text = f"{w['go']}  →"
-            hint = ("A draft can stay as long as you like - review it, add notes, change the lines. When the goods "
+            hint = ("Step 1 of 4 - Draft. Add or change the products below; a draft can stay as long as you like and "
+                    "moves no stock. When the goods "
                     + ("leave the warehouse" if self.kind == "sales" else "are on the road")
                     + f", press {w['go']}.")
         elif st == "in_transit":
             show, text = True, f"{w['confirm']}  →"
-            hint = ("The goods are on the road. When they arrive, enter below how much was "
+            hint = ("Step 2 of 4 - On the road. When the goods arrive, type below how much was "
                     + ("received by the company" if self.kind == "sales" else "received")
-                    + ", what was rejected and the price (or use Fill from order), then " + w["confirm"].lower() + ".")
+                    + ", how much was rejected and the price (or press Fill from order), then press "
+                    + w["confirm"] + ".")
         elif st == "confirmed":
             owing = d and d["balance"] is not None and d["balance"] > 0.005
             show, text = bool(owing), "Record a payment  →"
             over = d["overpaid"] if d else 0
-            hint = ("Delivered and confirmed. " + ("Take a payment in the Payments tab. " if owing else
-                    ("Fully paid. " if not over else f"Overpaid by {money(over)} - void or refund in the Payments tab. "))
-                    + ("Something wrong after delivery (damaged, short, wrong count)? Use Review / correct a line." if adm
-                       else ""))
+            if owing:
+                hint = "Step 3 of 4 - Delivered and confirmed. Record the payment in the Payments tab. "
+            elif over > 0.005:
+                hint = f"Overpaid by {money(over)} - void or refund in the Payments tab. "
+            else:
+                hint = "Step 4 of 4 - Fully paid. "
+            hint += ("Something wrong after delivery (damaged, short, wrong count)? Use Review / correct a line."
+                     if adm else "")
         else:
             show, text, hint = False, "", "This order was cancelled."
         self.btn_next.setVisible(show)
@@ -431,37 +448,36 @@ class OrderSheetPage(QWidget):
                  "options": list(self.labels), "width": 260, "stretch": True,
                  "readonly": not self.is_admin},
                 {"key": "bags", "label": "Bags", "type": "number", "width": 100, "readonly": not self.is_admin},
-                {"key": "kg", "label": "Weight (kg)\ncrops only", "type": "number", "width": 130,
+                {"key": "kg", "label": "Weight (kg)\n(crops)", "type": "number", "width": 130,
                  "readonly": not self.is_admin},
-                {"key": "price", "label": "Price (₦)\nper kg / per bag", "type": "money", "width": 150,
+                {"key": "price", "label": "Price (₦)\nper kg or bag", "type": "money", "width": 150,
                  "readonly": not self.is_admin},
             ]
             computed = [{"key": "date", "label": "Date", "width": 110},
-                        {"key": "total", "label": "Line total\nauto", "width": 160}]
+                        {"key": "total", "label": "Line total\n(worked out)", "width": 160}]
             kw = dict(first_edit_key="product", placeholder_key="product", defaults={},
                       ready=self._ready_line, on_add=self._add_line, on_edit=self._edit_line,
                       on_remove=self._remove_line, allow_add=self.is_admin,
-                      hint="Type in the last row: pick the product, then bags (and kg for crops) and the price - the "
-                           "row saves itself. Click a cell to change it. Right-click a row to remove it. A draft "
-                           "changes no stock until it is " + w["go_done"].lower() + ".")
+                      hint="Type in the last row: the product (pick it or type its name), bags, kg (crops only) and the "
+                           "price - the row saves itself. Click a cell to change it; right-click a row to remove it.")
         else:
             lock = st != "in_transit"
             cols = [
                 {"key": "product", "label": "Product", "type": "text", "width": 260, "stretch": True, "readonly": True},
                 {"key": "unit", "label": "Unit", "type": "text", "width": 60, "readonly": True},
-                {"key": "ordered", "label": f"{w['ordered']}\nqty", "type": "number", "width": 110, "readonly": True},
+                {"key": "ordered", "label": f"{w['ordered']}\n(kg / bags)", "type": "number", "width": 110, "readonly": True},
                 {"key": "oprice", "label": "Order price (₦)", "type": "money", "width": 130, "readonly": True},
-                {"key": "rcv", "label": f"{w['rcv']}\nqty", "type": "number", "width": 160, "readonly": lock},
-                {"key": "rej", "label": "Rejected\nqty", "type": "number", "width": 100, "readonly": lock},
+                {"key": "rcv", "label": f"{w['rcv']}\n(kg / bags)", "type": "number", "width": 160, "readonly": lock},
+                {"key": "rej", "label": "Rejected\n(kg / bags)", "type": "number", "width": 100, "readonly": lock},
                 {"key": "rprice", "label": w["price"], "type": "money", "width": 140, "readonly": lock},
             ]
             computed = [{"key": "date", "label": "Date", "width": 110},
-                        {"key": "acc", "label": "Accepted\nauto", "width": 110},
-                        {"key": "amount", "label": "Line amount\nauto", "width": 150}]
+                        {"key": "acc", "label": "Accepted\n(worked out)", "width": 110},
+                        {"key": "amount", "label": "Line amount\n(worked out)", "width": 150}]
             kw = dict(first_edit_key="rcv", ready=None, on_add=None, on_edit=self._edit_result, allow_add=False,
-                      hint=("Enter, for each line, how much " + ("the company received" if self.kind == "sales" else "we received")
-                            + ", how much was rejected and the price; “Accepted” and the amount work themselves out. "
-                            "Entries are kept as you type - use Confirm when every line is done."
+                      hint=("For each product type how much was " + ("received by the company" if self.kind == "sales" else "received")
+                            + ", how much was rejected and the price. What you type is kept; Accepted and the amount "
+                            "are worked out for you."
                             if not lock else "Final figures. Accepted = received - rejected; amount = accepted x price."))
         rows = []
         for i, l in enumerate(self.lines):
@@ -708,8 +724,8 @@ class OrderSheetPage(QWidget):
         live = sum(p["amount"] for p in (d["payments"] if d else []) if p["status"] != "voided")
         hint = ("Type a payment in the last row (amount and how). " +
                 ("Before the order is confirmed it is kept as an advance and counts once the final price is set. "
-                 if d and d["status"] != "confirmed" else "It cannot be more than the balance. ") +
-                "Remove a row to void it - a reason is required.") if can_pay else (
+                 if d and d["status"] != "confirmed" else "It cannot be more than what is still owed. ") +
+                "Right-click a row to void it (a reason is needed).") if can_pay else (
             "Save the order first - payments can be recorded once it exists." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, first_edit_key="amount", placeholder_key="amount",
                          defaults={"date": date.today().isoformat(), "method": "Cash"},
@@ -773,10 +789,9 @@ class OrderSheetPage(QWidget):
                          "tip": ("Voided: " + m["void_reason"]) if voided else ""})
         live = [m for m in entries if m["status"] != "voided"]
         net = sum(m["amount"] if m["direction"] == "in" else -m["amount"] for m in live)
-        hint = ("Cash they gave us, or we gave them, on this order - outside the order price and not part of the "
-                "cash drawer. Type it in the last row. “Apply to the order's payments” turns a row into a normal "
-                "payment (" + ("money they gave us" if self.kind == "sales" else "money we gave them") + "). "
-                "Remove a row to void it - a reason is required.") if can else (
+        hint = ("Cash that moved between us outside this order's price (not the cash drawer). Type it in the last "
+                "row. Select a row and press Apply to make it a payment on this order ("
+                + ("money they gave us" if self.kind == "sales" else "money we gave them") + ").") if can else (
             "Save the order first." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, computed=[{"key": "state", "label": "Status", "width": 170}],
                          first_edit_key="amount", placeholder_key="amount",
@@ -856,10 +871,8 @@ class OrderSheetPage(QWidget):
         live = [e for e in exps if e["status"] != "voided"]
         totals = {"amount": money(sum(e["amount"] for e in live)),
                   "back": money(sum(e["recovered"] for e in live)), "left": money(sum(e["left"] for e in live))}
-        hint = ("What we paid for this order - the driver, fuel, food ... Type it in the last row. “Charge to "
-                "partner” means they will pay us back (it is not part of the order value); “Our cost” stays ours. "
-                "Use Record repayment when they pay some back. Remove a row to void it - a reason is required."
-                ) if can else ("Save the order first." if not d else "This order was cancelled.")
+        hint = ("What we paid for this order. “Charge to partner” = they pay us back (not part of the order value); "
+                "“Our cost” = ours. Press Record repayment when they pay some back.") if can else ("Save the order first." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, computed=[{"key": "back", "label": "Paid back", "width": 120},
                                                  {"key": "left", "label": "Still owed", "width": 120}],
                          first_edit_key="category", placeholder_key="category",

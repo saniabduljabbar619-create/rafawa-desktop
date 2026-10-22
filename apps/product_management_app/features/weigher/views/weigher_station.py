@@ -875,7 +875,7 @@ class WeigherStationView(QWidget):
 
     def _render_preview(self):
         if getattr(self, "_ticket", None):
-            self.preview.setPlainText(self._slip_text())
+            self.preview.setPlainText(self._slip_text().replace("\x01", ""))
 
     def _to_receipt(self):
         self._refresh_ticket()

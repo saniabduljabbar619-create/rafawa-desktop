@@ -22,11 +22,12 @@ from PySide2.QtWidgets import (
 from database.services.order_hub_service import OrderHubService
 from shared.uix.widgets.cards import KpiCard, Segmented, money, style_table
 
-TABS = [("board", "Tracking board"), ("sales", "Sales Orders"), ("purchase", "Purchase Orders")]
+TABS = [("board", "All orders"), ("sales", "Sales Orders - companies"), ("purchase", "Purchase Orders - suppliers")]
 KIND_FILTER = [("", "All"), ("sales", "Sales"), ("purchase", "Purchase")]
-STATUS_FILTER = [("active", "Active"), ("draft", "Draft"), ("in_transit", "In transit"),
+STATUS_FILTER = [("active", "Not finished"), ("draft", "Draft"), ("in_transit", "On the road"),
                  ("confirmed", "Confirmed"), ("cancelled", "Cancelled"), ("", "All")]
-COLS = ["Type", "Order", "Partner", "Status", "Created", "On the road", "Expected", "Value", "Payment"]
+COLS = ["Type", "Order", "Company / supplier", "Status", "Created", "Days on the road", "Expected", "Value", "Payment"]
+_STATUS_TEXT = {"draft": "Draft", "in_transit": "On the road", "confirmed": "Confirmed", "cancelled": "Cancelled"}
 _STATUS_COLOR = {"draft": "#6b7280", "in_transit": "#1d4ed8", "confirmed": "#047857", "cancelled": "#b91c1c"}
 
 
@@ -51,7 +52,7 @@ class OrdersBoard(QWidget):
         bar.addWidget(self.kind_seg)
         bar.addWidget(self.status_seg)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search order number or partner")
+        self.search.setPlaceholderText("Search an order number or a company / supplier name")
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(34)
         bar.addWidget(self.search, 1)
@@ -71,7 +72,7 @@ class OrdersBoard(QWidget):
         foot = QHBoxLayout()
         self.btn_open = QPushButton("Open")
         self.btn_open.setObjectName("PrimaryButton")
-        self.btn_track = QPushButton("Track history")
+        self.btn_track = QPushButton("Order history")
         self.btn_new_sales = QPushButton("+ New Sales Order")
         self.btn_new_purchase = QPushButton("+ New Purchase Order")
         for b in (self.btn_open, self.btn_track):
@@ -102,7 +103,7 @@ class OrdersBoard(QWidget):
             if r["balance"]:
                 pay += f"  ({money(r['balance'])} due)"
             vals = ["Sales" if r["kind"] == "sales" else "Purchase", r["order_no"], r["partner"],
-                    r["status"].replace("_", " ").title() + ("  - OVERDUE" if r["overdue"] else ""),
+                    _STATUS_TEXT.get(r["status"], r["status"]) + ("  - OVERDUE" if r["overdue"] else ""),
                     _day(r["created_at"]), road, _day(r["expected"]),
                     money(r["value"]) + (" (est.)" if r["estimated"] and r["value"] else ""), pay]
             for c, v in enumerate(vals):
@@ -163,7 +164,9 @@ class OrdersHubView(QWidget):
         titles.setSpacing(0)
         t = QLabel("Orders")
         t.setObjectName("Title")
-        s = QLabel("Sales Orders and Purchase Orders in one place - track every order from draft to delivery")
+        s = QLabel("Every Sales Order (we sell to a company) and Purchase Order (we buy from a supplier), from draft to "
+                   "delivery. To start a new order, open Sales Orders or Purchase Orders and pick the company / supplier.")
+        s.setWordWrap(True)
         s.setStyleSheet("color:#6b7280; font-size:12px;")
         titles.addWidget(t)
         titles.addWidget(s)

@@ -120,7 +120,7 @@ def test_sales_order_whole_life_on_one_sheet(qapp, boxes):
     v = _hub()
     v.open_order("sales", c, None)
     pg = _sheet(v)
-    assert pg.btn_go.isHidden() and not pg.btn_add.isHidden()
+    assert pg.btn_next.isHidden() and not pg.btn_add.isHidden()
     # draft: type the lines into the last row; each saves itself
     kg0, bags0 = stock(CROP_ID)[1], stock(FERT_ID)[0]
     type_cell(pg.grid, "product", MAIZE)
@@ -138,10 +138,10 @@ def test_sales_order_whole_life_on_one_sheet(qapp, boxes):
     assert O.detail("sales", pg.order_id)["lines"][0]["price"] == 120
     assert (stock(CROP_ID)[1], stock(FERT_ID)[0]) == (kg0, bags0)                # a draft moves no stock
     # dispatch
-    pg.btn_go.click()
+    pg.btn_next.click()
     _settle()
     assert pg.stage == "in_transit" and stock(CROP_ID)[1] == kg0 - 500 and stock(FERT_ID)[0] == bags0 - 10
-    assert pg.grid.allow_add is False and not pg.btn_confirm.isHidden() and pg.btn_go.isHidden()
+    assert pg.grid.allow_add is False and not pg.btn_next.isHidden() and pg.btn_next.text().startswith(pg.w['confirm'])
     # the other side's result: some rejected, a different price
     type_cell(pg.grid, "rcv", "500", row=0)
     type_cell(pg.grid, "rej", "50", row=0)
@@ -151,13 +151,13 @@ def test_sales_order_whole_life_on_one_sheet(qapp, boxes):
     assert run.item(0, 9).text() == "450" and run.item(0, 10).text() == "45,000.00"      # accepted / amount (auto)
     type_cell(pg.grid, "rej", "999", row=0)
     assert "more than" in pg.msg.text() and pg.lines[0]["rej_qty"] == 50
-    pg.btn_confirm.click()
+    pg.btn_next.click()
     assert "Still to enter" in pg.msg.text() and pg.stage == "in_transit"          # NPK line not entered yet
     pg.btn_fill.click()                                                             # everything as ordered...
     _settle()
     type_cell(pg.grid, "rej", "50", row=0)
     type_cell(pg.grid, "rprice", "100", row=0)                                      # ...but the crops as agreed above
-    pg.btn_confirm.click()
+    pg.btn_next.click()
     _settle()
     assert pg.stage == "confirmed" and pg.d["total"] == 450 * 100 + 10 * 9000 and stock(CROP_ID)[1] == kg0 - 450
     assert pg.k_balance.val.text() == "135,000.00" and pg.tabs.currentIndex() == 1
@@ -216,7 +216,7 @@ def test_draft_rules_last_line_cant_be_removed_and_cancel(qapp, boxes, monkeypat
     monkeypatch.setattr(osp.QInputDialog, "getText", staticmethod(lambda *a, **k: ("not needed", True)))
     pg.btn_cancel.click()
     _settle()
-    assert pg.stage == "cancelled" and pg.btn_go.isHidden() and pg.grid.allow_add is False
+    assert pg.stage == "cancelled" and pg.btn_next.isHidden() and pg.grid.allow_add is False
 
 
 def test_no_stock_blocks_dispatch_with_a_clear_message(qapp, boxes):
@@ -225,7 +225,7 @@ def test_no_stock_blocks_dispatch_with_a_clear_message(qapp, boxes):
     v = _hub()
     v.open_order("sales", c, oid)
     pg = _sheet(v)
-    pg.btn_go.click()
+    pg.btn_next.click()
     assert "Insufficient stock" in pg.msg.text() and pg.stage == "draft"
 
 
@@ -237,7 +237,7 @@ def test_revert_to_draft_restores_stock_and_editing(qapp, boxes):
     pg = _sheet(v)
     pg.btn_revert.click()
     _settle()
-    assert pg.stage == "draft" and stock(CROP_ID)[1] == kg_dispatched + 500 and not pg.btn_go.isHidden()
+    assert pg.stage == "draft" and stock(CROP_ID)[1] == kg_dispatched + 500 and not pg.btn_next.isHidden()
 
 
 # ----------------------------------------------------------------------------- the sheet, Purchase
@@ -246,7 +246,7 @@ def test_purchase_order_flow_stock_comes_in_only_when_received(qapp, boxes):
     v = _hub()
     v.open_order("purchase", p, None)
     pg = _sheet(v)
-    assert pg.btn_go.text() == "Mark in transit"
+    assert pg.w["go"] == "Mark in transit"
     kg0 = stock(CROP_ID)[1]
     type_cell(pg.grid, "product", MAIZE)
     type_cell(pg.grid, "bags", "5")
@@ -255,13 +255,13 @@ def test_purchase_order_flow_stock_comes_in_only_when_received(qapp, boxes):
     assert pg.d["lines"][0]["price"] == 80
     type_cell(pg.pay_grid, "amount", "20000")                                    # advance before the order is confirmed
     assert pg.d["paid"] == 20000 and pg.d["balance"] is None
-    pg.btn_go.click()
+    pg.btn_next.click()
     _settle()
     assert pg.stage == "in_transit" and stock(CROP_ID)[1] == kg0
     pg.btn_fill.click()
     _settle()
     type_cell(pg.grid, "rej", "20", row=0)
-    pg.btn_confirm.click()
+    pg.btn_next.click()
     _settle()
     assert pg.stage == "confirmed" and stock(CROP_ID)[1] == kg0 + 480 and pg.d["total"] == 480 * 80
     assert pg.d["balance"] == 480 * 80 - 20000 and pg.k_balance.cap.text() == "Still to pay"
@@ -280,17 +280,17 @@ def test_cashier_can_work_delivery_and_payments_but_not_create_or_dispatch(qapp,
     assert _sheet(v).btn_new.isHidden()
     v.open_order("sales", c, so)
     pg = _sheet(v)
-    assert pg.btn_revert.isHidden() and pg.btn_go.isHidden() and not pg.btn_confirm.isHidden()
+    assert pg.btn_revert.isHidden() and not pg.btn_next.isHidden()
     pg.btn_fill.click()
     _settle()
-    pg.btn_confirm.click()
+    pg.btn_next.click()
     _settle()
     assert pg.stage == "confirmed"
     type_cell(pg.pay_grid, "amount", "5000")
     assert pg.d["paid"] == 5000
     v.open_order("sales", c, draft)
     d = _sheet(v)
-    assert d.btn_add.isHidden() and d.btn_go.isHidden() and d.btn_cancel.isHidden() and d.grid.allow_add is False
+    assert d.btn_add.isHidden() and d.btn_next.isHidden() and d.btn_cancel.isHidden() and d.grid.allow_add is False
 
 
 # ----------------------------------------------------------------------------- moving an order along; review and correct
