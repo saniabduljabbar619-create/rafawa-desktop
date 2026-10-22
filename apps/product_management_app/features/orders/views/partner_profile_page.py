@@ -22,7 +22,7 @@ from apps.product_management_app.features.orders.views.order_sheet_page import (
     EXPENSE_CHARGE, METHOD_OPTIONS, MONEY_WAYS, STATUS_TEXT, _num,
 )
 
-COLS = ["Order", "Status", "Created", "On the road", "Expected", "Value", "Payment", "Balance"]
+COLS = ["Order", "Status", "Created", "Dispatched", "Expected", "Value", "Payment", "Still to settle"]
 _COLOR = {"draft": "#8a8578", "in_transit": "#2f6f9f", "confirmed": "#3f6b4a", "cancelled": "#a23b34"}
 
 
@@ -48,7 +48,7 @@ class PartnerProfilePage(QWidget):
         root.setSpacing(8)
 
         head = QHBoxLayout()
-        self.btn_back = QPushButton("<  " + ("Companies" if kind == "sales" else "Suppliers"))
+        self.btn_back = QPushButton("<  Back to " + ("companies" if kind == "sales" else "suppliers"))
         self.btn_back.setObjectName("dcBack")
         self.btn_back.clicked.connect(self.back.emit)
         head.addWidget(self.btn_back)
@@ -78,10 +78,10 @@ class PartnerProfilePage(QWidget):
 
         kp = QHBoxLayout()
         kp.setSpacing(10)
-        self.k_out = kpi("Outstanding" if kind == "sales" else "We still owe", dark=True)
-        self.k_orders = kpi("Orders")
-        self.k_active = kpi("Active (draft / on the road)")
-        self.k_value = kpi("Confirmed value")
+        self.k_out = kpi("They still owe us (orders)" if kind == "sales" else "We still owe them (orders)", dark=True)
+        self.k_orders = kpi("Total orders")
+        self.k_active = kpi("Open orders (not yet delivered)")
+        self.k_value = kpi("Value of delivered orders")
         for k in (self.k_out, self.k_orders, self.k_active, self.k_value):
             kp.addWidget(k, 1)
         root.addLayout(kp)
@@ -89,12 +89,16 @@ class PartnerProfilePage(QWidget):
         # where we stand beyond the orders themselves (positive net: they owe us; negative: we owe them)
         st = QHBoxLayout()
         st.setSpacing(10)
-        self.k_money = kpi("They gave us (net of what we gave them)")
-        self.k_recover = kpi("Expenses we paid, to get back")
-        self.k_net = kpi("Net position", dark=True)
+        self.k_money = kpi("Other money received")
+        self.k_recover = kpi("Expenses to get back")
+        self.k_net = kpi("Overall position", dark=True)
         for k in (self.k_money, self.k_recover, self.k_net):
             st.addWidget(k, 1)
         root.addLayout(st)
+        how = QLabel("Overall position = orders + other money + expenses we are owed. It tells you in one line who owes whom.")
+        how.setObjectName("msHint")
+        how.setWordWrap(True)
+        root.addWidget(how)
         self.msg = QLabel("")
         self.msg.setWordWrap(True)
         self.msg.setVisible(False)
@@ -104,7 +108,7 @@ class PartnerProfilePage(QWidget):
         self.tabs.setObjectName("msSheets")
         self.tabs.setExpanding(False)
         self.tabs.setDrawBase(False)
-        for text in ("Orders", "Money", "Expenses"):
+        for text in ("Orders", "Other money", "Expenses"):
             self.tabs.addTab(text)
         root.addWidget(self.tabs)
         self.stack = QStackedWidget()
@@ -147,7 +151,7 @@ class PartnerProfilePage(QWidget):
         self.btn_delete.setVisible(is_admin)
         foot.addWidget(self.btn_delete)
         foot.addStretch(1)
-        h = QLabel("Double-click an order to open its sheet  -  only draft or cancelled orders can be deleted")
+        h = QLabel("Double-click an order to open it.  Only draft or cancelled orders can be deleted.")
         h.setObjectName("msHint")
         foot.addWidget(h)
         ol.addLayout(foot)
@@ -224,17 +228,17 @@ class PartnerProfilePage(QWidget):
     def _render_statement(self) -> None:
         st = OrderMoneyService.statement(self.kind, self.partner_id)
         self.k_money.val.setText(money(st["money_net"]))
-        self.k_money.cap.setText("They gave us (net of what we gave them)" if st["money_net"] >= 0
-                                 else "We gave them (net of what they gave us)")
+        self.k_money.cap.setText("Other money they gave us" if st["money_net"] >= 0
+                                 else "Other money we gave them")
         if st["money_net"] < 0:
             self.k_money.val.setText(money(-st["money_net"]))
         self.k_recover.val.setText(money(st["to_recover"]))
-        self.k_recover.cap.setText("Expenses we paid, to get back" + (f"  (our own cost: {money(st['our_cost'])})"
+        self.k_recover.cap.setText("Expenses to get back" + (f"  (our own cost: {money(st['our_cost'])})"
                                                                       if st["our_cost"] else ""))
         net = st["net"]
         self.k_net.val.setText(money(abs(net)))
-        self.k_net.cap.setText("Net position: THEY owe us" if net > 0.005 else
-                               ("Net position: WE owe them" if net < -0.005 else "Net position: all square"))
+        self.k_net.cap.setText("Overall: THEY owe us" if net > 0.005 else
+                               ("Overall: WE owe them" if net < -0.005 else "Overall: all square"))
         self.statement = st
 
     # ------------------------------------------------------------------ money sheet (all orders + on account)
@@ -247,7 +251,7 @@ class PartnerProfilePage(QWidget):
         cols = [
             {"key": "date", "label": "Date", "type": "date", "width": 110, "readonly": True},
             {"key": "order", "label": "Order", "type": "choice", "options": ["On account"] + list(ids), "width": 140},
-            {"key": "direction", "label": "Which way", "type": "choice", "options": MONEY_WAYS, "width": 150},
+            {"key": "direction", "label": "Direction", "type": "choice", "options": MONEY_WAYS, "width": 150},
             {"key": "amount", "label": "Amount (₦)", "type": "money", "width": 150},
             {"key": "method", "label": "How", "type": "choice", "options": METHOD_OPTIONS, "width": 110},
             {"key": "note", "label": "Note", "type": "text", "width": 280, "stretch": True},
@@ -275,11 +279,11 @@ class PartnerProfilePage(QWidget):
             ready=lambda v: "" if (_safe_num(v.get("amount")) or 0) > 0 else "Now type the amount.",
             on_add=lambda v: self._add_money(v, ids), on_edit=None,
             on_remove=lambda mid, reason: OrderMoneyService.void_money(mid, reason), reload=self.reload,
-            hint="Cash they gave us, or we gave them - on account or against one order. Not part of the order price "
-                 "and not part of the cash drawer. Remove a row to void it - a reason is required.",
+            hint="Money that is NOT an order price: an advance, a loan, a refund. Choose 'On account' or one order. "
+                 "Not part of the cash drawer. To cancel a row, right-click it (give a reason).",
             allow_add=True, notify=self.say)
         grid.set_rows(rows, {"amount": f"net {money(net)}"})
-        self.btn_apply = QPushButton("Apply selected to an order…")
+        self.btn_apply = QPushButton("Use the selected row as a payment for an order…")
         self.btn_apply.clicked.connect(lambda: self._apply_money(ids))
         self._swap(self.slot_money, self._with_buttons(grid, self.btn_apply))
         self.money_grid = grid
@@ -303,7 +307,7 @@ class PartnerProfilePage(QWidget):
         if not names:
             self.say("There is no order to apply it to.")
             return
-        pick, ok = QInputDialog.getItem(self, "Apply to an order", "Apply it as a payment on which order?", names, 0,
+        pick, ok = QInputDialog.getItem(self, "Apply to an order", "Count it as a payment on which order?", names, 0,
                                         False)
         if not ok:
             return
@@ -312,7 +316,7 @@ class PartnerProfilePage(QWidget):
         except (ValueError, PermissionDenied) as e:
             self.say(str(e))
             return
-        self.say("Applied - it is now a payment on that order.", bad=False)
+        self.say("Done - it now counts as a payment on that order.", bad=False)
         self.reload()
 
     # ------------------------------------------------------------------ expenses of every order
@@ -347,10 +351,10 @@ class PartnerProfilePage(QWidget):
                                     {"key": "state", "label": "State", "width": 140}],
             first_edit_key="amount", allow_add=False, on_remove=lambda eid, reason: OrderMoneyService.void_expense(eid, reason),
             reload=self.reload, notify=self.say,
-            hint="Every expense paid on this partner's orders. Add one on the order itself (Expenses tab). Record "
-                 "repayment spreads what they pay back over the oldest first. Remove a row to void it.")
+            hint="All expenses on this "+("company" if self.kind == "sales" else "supplier")+"'s orders. To add one, open the order and use its Expenses tab. "
+                 "When they pay some back, press the button above - it clears the oldest first.")
         grid.set_rows(rows, totals)
-        self.btn_repay = QPushButton("Record repayment…")
+        self.btn_repay = QPushButton("They paid some back…")
         self.btn_repay.clicked.connect(self._repay)
         self._swap(self.slot_exp, self._with_buttons(grid, self.btn_repay))
         self.exp_grid = grid
@@ -359,7 +363,7 @@ class PartnerProfilePage(QWidget):
         from apps.product_management_app.features.orders.dialogs.repayment_dialog import RepaymentDialog
         owed = self.statement["to_recover"] if getattr(self, "statement", None) else 0.0
         if owed <= 0.005:
-            self.say("Nothing is owed back to us.", bad=False)
+            self.say("Nothing is owed back to us - no expense is waiting to be repaid.", bad=False)
             return
         dlg = RepaymentDialog(owed, self, who=self.partner.get("name", "They"))
         if dlg.exec_() != dlg.Accepted or not dlg.values:

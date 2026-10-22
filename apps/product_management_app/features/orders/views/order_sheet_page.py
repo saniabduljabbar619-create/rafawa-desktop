@@ -7,7 +7,7 @@ An order as a sheet - Sales Order or Purchase Order, one screen for the whole li
     Order lines tab   type the lines into the grid (draft); enter what the other side actually received,
                       rejected and the price (on the road); read the final figures (confirmed)
     Payments tab      type a payment into the last row; remove = void (with a reason)
-    Money tab         cash they gave us / we gave them, outside the order price; can be applied to the order
+    Other money tab   cash they gave us / we gave them, outside the order price; can be applied to the order
     Expenses tab      what we paid for this order (driver, fuel, food ...), charged to the partner or our own cost,
                       with the repayments they make
     History tab       who did what, and when, including payments
@@ -43,7 +43,7 @@ STATUS_TEXT = {"draft": "Draft", "in_transit": "On the road", "confirmed": "Conf
 STATUS_TONE = {"draft": "grey", "in_transit": "blue", "confirmed": "green", "cancelled": "red"}
 METHOD_OPTIONS = ["Cash", "Transfer", "POS", "Cheque"]
 MONEY_WAYS = ["They gave us", "We gave them"]
-EXPENSE_CHARGE = ["Charge to partner", "Our cost"]
+EXPENSE_CHARGE = ["They pay back", "Our cost"]
 WORDS = {
     "sales": {"partner": "Company", "go": "Dispatch", "go_done": "Dispatched", "rcv": "Company received",
               "price": "Company price (₦)", "confirm": "Confirm delivery", "ordered": "Sent",
@@ -206,9 +206,9 @@ class OrderSheetPage(QWidget):
         self.tabs.setDrawBase(False)
         self.tabs.setElideMode(Qt.ElideNone)
         for text, tip in (("Products", "The products on this order, with their quantity and price"),
-                          ("Payments", "Money that pays this order's price"),
-                          ("Money", "Cash they gave us / we gave them, outside this order's price"),
-                          ("Expenses", "What we paid for this order (driver, fuel, food ...)"),
+                          ("Payments", "Money paid towards this order's price"),
+                          ("Other money", "Cash that moved between us outside the order price (advances, loans, refunds)"),
+                          ("Expenses", "What we spent on this order (driver, fuel, food ...) and what they pay back"),
                           ("History", "Everything that happened to this order, in order")):
             self.tabs.addTab(text)
             self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
@@ -722,10 +722,10 @@ class OrderSheetPage(QWidget):
                                    "by": p["created_by"]},
                          "tip": ("Voided: " + p.get("void_reason", "")) if voided else ""})
         live = sum(p["amount"] for p in (d["payments"] if d else []) if p["status"] != "voided")
-        hint = ("Type a payment in the last row (amount and how). " +
-                ("Before the order is confirmed it is kept as an advance and counts once the final price is set. "
-                 if d and d["status"] != "confirmed" else "It cannot be more than what is still owed. ") +
-                "Right-click a row to void it (a reason is needed).") if can_pay else (
+        hint = ("Type each payment in the last row: the amount and how it was paid. " +
+                ("Paid before delivery? It is kept as an advance and counts once the final price is known. "
+                 if d and d["status"] != "confirmed" else "A payment cannot be more than what is still owed. ") +
+                "Made a mistake? Right-click the row to cancel it (give a reason).") if can_pay else (
             "Save the order first - payments can be recorded once it exists." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, first_edit_key="amount", placeholder_key="amount",
                          defaults={"date": date.today().isoformat(), "method": "Cash"},
@@ -789,8 +789,8 @@ class OrderSheetPage(QWidget):
                          "tip": ("Voided: " + m["void_reason"]) if voided else ""})
         live = [m for m in entries if m["status"] != "voided"]
         net = sum(m["amount"] if m["direction"] == "in" else -m["amount"] for m in live)
-        hint = ("Cash that moved between us outside this order's price (not the cash drawer). Type it in the last "
-                "row. Select a row and press Apply to make it a payment on this order ("
+        hint = ("Money that moved between us but is NOT the order price, e.g. an advance or a loan. Type it in the last "
+                "row. To count it as a payment for this order, click its row and press the button below ("
                 + ("money they gave us" if self.kind == "sales" else "money we gave them") + ").") if can else (
             "Save the order first." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, computed=[{"key": "state", "label": "Status", "width": 170}],
@@ -799,7 +799,7 @@ class OrderSheetPage(QWidget):
                          ready=self._ready_money, on_add=self._add_money, on_edit=None, on_remove=self._void_money,
                          reload=self._refresh, hint=hint, allow_add=can, notify=self.say)
         grid.set_rows(rows, {"amount": f"net {money(net)}"})
-        self.btn_apply_money = QPushButton("Apply selected to this order's payments")
+        self.btn_apply_money = QPushButton("Use the selected row as a payment for this order")
         self.btn_apply_money.setVisible(can)
         self.btn_apply_money.clicked.connect(self._apply_money)
         self._swap(self.slot_money, self._tab_with_buttons(grid, self.btn_apply_money))
@@ -871,8 +871,8 @@ class OrderSheetPage(QWidget):
         live = [e for e in exps if e["status"] != "voided"]
         totals = {"amount": money(sum(e["amount"] for e in live)),
                   "back": money(sum(e["recovered"] for e in live)), "left": money(sum(e["left"] for e in live))}
-        hint = ("What we paid for this order. “Charge to partner” = they pay us back (not part of the order value); "
-                "“Our cost” = ours. Press Record repayment when they pay some back.") if can else ("Save the order first." if not d else "This order was cancelled.")
+        hint = ("Things we paid for on this order (driver, fuel, food ...). “They pay back” = the other side will "
+                "return it to us; “Our cost” = we carry it. When they pay some back, press Record repayment.") if can else ("Save the order first." if not d else "This order was cancelled.")
         grid = SheetGrid(columns=cols, computed=[{"key": "back", "label": "Paid back", "width": 120},
                                                  {"key": "left", "label": "Still owed", "width": 120}],
                          first_edit_key="category", placeholder_key="category",
@@ -882,7 +882,7 @@ class OrderSheetPage(QWidget):
                          on_remove=self._void_expense, reload=self._refresh, hint=hint, allow_add=can,
                          notify=self.say)
         grid.set_rows(rows, totals)
-        self.btn_repay = QPushButton("Record repayment…")
+        self.btn_repay = QPushButton("They paid some back…")
         self.btn_repay.setVisible(can)
         self.btn_repay.clicked.connect(self._repay)
         self._swap(self.slot_exp, self._tab_with_buttons(grid, self.btn_repay))

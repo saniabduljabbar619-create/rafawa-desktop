@@ -26,7 +26,7 @@ def test_the_order_sheet_has_money_and_expenses_tabs(qapp, boxes):
     v = _hub()
     v.open_order("sales", c, so)
     pg = _sheet(v)
-    assert [pg.tabs.tabText(i) for i in range(pg.tabs.count())] == ["Products", "Payments", "Money", "Expenses",
+    assert [pg.tabs.tabText(i) for i in range(pg.tabs.count())] == ["Products", "Payments", "Other money", "Expenses",
                                                                       "History"]
     # money: typed into the last row; "They gave us" is the default way, a cash drawer is not involved
     type_cell(pg.money_grid, "note", "for the next load")                             # a row saves when the amount is in
@@ -85,7 +85,7 @@ def test_partner_profile_shows_the_statement_money_and_expense_sheets(qapp, boxe
     p = PurchaseOrderSupplierService.create("Farm Co", ADMIN_ID)
     po = O.create("purchase", p, _lines())
     prof = pp.PartnerProfilePage("purchase", p)
-    assert [prof.tabs.tabText(i) for i in range(3)] == ["Orders", "Money", "Expenses"]
+    assert [prof.tabs.tabText(i) for i in range(3)] == ["Orders", "Other money", "Expenses"]
     # money on account (they gave us 50,000), typed on the profile
     type_cell(prof.money_grid, "amount", "50000")
     M.add_expense("purchase", po, "Driver", 20000)
