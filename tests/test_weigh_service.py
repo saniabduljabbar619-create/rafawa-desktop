@@ -391,11 +391,15 @@ def test_payment_receipt_is_small_and_names_the_product_and_the_balance():
     pid = PaymentService.record_purchase_payment(
         purchase_id=res["purchase_id"], party_id=res["party_id"], amount=20000,
         created_by_user_id=CASHIER, method="cash", notes="")
-    text = render_payment_slip(build_payment_slip(pid), get_shop())
+    raw = render_payment_slip(build_payment_slip(pid), get_shop())
+    text = raw.replace("\x01", "")
+    bold = [seg.strip() for i, seg in enumerate(raw.split("\x01")) if i % 2 == 1]
+    assert any(b.startswith("BALANCE:") and "25,000.00" in b for b in bold)            # the balance is bold
+    assert any("Maize" in b for b in bold)                                              # and so is the product
     assert "PAYMENT RECEIPT" in text and "Musa Kano (WT-WKN-00001)" in text
     assert "PAID NOW" in text and "20,000.00" in text and "25,000.00" in text      # balance left
     assert "2 bags 100.00 kg" in text
-    assert len(text.splitlines()) < 30
+    assert len(text.splitlines()) < 24
 
 
 def test_walk_ins_show_in_the_drawer_with_their_ids():

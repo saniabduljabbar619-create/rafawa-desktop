@@ -22,7 +22,7 @@ from database.services.document_balance import document_balances
 from database.services.walkin_account import is_shared_walkin
 from database.session import get_session
 
-from .receipt_models import ShopInfo
+from .receipt_models import BOLD_MARKER, ShopInfo
 from .receipt_render import WIDTH, _center, _fmt_dt, _rule, _wrap
 
 
@@ -37,7 +37,12 @@ def _bags(v) -> str:
 
 def _two(left: str, right: str) -> str:
     left, right = str(left), str(right)
-    return left + " " * max(WIDTH - len(left) - len(right), 1) + right
+    shown = len(left.replace(BOLD_MARKER, "")) + len(right.replace(BOLD_MARKER, ""))      # bold marks print nothing
+    return left + " " * max(WIDTH - shown, 1) + right
+
+
+def _b(text: str) -> str:
+    return f"{BOLD_MARKER}{text}{BOLD_MARKER}"
 
 
 def build_payment_slip(payment_id: int) -> Dict[str, Any]:
@@ -78,27 +83,24 @@ def build_payment_slip(payment_id: int) -> Dict[str, Any]:
 
 
 def render_payment_slip(d: Dict[str, Any], shop: ShopInfo) -> str:
-    out: List[str] = [_center(shop.name)]
-    for x in (shop.phone,):
-        if x:
-            out.append(_center(x))
-    out += [_rule(), _center("PAYMENT RECEIPT"), _rule()]
-    out.append(f"{'Receipt No':<10}: {d['receipt_no']}")
-    out.append(f"{'Name':<10}: {d['name']}")
-    out.append(f"{'For':<10}: {d['reference']}")
-    out.append(f"{'Date':<10}: {_fmt_dt(d['when'])}")
-    out.append(_rule())
+    """The small payment receipt: short, with the product names and the balance in bold."""
+    out: List[str] = [_b(_center(shop.name))]
+    if shop.phone:
+        out.append(_center(shop.phone))
+    out += [_rule(), _two(_b("PAYMENT RECEIPT"), d["receipt_no"])]
+    out += _wrap(f"{d['name']}  -  {d['reference']}", WIDTH)
+    out += [_fmt_dt(d["when"]), _rule()]
     for it in d["items"]:
         qty = f"{_bags(it['bags'])} bags" + (f" {_money(it['kg'])} kg" if it["kg"] else "")
         lines = _wrap(it["name"], WIDTH - len(qty) - 1)
-        out += lines[:-1]
-        out.append(_two(lines[-1], qty))
+        out += [_b(x) for x in lines[:-1]]
+        out.append(_b(lines[-1]) + " " * max(WIDTH - len(lines[-1]) - len(qty), 1) + qty)
     out.append(_rule())
     out.append(_two("Total:", f"N{_money(d['total'])}"))
     out.append(_two("PAID NOW:", f"N{_money(d['paid_now'])}"))
     out.append(_two("Paid so far:", f"N{_money(d['paid_so_far'])}"))
-    out.append(_two("Balance:", f"N{_money(d['balance'])}"))
+    out.append(_b(_two("BALANCE:", f"N{_money(d['balance'])}")))
     if d["method"]:
         out.append(f"Method: {d['method']}")
-    out += [_rule(), "", f"By: {d['served_by']}      Sign: ________", "", _center(shop.footer_note or "Thank you"), ""]
+    out += ["", f"By: {d['served_by']}      Sign: ________", _center(shop.footer_note or "Thank you"), ""]
     return "\n".join(out)

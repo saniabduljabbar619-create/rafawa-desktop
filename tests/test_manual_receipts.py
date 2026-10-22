@@ -39,26 +39,44 @@ def printed(monkeypatch):
     return out
 
 
-def test_option_1_weighing_receipt_has_products_bags_kg_and_the_two_signatures():
-    t = render_weigh_slip(TICKET, SHOP, "weighing")
-    for needle in ("GRAND TOTAL BAGS", "Receipt No    : WT-00128",
-                   "Customer Name : Sharifadden", "Phone", "Ref ID        : 128", "User          : Basiru Rafawa",
-                   "Total Bags", "Total KG", "100 bags", "5,940 KG", "GRAND TOTAL BAGS:", "205 bags",
-                   "Grand\nTotal KG is not provided", "Weigher Signature:", "Thank you for trading with us"):
-        assert needle in t, needle
-    assert "Price" not in t and "Payment" not in t and "OPTION 1" not in t and "Received by" not in t
-    assert all(len(line) <= WIDTH for line in t.splitlines())
+BOLD = "\x01"
 
 
-def test_option_2_full_value_receipt_has_price_total_payment_and_cashier_signature():
-    t = render_weigh_slip(TICKET, SHOP, "value")
-    for needle in ("WEIGHING RECEIPT", "Price/KG", "2,376,000", "1,197,000", "TOTAL AMOUNT:",
-                   "N4,878,000", "Payment Status: Unpaid", "Amount Paid", "Balance",
-                   "Authorized By:", "(Cashier/Admin)", "Customer Signature:"):
+def _plain(text):
+    """What is on paper: the bold marks print nothing."""
+    return text.replace(BOLD, "")
+
+
+def _bold_words(text):
+    """Everything the printer is told to print in bold."""
+    return [seg.strip() for i, seg in enumerate(text.split(BOLD)) if i % 2 == 1]
+
+
+def test_option_1_weighing_receipt_is_short_with_bold_product_names_and_one_signature():
+    raw = render_weigh_slip(dict(TICKET, party_code="WT-WKN-00001"), SHOP, "weighing")
+    t = _plain(raw)
+    for needle in ("Alh. Zakari Rafawa Enterprises", "07046329444", "WT-00128", "Customer: Sharifadden (0000050000)",
+                   "Walk-in ID: WT-WKN-00001", "Weigher: Basiru Rafawa", "Product", "Bags", "KG", "Paddy Rice",
+                   "5,940", "TOTAL BAGS:", "205", "Weigher sign:", "Thank you for trading with us"):
         assert needle in t, needle
-    assert all(len(line) <= WIDTH for line in t.splitlines())
+    assert "Price" not in t and "Payment" not in t and "Received by" not in t and "Kwanar Tsaure" not in t
+    assert "Paddy Rice" in _bold_words(raw) and "Soybean" in _bold_words(raw)
+    assert len(t.splitlines()) <= 18 and all(len(line) <= WIDTH for line in t.splitlines())     # was ~35 lines
+
+
+def test_option_2_full_value_receipt_is_short_with_bold_products_and_balance():
+    pay = {"status": "Part paid", "paid": 1000000, "balance": 3878000, "total": 4878000}
+    raw = render_weigh_slip(dict(TICKET, payment=pay), SHOP, "value")
+    t = _plain(raw)
+    for needle in ("WEIGHING RECEIPT", "Product", "Price", "Amount", "2,376,000", "1,197,000", "TOTAL:", "N4,878,000",
+                   "Paid:", "N1,000,000", "BALANCE:", "N3,878,000", "Status: Part paid", "Cashier:", "Customer:"):
+        assert needle in t, needle
+    bold = _bold_words(raw)
+    assert "Paddy Rice" in bold and any(b.startswith("BALANCE:") and "N3,878,000" in b for b in bold)
+    assert len(t.splitlines()) <= 22 and all(len(line) <= WIDTH for line in t.splitlines())
+    assert "400" in t and "2,376,000" in t and "4002,376,000" not in t                       # columns never run together
     sup = dict(TICKET, party_role="supplier")
-    assert "Supplier Name : Sharifadden" in render_weigh_slip(sup, SHOP, "weighing")
+    assert "Supplier: Sharifadden" in _plain(render_weigh_slip(sup, SHOP, "weighing"))
 
 
 def test_the_value_receipt_shows_the_real_payment_after_finalizing():
@@ -74,7 +92,7 @@ def test_the_value_receipt_shows_the_real_payment_after_finalizing():
     PaymentService.record_purchase_payment(res["purchase_id"], SUPPLIER_ID, 15000, CASHIER, "cash")
     t = W.get_ticket(tid)
     assert t["payment"]["status"] == "Part paid" and t["payment"]["paid"] == 15000 and t["payment"]["balance"] == 25000
-    text = render_weigh_slip(t, SHOP, "value")
+    text = _plain(render_weigh_slip(t, SHOP, "value"))
     assert "Part paid" in text and "N15,000" in text and "N25,000" in text
 
 
@@ -92,7 +110,7 @@ def test_admin_ticket_queue_prints_the_weigher_receipts_and_the_purchase_receipt
     v = WeighTicketsAdminView(mode="cashier")
     assert printed == [] and v.btn_print.isEnabled() and not v.btn_print_purchase.isEnabled()   # not finalized yet
     v.btn_print_value.click()
-    assert len(printed) == 1 and "WEIGHING RECEIPT" in printed[0] and "OPTION 2" not in printed[0]
+    assert len(printed) == 1 and "WEIGHING RECEIPT" in _plain(printed[0]) and "OPTION 2" not in printed[0]
     res = W.finalize_ticket(tid, {line: 400})
     v.filter_seg.set_key("finalized")
     v.refresh()
@@ -183,11 +201,14 @@ def test_quick_purchases_screen_and_admin_menu(qapp, boxes, monkeypatch):
     assert calls == [(r2.SALE, res["sale_id"]), (r2.PURCHASE, res["purchases"][0])]
 
 
-def test_option_3_payment_receipt_is_small_and_shows_each_product_paid_and_balance():
-    t = render_weigh_slip(dict(TICKET, payment={"status": "Part paid", "paid": 1000000, "balance": 3878000,
-                                                "total": 4878000}), SHOP, "payment")
+def test_option_3_payment_receipt_is_small_with_bold_products_and_balance():
+    raw = render_weigh_slip(dict(TICKET, payment={"status": "Part paid", "paid": 1000000, "balance": 3878000,
+                                                  "total": 4878000}), SHOP, "payment")
+    t = _plain(raw)
     for needle in ("PAYMENT RECEIPT", "WT-00128", "Sharifadden", "Paddy Rice", "N2,376,000", "Maize", "Soybean",
-                   "Total:", "N4,878,000", "PAID:", "N1,000,000", "Balance:", "N3,878,000", "Part paid", "Signature:"):
+                   "Total:", "N4,878,000", "PAID:", "N1,000,000", "BALANCE:", "N3,878,000", "Part paid", "Signature:"):
         assert needle in t, needle
     assert "Price/KG" not in t and "Round" not in t
-    assert len(t.splitlines()) < 32 and all(len(line) <= WIDTH for line in t.splitlines())
+    bold = _bold_words(raw)
+    assert {"Paddy Rice", "Maize", "Soybean"} <= set(bold) and any(b.startswith("BALANCE:") for b in bold)
+    assert len(t.splitlines()) <= 22 and all(len(line) <= WIDTH for line in t.splitlines())

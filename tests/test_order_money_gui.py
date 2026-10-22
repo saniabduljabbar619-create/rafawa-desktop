@@ -26,7 +26,7 @@ def test_the_order_sheet_has_money_and_expenses_tabs(qapp, boxes):
     v = _hub()
     v.open_order("sales", c, so)
     pg = _sheet(v)
-    assert [pg.tabs.tabText(i) for i in range(pg.tabs.count())] == ["Order lines", "Payments", "Money", "Expenses",
+    assert [pg.tabs.tabText(i) for i in range(pg.tabs.count())] == ["Products", "Payments", "Money", "Expenses",
                                                                       "History"]
     # money: typed into the last row; "They gave us" is the default way, a cash drawer is not involved
     type_cell(pg.money_grid, "note", "for the next load")                             # a row saves when the amount is in
