@@ -16,7 +16,7 @@ from shared.auth.session import require_user_id
 from shared.uix.widgets.cards import avatar, money
 from apps.product_management_app.features.debt_center.sheet_style import FAINT, MUTED, RED, STYLE
 
-COLS = ["", "Name", "Contact person", "Phone", "Orders", "Active", "Last order", "Outstanding"]
+COLS = ["", "Name", "Contact person", "Phone", "Orders", "Open", "Last order", "Still owed"]
 
 
 class PartnerDialog(QDialog):
@@ -28,8 +28,8 @@ class PartnerDialog(QDialog):
         self.setWindowTitle(f"New {word}")
         self.setMinimumWidth(420)
         lay = QVBoxLayout(self)
-        note = QLabel("Companies and suppliers are one shared list - it will be available for Sales Orders and "
-                      "Purchase Orders both.")
+        note = QLabel("Only the name is required. The same list is used for Sales Orders (companies we sell to) "
+                      "and Purchase Orders (suppliers we buy from).")
         note.setWordWrap(True)
         note.setStyleSheet("color:#4a5266;")
         lay.addWidget(note)
@@ -74,7 +74,7 @@ class PartnersPage(QWidget):
         t = QLabel("Companies" if kind == "sales" else "Suppliers")
         t.setObjectName("dcTitle")
         s = QLabel(("We sell to these through Sales Orders" if kind == "sales" else "We buy from these through Purchase Orders")
-                   + ". Open one to see all their orders and start a new one.")
+                   + ". Double-click a name to see their orders and start a new one.")
         s.setObjectName("dcSub")
         tv.addWidget(t)
         tv.addWidget(s)
@@ -88,7 +88,7 @@ class PartnersPage(QWidget):
 
         self.search = QLineEdit()
         self.search.setObjectName("dcSearch")
-        self.search.setPlaceholderText("Search name")
+        self.search.setPlaceholderText("Type a name to search")
         self.search.setClearButtonEnabled(True)
         root.addWidget(self.search)
 
@@ -108,7 +108,7 @@ class PartnersPage(QWidget):
         self.table.setColumnWidth(0, 64)
         root.addWidget(self.table, 1)
         foot = QHBoxLayout()
-        self.btn_open = QPushButton("Open profile")
+        self.btn_open = QPushButton("Open")
         self.btn_open.setObjectName("msBig")
         foot.addWidget(self.btn_open)
         self.btn_delete = QPushButton("Delete " + ("company" if kind == "sales" else "supplier"))
@@ -116,7 +116,7 @@ class PartnersPage(QWidget):
         self.btn_delete.setVisible(is_admin)
         foot.addWidget(self.btn_delete)
         foot.addStretch(1)
-        h = QLabel("Double-click a name to see their orders")
+        h = QLabel("Orders = all orders  |  Open = not yet delivered  |  Still owed = unpaid balance on orders")
         h.setObjectName("msHint")
         foot.addWidget(h)
         root.addLayout(foot)

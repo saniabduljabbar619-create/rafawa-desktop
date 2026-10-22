@@ -11,10 +11,10 @@ class RepaymentDialog(QDialog):
     def __init__(self, owed: float, parent=None, who: str = "They"):
         super().__init__(parent)
         self.values = None
-        self.setWindowTitle("Record repayment")
+        self.setWindowTitle("They paid some back")
         self.setMinimumWidth(380)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"Still owed back to us: ₦{owed:,.2f}\n{who} paid some of it back - it is taken off the "
+        lay.addWidget(QLabel(f"Expenses still to get back: ₦{owed:,.2f}\nType how much {who} paid back. It clears the "
                              "oldest expenses first."))
         form = QFormLayout()
         self.amount = QLineEdit(f"{owed:.2f}" if owed else "")
