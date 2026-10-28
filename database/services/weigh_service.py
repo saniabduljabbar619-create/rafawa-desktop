@@ -519,8 +519,32 @@ class WeighService:
         return bags, kg
 
     @staticmethod
-    def _ticket_dict(s, t: WeighTicket, *, with_prices: bool) -> Dict[str, Any]:
-        users = {}
+    def _eager(q):
+        """Load a ticket query's lines, rounds, products and party in a handful of queries, not one per row."""
+        from sqlalchemy.orm import joinedload, selectinload
+        return q.options(selectinload(WeighTicket.lines).selectinload(WeighTicketLine.rounds),
+                         selectinload(WeighTicket.lines).joinedload(WeighTicketLine.product),
+                         joinedload(WeighTicket.party))
+
+    @staticmethod
+    def _prefetch(s, tickets) -> Dict[str, Any]:
+        """What a list of tickets needs beyond the tickets themselves, fetched once for all of them:
+        user names, the finalized ones' purchase balances and the prices now in force on those purchases."""
+        from database.services.document_balance import document_balances
+        from database.services.purchase_adjustment_service import PurchaseAdjustmentService
+        uids = {int(u) for t in tickets for u in (t.weigher_user_id, t.finalized_by_user_id) if u}
+        users = {int(u.id): u.username for u in s.query(User).filter(User.id.in_(sorted(uids) or [0])).all()}
+        for uid in uids:
+            users.setdefault(uid, "")
+        pids = sorted({int(t.purchase_id) for t in tickets if t.purchase_id})
+        return {"users": users,
+                "balances": document_balances(s, "purchase", pids) if pids else {},
+                "line_prices": PurchaseAdjustmentService.line_prices_many(s, pids)}
+
+    @staticmethod
+    def _ticket_dict(s, t: WeighTicket, *, with_prices: bool, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """One ticket as a dict. `ctx` (from _prefetch) lets a list of tickets share its lookups."""
+        users = ctx["users"] if ctx else {}          # shared across a list, so a missing user is looked up once
 
         def uname(uid):
             if not uid:
@@ -553,7 +577,8 @@ class WeighService:
             # prices edited after finalizing live on the purchase: show the price now in force on each line
             from database.services.purchase_adjustment_service import PurchaseAdjustmentService
             weighed = [d for d, ln in zip(lines, t.lines) if ln.rounds]
-            now_prices = PurchaseAdjustmentService.line_prices(int(t.purchase_id), session=s)
+            now_prices = (ctx["line_prices"].get(int(t.purchase_id), []) if ctx else
+                          PurchaseAdjustmentService.line_prices(int(t.purchase_id), session=s))
             if len(now_prices) == len(weighed):
                 total_amt = 0.0
                 for d, p in zip(weighed, now_prices):
@@ -565,9 +590,13 @@ class WeighService:
         if with_prices and t.purchase_id:                       # finalized: the real purchase's position
             from database.models.purchase import Purchase
             from database.services.purchase_adjustment_service import PurchaseAdjustmentService
-            pur = s.get(Purchase, int(t.purchase_id))
-            if pur is not None:
-                n = PurchaseAdjustmentService._purchase_balance(s, pur)
+            b = ctx["balances"].get(int(t.purchase_id)) if ctx else None
+            if b is not None:
+                n = {"balance": b.balance, "paid": b.settled, "net_total": b.net_total}
+            else:
+                pur = s.get(Purchase, int(t.purchase_id))
+                n = PurchaseAdjustmentService._purchase_balance(s, pur) if pur is not None else None
+            if n is not None:
                 payment = {"status": "Paid" if n["balance"] <= 0.005 else ("Part paid" if n["paid"] > 0.005 else "Unpaid"),
                            "paid": round(n["paid"], 2), "balance": round(n["balance"], 2),
                            "total": round(n["net_total"], 2)}
@@ -592,10 +621,12 @@ class WeighService:
     @require_role(*ANY_STAFF)
     def get_ticket(ticket_id: int) -> Dict[str, Any]:
         with get_session() as s:
-            t = WeighService._load_ticket(s, ticket_id)
+            t = WeighService._eager(s.query(WeighTicket).filter(WeighTicket.id == int(ticket_id))).first()
+            if t is None:
+                raise ValueError("Ticket not found.")
             if _is_weigher() and int(t.weigher_user_id) != _uid():
                 raise PermissionDenied("This is another weigher's ticket.")
-            return WeighService._ticket_dict(s, t, with_prices=True)
+            return WeighService._ticket_dict(s, t, with_prices=True, ctx=WeighService._prefetch(s, [t]))
 
     @staticmethod
     @require_role(*ANY_STAFF)
@@ -612,10 +643,11 @@ class WeighService:
                 q = q.filter(WeighTicket.created_at >= since)
             if mine_only or _is_weigher():
                 q = q.filter(WeighTicket.weigher_user_id == _uid())
-            tickets = q.order_by(WeighTicket.id.desc()).limit(int(limit)).all()
+            tickets = WeighService._eager(q).order_by(WeighTicket.id.desc()).limit(int(limit)).all()
+            ctx = WeighService._prefetch(s, tickets)
             out = []
             for t in tickets:
-                d = WeighService._ticket_dict(s, t, with_prices=True)
+                d = WeighService._ticket_dict(s, t, with_prices=True, ctx=ctx)
                 d.pop("lines", None)
                 d["products"] = ", ".join(sorted({ln.product.name for ln in t.lines if ln.product}))
                 out.append(d)

@@ -247,13 +247,21 @@ class PurchaseAdjustmentService:
 
     @staticmethod
     def _line_prices(s, purchase_id: int) -> List[Dict[str, Any]]:
+        return PurchaseAdjustmentService.line_prices_many(s, [int(purchase_id)]).get(int(purchase_id), [])
+
+    @staticmethod
+    def line_prices_many(s, purchase_ids) -> Dict[int, List[Dict[str, Any]]]:
+        """line_prices for many purchases in three queries (items, product names, earlier edits) - for lists."""
         from database.models.product import Product
         from database.models.purchase_item import PurchaseItem
 
-        out: List[Dict[str, Any]] = []
-        items = s.query(PurchaseItem).filter(PurchaseItem.purchase_id == int(purchase_id)).order_by(PurchaseItem.id).all()
+        pids = sorted({int(p) for p in purchase_ids if p})
+        out: Dict[int, List[Dict[str, Any]]] = {p: [] for p in pids}
+        if not pids:
+            return out
+        items = s.query(PurchaseItem).filter(PurchaseItem.purchase_id.in_(pids)).order_by(PurchaseItem.id).all()
         names = {int(p.id): p.name for p in s.query(Product).filter(
-            Product.id.in_([int(i.product_id) for i in items] or [0])).all()}
+            Product.id.in_(sorted({int(i.product_id) for i in items}) or [0])).all()}
         deltas = {int(iid): float(a or 0) for iid, a in
                   s.query(PurchasePriceAdjustmentLine.purchase_item_id,
                           func.coalesce(func.sum(PurchasePriceAdjustmentLine.amount), 0))
@@ -265,7 +273,7 @@ class PurchaseAdjustmentService:
             original = float(it.unit_cost_rate or 0)
             extra = deltas.get(int(it.id), 0.0)
             current = original + (extra / basis if basis else 0.0)
-            out.append({
+            out[int(it.purchase_id)].append({
                 "item_id": int(it.id), "product": names.get(int(it.product_id), f"Product#{it.product_id}"),
                 "unit": "bag" if fert else "kg", "qty": basis, "bags": int(it.qty_bags or 0),
                 "kg": float(it.total_weight_kg or 0), "original_rate": original,

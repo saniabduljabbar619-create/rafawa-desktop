@@ -100,17 +100,19 @@ class WeighTicketsAdminView(QWidget):
         self.kpi_done.set(str(count("finalized")))
         key = self.filter_seg.key()
         rows = allrows if key == "all" else [t for t in allrows if t["status"] == key]
+        self._rows = {int(t["id"]): t for t in rows}             # the list already holds what the buttons need
+        self.table.blockSignals(True)
         fill_ticket_table(self.table, rows)
         if self.table.rowCount():
             self.table.selectRow(0)
+        self.table.blockSignals(False)
         self._buttons()
 
     def _selected(self):
+        """(id, the list's row for it): status, purchase and party are all there - no database trip per click."""
         tid = selected_ticket_id(self.table)
-        try:
-            return (tid, WeighService.get_ticket(tid)) if tid else (None, None)
-        except Exception:
-            return None, None
+        t = getattr(self, "_rows", {}).get(tid) if tid else None
+        return (tid, t) if t else (None, None)
 
     def _buttons(self):
         _tid, t = self._selected()
@@ -161,11 +163,12 @@ class WeighTicketsAdminView(QWidget):
 
     def print_weigh(self, option: str):
         """The weigher's receipt (Option 1 weighing / Option 2 full value) - only when asked for."""
-        _tid, t = self._selected()
+        tid, t = self._selected()
         if not t:
             QMessageBox.information(self, "Print Receipt", "Select a ticket first.")
             return
         try:
+            t = WeighService.get_ticket(tid)                        # the slip needs every line and round
             from apps.product_management_app.features.receipts_v2 import get_shop, receipt_print, render_weigh_slip
             receipt_print.print_text(self, render_weigh_slip(t, get_shop(), option),
                                      window_title=f"Weighing Receipt - {t['ticket_no']}")
