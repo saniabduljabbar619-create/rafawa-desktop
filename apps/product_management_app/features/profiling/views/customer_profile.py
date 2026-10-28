@@ -164,7 +164,17 @@ class CustomerProfileView(QWidget):
         av.addLayout(export_row)
 
         self.activity_table = self._make_activity_table()
-        av.addWidget(self.activity_table)
+        av.addWidget(self.activity_table, 1)
+        # the full story of whichever row is selected (advances and payments carry every detail)
+        self.activity_detail = QLabel("Click a row to read everything about it here.")
+        self.activity_detail.setWordWrap(True)
+        self.activity_detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.activity_detail.setMinimumHeight(86)
+        self.activity_detail.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.activity_detail.setStyleSheet(
+            "background:#f6f7fb; border:1px solid #dfe3ee; border-radius:6px; padding:8px; color:#1c2333;")
+        av.addWidget(self.activity_detail)
+        self.activity_table.currentCellChanged.connect(self._show_activity_detail)
         tabs.addTab(activity, "Activity")
 
         # 2. Crops Tab
@@ -262,6 +272,7 @@ class CustomerProfileView(QWidget):
                                             (self.tab_history, "Transaction history")), start=1):
                 tabs.insertTab(i, w, label)
             self.tab_docs.swap_requested.connect(self.open_swap)
+            self.tab_docs.changed.connect(self.refresh_all)      # a price was edited: every tab follows
 
         # Connect Signal Slots
         self.btn_make_payment.clicked.connect(self.open_payment_router)
@@ -659,9 +670,17 @@ class CustomerProfileView(QWidget):
             ]
 
             row_color = type_color.get(str(a.get("type", "")).lower())
+            detail = str(a.get("detail") or "")
+            if not detail:
+                detail = "\n".join(x for x in (str(a.get("summary") or ""),
+                                              f"Items: {a['items']}" if a.get("items") else "") if x)
 
             for c, val in enumerate(cols):
                 it = QTableWidgetItem(str(val))
+                if detail and c in (0, 4):
+                    it.setToolTip(detail)
+                if c == 0:
+                    it.setData(Qt.UserRole + 1, detail)
                 if c in (5, 6, 7, 8, 9):
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -676,6 +695,11 @@ class CustomerProfileView(QWidget):
                     it.setForeground(row_color)
 
                 self.activity_table.setItem(r, c, it)
+
+    def _show_activity_detail(self, row, _col, _prev_row=-1, _prev_col=-1) -> None:
+        item = self.activity_table.item(row, 0) if row >= 0 else None
+        text = item.data(Qt.UserRole + 1) if item else ""
+        self.activity_detail.setText(str(text or "Click a row to read everything about it here."))
 
     def load_crops_table(self):
         from database.services.party_ledger_service import PartyLedgerService

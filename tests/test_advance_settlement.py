@@ -116,13 +116,63 @@ def dialog(qapp, monkeypatch):
     return dlg, shown
 
 
-def test_dialog_yes_applies_advance_and_locks_the_form(dialog):
+def test_dialog_lets_the_user_choose_and_locks_the_form(dialog, monkeypatch):
+    from apps.product_management_app.features.profiling.dialogs import advance_apply_dialog as aad
     dlg, shown = dialog
     _purchase()
+    seen = {}
+
+    def fake_exec(self):                                      # the user changes the suggestion to 12,000
+        seen["suggested"] = self.edits[0].text()
+        self.edits[0].setText("12000")
+        self._accept()
+        return self.Accepted
+
+    monkeypatch.setattr(aad.AdvanceApplyDialog, "exec_", fake_exec)
     dlg.btn_record.click()
-    assert any("outstanding" in m for _k, m in shown)
-    assert _bal()[:2] == (30000, 0) and _counts() == (1, 1)
+    assert seen["suggested"] == "20000.00"                    # suggestion = the advance just recorded
+    assert _bal()[:2] == (38000, 8000)                        # only 12,000 used; 8,000 stays as advance
+    assert _counts() == (1, 1)
     assert not dlg.btn_record.isEnabled() and not dlg.amount.isEnabled()
+
+
+def test_dialog_keep_as_advance_applies_nothing(dialog, monkeypatch):
+    from apps.product_management_app.features.profiling.dialogs import advance_apply_dialog as aad
+    dlg, _shown = dialog
+    _purchase()
+    monkeypatch.setattr(aad.AdvanceApplyDialog, "exec_", lambda self: self.Rejected)
+    dlg.btn_record.click()
+    assert _bal()[:2] == (50000, 20000) and _counts() == (1, 0)
+
+
+def test_apply_advance_only_what_was_chosen_and_never_more_than_owed():
+    a, b = _purchase(), _purchase()
+    AdvanceService.record_advance_out(SUPPLIER_ID, 60000, ADMIN_ID)
+    with pytest.raises(ValueError):
+        PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(a, 50001)], ADMIN_ID)      # more than owed
+    with pytest.raises(ValueError):
+        PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(a, 50000), (b, 10001)], ADMIN_ID)  # more than the advance
+    assert _counts() == (1, 0)                                # a refused request changes nothing
+    assert PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(b, 30000)], ADMIN_ID) == 30000
+    owing = {d["ref"]: d["balance"] for d in PaymentCenter.open_documents(SUPPLIER_ID, "purchase")}
+    assert owing == {f"PUR-{a}": 50000, f"PUR-{b}": 20000}    # the second purchase, not the oldest, took it
+    assert PaymentCenter.available_advance(SUPPLIER_ID, "purchase") == 30000
+
+
+def test_choice_dialog_uses_only_the_amount_typed(monkeypatch):
+    from PySide2.QtWidgets import QDialog
+    from apps.product_management_app.features.profiling.dialogs import advance_choice_dialog as acd
+    pid = _purchase()
+    AdvanceService.record_advance_out(SUPPLIER_ID, 30000, ADMIN_ID)
+
+    def fake_exec(self):
+        self.amount.setText("5000")
+        return QDialog.Accepted
+
+    monkeypatch.setattr(acd.AdvanceChoiceDialog, "exec_", fake_exec)
+    left = acd.prompt_and_apply_advance(None, party_id=SUPPLIER_ID, entity_type="purchase", entity_id=pid,
+                                        balance=50000, user_id=ADMIN_ID, party_name="Sup")
+    assert left == 45000 and _bal()[:2] == (45000, 25000)
 
 
 def test_a_failure_while_applying_cannot_lead_to_a_duplicate_advance(dialog, monkeypatch):

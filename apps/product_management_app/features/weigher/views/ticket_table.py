@@ -74,6 +74,23 @@ def fill_ticket_table(table: QTableWidget, rows) -> None:
         table.item(r, len(vals)).setData(Qt.UserRole, int(t["id"]))
 
 
+def edit_finalized_prices(parent, ticket: dict) -> bool:
+    """Right-click > Edit prices on a finalized weighing: change the price of each product on its purchase.
+    Returns True if the new prices were saved."""
+    from PySide2.QtWidgets import QMessageBox
+    from shared.auth.session import get_session as get_login_session
+    from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+        PurchasePriceEditDialog,
+    )
+    pid = ticket.get("purchase_id")
+    if not pid:
+        QMessageBox.information(parent, "Edit prices", "This weighing has no purchase yet.")
+        return False
+    uid = int(getattr(get_login_session(), "user_id", 0) or 0)
+    dlg = PurchasePriceEditDialog(parent, purchase_id=int(pid), ref=ticket.get("ticket_no") or f"PUR-{pid}", user_id=uid)
+    return dlg.exec_() == dlg.Accepted and dlg.saved
+
+
 def selected_ticket_id(table: QTableWidget):
     row = table.currentRow()
     it = table.item(row, 0) if row >= 0 else None

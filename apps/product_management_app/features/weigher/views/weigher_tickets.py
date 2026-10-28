@@ -2,14 +2,14 @@
 """The weigher's Finalize List: every weighing they did, where each stands - edit, remove or reprint it."""
 from __future__ import annotations
 
-from PySide2.QtCore import QTimer
-from PySide2.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide2.QtCore import QTimer, Qt
+from PySide2.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from database.services.weigh_service import WeighService, day_start
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.views.ticket_table import (
-    fill_ticket_table, make_ticket_table, selected_ticket_id,
+    edit_finalized_prices, fill_ticket_table, make_ticket_table, selected_ticket_id,
 )
 
 FILTERS = [("all", "All"), ("open", "Weighing"), ("submitted", "Awaiting cashier"), ("finalized", "Finalized"),
@@ -76,6 +76,8 @@ class WeigherTicketsView(QWidget):
         self.btn_remove.clicked.connect(self.remove_selected)
         self.btn_move.clicked.connect(self.move_selected)
         self.table.cellDoubleClicked.connect(lambda *_a: self.edit_selected())
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.refresh()
 
@@ -116,7 +118,9 @@ class WeigherTicketsView(QWidget):
     def _buttons(self):
         _tid, t = self._selected()
         ok = bool(t and t["status"] in EDITABLE)
-        self.btn_edit.setEnabled(ok)
+        priceable = bool(t and t["status"] == "finalized" and t.get("purchase_id"))
+        self.btn_edit.setEnabled(ok or priceable)
+        self.btn_edit.setText("Edit prices" if priceable else "Edit")
         self.btn_remove.setEnabled(ok)
         self.btn_move.setEnabled(ok)
         printable = bool(t and t["status"] != "open")
@@ -124,11 +128,34 @@ class WeigherTicketsView(QWidget):
         self.btn_print_value.setEnabled(printable)
         self.btn_print_pay.setEnabled(printable)
 
+    def _row_menu(self, pos) -> None:
+        """Right-click a weighing: edit it (a finalized one: edit the price of each product), or print its receipts."""
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.setCurrentCell(row, 0)
+        _tid, t = self._selected()
+        if not t:
+            return
+        menu = QMenu(self)
+        if t["status"] in EDITABLE:
+            menu.addAction("Edit weighing and prices…").triggered.connect(self.edit_selected)
+        elif t["status"] == "finalized" and t.get("purchase_id"):
+            menu.addAction("Edit prices…").triggered.connect(self.edit_selected)
+        if t["status"] != "open":
+            menu.addAction("Print weighing receipt").triggered.connect(lambda: self.print_selected("weighing"))
+        if not menu.isEmpty():
+            menu.exec_(self.table.viewport().mapToGlobal(pos))
+
     def edit_selected(self):
-        """Correct a weighing: its rounds and prices (a finalized one opens read-only)."""
+        """Correct a weighing: its rounds and prices. A finalized one (already a purchase) has its prices edited."""
         tid, t = self._selected()
         if not tid:
             QMessageBox.information(self, "Edit", "Select a weighing first.")
+            return
+        if t["status"] == "finalized":
+            if edit_finalized_prices(self, t):
+                self.refresh()
             return
         from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import (
             WeighTicketReviewDialog)

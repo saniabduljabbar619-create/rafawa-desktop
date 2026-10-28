@@ -549,6 +549,17 @@ class WeighService:
                             "weight_kg": _f(r.weight_kg), "created_at": r.created_at,
                             "edited": bool(r.edited_by_user_id)} for r in ln.rounds],
             })
+        if with_prices and t.purchase_id:
+            # prices edited after finalizing live on the purchase: show the price now in force on each line
+            from database.services.purchase_adjustment_service import PurchaseAdjustmentService
+            weighed = [d for d, ln in zip(lines, t.lines) if ln.rounds]
+            now_prices = PurchaseAdjustmentService.line_prices(int(t.purchase_id), session=s)
+            if len(now_prices) == len(weighed):
+                total_amt = 0.0
+                for d, p in zip(weighed, now_prices):
+                    d["unit_price"] = p["rate"]
+                    d["amount"] = round(d["kg"] * p["rate"], 2)
+                    total_amt += d["amount"]
         tb, tk = WeighService._totals(t)
         payment = {"status": "Unpaid", "paid": 0.0, "balance": round(total_amt, 2), "total": round(total_amt, 2)}
         if with_prices and t.purchase_id:                       # finalized: the real purchase's position

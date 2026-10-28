@@ -170,7 +170,7 @@ class AdvancePayDialog(QDialog):
             # Purchase/Sale Payment dialogs keep showing the full,
             # un-netted debt with no way to reconcile it from this screen.
             try:
-                self._offer_settlement(direction_index)
+                self._offer_settlement(direction_index, amount)
             except Exception as e:
                 QMessageBox.warning(
                     self, "Advance Recorded - Not Applied",
@@ -189,59 +189,19 @@ class AdvancePayDialog(QDialog):
     # OFFER TO SETTLE AGAINST EXISTING BALANCE
     # -------------------------------------------------
 
-    def _offer_settlement(self, direction_index: int):
-
-        from database.services.party_balance_service import PartyBalanceService
-        from database.services.payment_center import PaymentCenter
-
-        # role is unused inside PartyBalanceService.compute() - safe to
-        # pass an empty string here rather than plumbing it through.
-        balances = PartyBalanceService.compute(
-            party_id=int(self.party.id),
-            session_user_id=self.user_id,
-            role=""
+    def _offer_settlement(self, direction_index: int, recorded: float = 0.0):
+        """If this party owes on the opposite side, let the user choose where the advance goes (never automatic)."""
+        from apps.product_management_app.features.profiling.dialogs.advance_apply_dialog import (
+            choose_and_apply_advance,
         )
-        overall = balances.get("overall", {})
-
-        if direction_index == 1:
-            # Advance OUT -> could settle outstanding purchases
-            outstanding = float(overall.get("payable", 0) or 0)
-            doc_word = "purchases"
-        else:
-            # Advance IN -> could settle outstanding sales
-            outstanding = float(overall.get("receivable", 0) or 0)
-            doc_word = "sales"
-
-        if outstanding <= 0:
-            return
 
         name = getattr(self.party, "display_name", None) \
             or getattr(self.party, "full_name", None) \
             or getattr(self.party, "name", None) \
             or "This party"
-
-        reply = QMessageBox.question(
-            self,
-            "Outstanding Balance Found",
-            f"{name} has \u20a6{outstanding:,.2f} outstanding on {doc_word}.\n\n"
-            f"Use this advance to settle it now, oldest first?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        if direction_index == 1:
-            PaymentCenter.handle_supplier_advance_settlement(
-                party_id=int(self.party.id),
-                created_by_user_id=self.user_id
-            )
-        else:
-            PaymentCenter.handle_customer_advance_settlement(
-                party_id=int(self.party.id),
-                created_by_user_id=self.user_id
-            )
+        kind = "purchase" if direction_index == 1 else "sale"      # Advance OUT -> purchases, IN -> sales
+        choose_and_apply_advance(self, party_id=int(self.party.id), kind=kind, user_id=self.user_id,
+                                 party_name=name, suggest=recorded or None)
 
     # -------------------------------------------------
     # PRINT RECEIPT (manual, on demand - no auto-print)

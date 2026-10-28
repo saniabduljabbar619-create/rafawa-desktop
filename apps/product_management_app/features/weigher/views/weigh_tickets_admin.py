@@ -2,14 +2,15 @@
 """Weigh Tickets - the queue admin/cashier work from: Open Intake → verify → price → finalize → pay."""
 from __future__ import annotations
 
-from PySide2.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide2.QtCore import Qt
+from PySide2.QtWidgets import QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from database.services.weigh_service import WeighService
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
 from apps.product_management_app.features.weigher.views.ticket_table import (
-    fill_ticket_table, make_ticket_table, selected_ticket_id,
+    edit_finalized_prices, fill_ticket_table, make_ticket_table, selected_ticket_id,
 )
 
 FILTERS = [("submitted", "Awaiting intake"), ("finalized", "Finalized"), ("open", "Being weighed"),
@@ -58,8 +59,10 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_value = QPushButton("Print Value Receipt")
         self.btn_print_pay = QPushButton("Print Payment Receipt")
         self.btn_move = QPushButton("Change customer")
+        self.btn_edit_prices = QPushButton("Edit prices")
+        self.btn_edit_prices.setToolTip("A finalized weighing: change the price of each product (or right-click the row)")
         self.btn_refresh = QPushButton("Refresh")
-        for b in (self.btn_move, self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
+        for b in (self.btn_edit_prices, self.btn_move, self.btn_print_purchase, self.btn_print, self.btn_print_value, self.btn_print_pay, self.btn_refresh):
             bar.addWidget(b)
         root.addLayout(bar)
 
@@ -78,6 +81,9 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_pay.clicked.connect(lambda: self.print_weigh("payment"))
         self.btn_print_purchase.clicked.connect(self.print_purchase)
         self.btn_move.clicked.connect(self.move_selected)
+        self.btn_edit_prices.clicked.connect(self.edit_prices)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self.open_selected())
         self.refresh()
@@ -112,9 +118,36 @@ class WeighTicketsAdminView(QWidget):
         self.btn_print_value.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_pay.setEnabled(bool(t and t["status"] != "open"))
         self.btn_print_purchase.setEnabled(bool(t and t.get("purchase_id")))
+        self.btn_edit_prices.setEnabled(bool(t and t["status"] == "finalized" and t.get("purchase_id")))
         from shared.auth.permissions import current_role
         self.btn_move.setEnabled(bool(t and (t["status"] in ("open", "submitted")
                                              or (t["status"] == "finalized" and current_role() in ("admin", "pm")))))
+
+    def _row_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.table.setCurrentCell(row, 0)
+        _tid, t = self._selected()
+        if not t:
+            return
+        menu = QMenu(self)
+        menu.addAction("Open").triggered.connect(self.open_selected)
+        if t["status"] == "finalized" and t.get("purchase_id"):
+            menu.addAction("Edit prices…").triggered.connect(self.edit_prices)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def edit_prices(self):
+        """Change the price of each product on a finalized weighing's purchase."""
+        _tid, t = self._selected()
+        if not t:
+            QMessageBox.information(self, "Edit prices", "Select a ticket first.")
+            return
+        if t["status"] != "finalized":
+            QMessageBox.information(self, "Edit prices", "Open the ticket to price it - prices of a finalized one are edited here.")
+            return
+        if edit_finalized_prices(self, t):
+            self.refresh()
 
     def move_selected(self):
         """Weighed for the wrong person: move the whole weighing to someone else."""

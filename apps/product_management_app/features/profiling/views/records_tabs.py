@@ -7,7 +7,7 @@ from typing import List
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
-    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QMenu, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -53,6 +53,7 @@ class DocumentsTab(QWidget):
     on every row (whatever its payment status - the Flag column says what that means for a swap)."""
 
     selection_changed = Signal()
+    changed = Signal()                      # a price was edited: books and balances moved
 
     def __init__(self, party_id: int, kind: str):
         super().__init__()
@@ -71,9 +72,12 @@ class DocumentsTab(QWidget):
         self.chk_voided = QCheckBox("Show voided")
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#374151; font-weight:600;")
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit.setToolTip("Change the price of the products on the highlighted purchase (or right-click the row)")
+        self.btn_edit.setVisible(kind == "purchase")
         self.btn_print = QPushButton("Print Receipt")
         self.btn_print.setToolTip("Prints the receipt of the highlighted row - nothing prints by itself")
-        for b in (self.btn_all, self.btn_unpaid, self.btn_clear, self.btn_print):
+        for b in (self.btn_all, self.btn_unpaid, self.btn_clear, self.btn_edit, self.btn_print):
             bar.addWidget(b)
         bar.addWidget(self.lbl)
         bar.addStretch(1)
@@ -87,12 +91,50 @@ class DocumentsTab(QWidget):
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         lay.addWidget(self.table, 1)
         self.table.itemChanged.connect(self._ticked)
+        if kind == "purchase":
+            self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.table.customContextMenuRequested.connect(self._row_menu)
         self.btn_all.clicked.connect(lambda: self._tick_all(True))
         self.btn_unpaid.clicked.connect(self.tick_unpaid)
         self.btn_clear.clicked.connect(lambda: self._tick_all(False))
         self.btn_print.clicked.connect(self.print_selected)
+        self.btn_edit.clicked.connect(lambda: self.edit_prices())
         self.chk_voided.toggled.connect(lambda _on: self.reload())
         self.reload()
+
+    def _row_menu(self, pos) -> None:
+        """Right-click a purchase: edit its prices, or print its receipt."""
+        row = self.table.rowAt(pos.y())
+        if not 0 <= row < len(self.rows):
+            return
+        self.table.setCurrentCell(row, 1)
+        menu = QMenu(self)
+        d = self.rows[row]
+        edit = menu.addAction("Edit prices…")
+        edit.setEnabled(not d["voided"])
+        menu.addAction("Print receipt").triggered.connect(self.print_selected)
+        edit.triggered.connect(lambda: self.edit_prices(row))
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def edit_prices(self, row: int = -1) -> bool:
+        """Open the price editor for the purchase on `row` (default: the highlighted one). True if it was saved."""
+        from PySide2.QtWidgets import QMessageBox
+        from shared.auth.session import get_session as get_login_session
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        r = self.table.currentRow() if row < 0 else row
+        if not 0 <= r < len(self.rows):
+            QMessageBox.information(self, "Edit prices", "Click a purchase row first.")
+            return False
+        d = self.rows[r]
+        uid = int(getattr(get_login_session(), "user_id", 0) or 0)
+        dlg = PurchasePriceEditDialog(self, purchase_id=int(d["id"]), ref=d["ref"], user_id=uid)
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.reload()
+        self.changed.emit()
+        return True
 
     def print_selected(self) -> None:
         """The full receipt (then, if wanted, a delivery note) of the highlighted sale / purchase."""
@@ -176,6 +218,7 @@ class SalesPurchasesTab(QWidget):
     swap straight from here. Any recorded document can be ticked; the flags say what that means."""
 
     swap_requested = Signal()
+    changed = Signal()
 
     def __init__(self, party_id: int):
         super().__init__()
@@ -208,6 +251,7 @@ class SalesPurchasesTab(QWidget):
         lay.addWidget(self.split, 1)
 
         self.btn_swap.clicked.connect(self.swap_requested.emit)
+        self.purchases.changed.connect(self.changed.emit)
         self.purchases.selection_changed.connect(self._summarise)
         self.sales.selection_changed.connect(self._summarise)
         self._summarise()

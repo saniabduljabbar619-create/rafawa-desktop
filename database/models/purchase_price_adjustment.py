@@ -51,3 +51,29 @@ class PurchasePriceAdjustment(Base):
     __table_args__ = (
         Index("idx_purchase_price_adjustments_purchase", "purchase_id"),
     )
+
+
+class PurchasePriceAdjustmentLine(Base):
+    """
+    One product's part of a price edit: "Maize 350 -> 370 per kg on 1,000 kg = +20,000". An edit made from the
+    purchase's rows writes ONE PurchasePriceAdjustment (the signed total, which is what every balance reads) and
+    one of these per product whose price changed - so the edit screen can show each product's current price and
+    the history says exactly what was changed. The original PurchaseItem is never touched.
+    """
+    __tablename__ = "purchase_price_adjustment_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    adjustment_id: Mapped[int] = mapped_column(ForeignKey("purchase_price_adjustments.id", ondelete="CASCADE"),
+                                               nullable=False)
+    purchase_item_id: Mapped[int] = mapped_column(ForeignKey("purchase_items.id"), nullable=False)
+    old_rate: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    new_rate: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    basis_qty: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)      # kg (crops) or bags (fertilizer)
+    basis_unit: Mapped[str] = mapped_column(String(10), nullable=False)           # "kg" | "bag"
+    amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)         # (new - old) x basis_qty
+
+    __table_args__ = (
+        Index("idx_ppa_lines_adjustment", "adjustment_id"),
+        Index("idx_ppa_lines_item", "purchase_item_id"),
+    )
+
