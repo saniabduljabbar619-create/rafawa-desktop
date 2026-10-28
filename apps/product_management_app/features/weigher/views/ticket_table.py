@@ -42,10 +42,10 @@ def make_ticket_table(show_amount: bool, show_weigher: bool) -> QTableWidget:
 def fill_ticket_table(table: QTableWidget, rows) -> None:
     show_amount = bool(table.property("show_amount"))
     show_weigher = bool(table.property("show_weigher"))
-    table.setRowCount(0)
-    for t in rows:
-        r = table.rowCount()
-        table.insertRow(r)
+    table.setUpdatesEnabled(False)                       # one repaint at the end, not one per cell
+    table.clearContents()
+    table.setRowCount(len(rows))
+    for r, t in enumerate(rows):
         when = t.get("submitted_at") or t.get("created_at")
         vals = [t["ticket_no"], when.strftime("%Y-%m-%d %H:%M") if when else "",
                 f"{t['party_name']}{' [' + t['party_code'] + ']' if t.get('party_code') else ''}  ({t['party_role']})", t.get("products", ""),
@@ -72,6 +72,7 @@ def fill_ticket_table(table: QTableWidget, rows) -> None:
         cell.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         table.setCellWidget(r, len(vals), cell)
         table.item(r, len(vals)).setData(Qt.UserRole, int(t["id"]))
+    table.setUpdatesEnabled(True)
 
 
 def edit_finalized_prices(parent, ticket: dict) -> bool:

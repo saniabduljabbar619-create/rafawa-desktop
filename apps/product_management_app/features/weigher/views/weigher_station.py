@@ -528,7 +528,9 @@ class WeigherStationView(QWidget):
     def _render_rounds(self):
         ln = self._active_line()
         self._rounds_busy = True
+        self.rounds_table.setUpdatesEnabled(False)               # 50+ rounds: repaint once, not after every row
         try:
+            self.rounds_table.clearContents()
             self.rounds_table.setRowCount(0)
             if ln is None:
                 self.lbl_active.setText("Add a product to start weighing")
@@ -536,19 +538,22 @@ class WeigherStationView(QWidget):
                 return
             tag = " / ".join(x for x in (ln["area"], ln["grade"] and f"Grade {ln['grade']}") if x)
             self.lbl_active.setText(f"Weighing: {ln['product_name']}" + (f"  ({tag})" if tag else ""))
-            for r in ln["rounds"]:
-                self._add_round_row(r["round_no"], r["id"], _bags_text(r["bags"]), f"{r['weight_kg']:.2f}")
-            self._add_round_row(len(ln["rounds"]) + 1, None, "", "")      # the next round, ready to type
+            self.rounds_table.setRowCount(len(ln["rounds"]) + 1)
+            for i, r in enumerate(ln["rounds"]):
+                self._add_round_row(r["round_no"], r["id"], _bags_text(r["bags"]), f"{r['weight_kg']:.2f}", row=i)
+            self._add_round_row(len(ln["rounds"]) + 1, None, "", "", row=len(ln["rounds"]))   # the next round, ready to type
             avg = _avg_text(ln["kg"], ln["bags"])
             self.lbl_round_totals.setText(f"Total: {_fmt_bags(ln['bags'])} bags  -  {ln['kg']:,.2f} kg"
                                           + (f"  -  avg {avg} kg / bag" if avg else ""))
         finally:
+            self.rounds_table.setUpdatesEnabled(True)
             self._rounds_busy = False
 
-    def _add_round_row(self, number: int, round_id, bags_text: str, kg_text: str):
+    def _add_round_row(self, number: int, round_id, bags_text: str, kg_text: str, row=None):
         t = self.rounds_table
-        row = t.rowCount()
-        t.insertRow(row)
+        if row is None:
+            row = t.rowCount()
+            t.insertRow(row)
         num = QTableWidgetItem(str(number))
         num.setFlags(Qt.ItemIsEnabled)
         num.setTextAlignment(Qt.AlignCenter)

@@ -243,6 +243,24 @@ class WeighTicketReviewDialog(QDialog):
         self._recalc_amounts()
         self._apply_mode()
 
+    def refresh_rounds(self):
+        """After a round was added, changed or removed: refresh only what a round changes (that product's rounds,
+        the bags / kg of each product and the totals) - not the whole ticket, which is slow on a long one."""
+        try:
+            self._t = WeighService.get_ticket(self.ticket_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Round", str(e))
+            return
+        self.lines_table.blockSignals(True)
+        for r in range(self.lines_table.rowCount()):
+            ln = self._line(int(self.lines_table.item(r, 0).data(Qt.UserRole)))
+            if ln:
+                self.lines_table.item(r, 2).setText(_fmt_bags(ln["bags"]))
+                self.lines_table.item(r, 3).setText(f"{ln['kg']:,.2f}")
+        self.lines_table.blockSignals(False)
+        self._render_rounds()
+        self._recalc_amounts()
+
     def _apply_mode(self):
         ed = self.editable
         for w in (self.btn_add_round, self.btn_remove_round, self.add_bags, self.add_kg, self.btn_finalize,
@@ -262,10 +280,10 @@ class WeighTicketReviewDialog(QDialog):
         self._active_line = int(it.data(Qt.UserRole)) if it else 0
         ln = self._line(self._active_line)
         self.rounds_table.blockSignals(True)
-        self.rounds_table.setRowCount(0)
-        for r in (ln["rounds"] if ln else []):
-            row = self.rounds_table.rowCount()
-            self.rounds_table.insertRow(row)
+        self.rounds_table.setUpdatesEnabled(False)               # 50+ rounds: repaint once at the end
+        self.rounds_table.clearContents()
+        self.rounds_table.setRowCount(len(ln["rounds"]) if ln else 0)
+        for row, r in enumerate(ln["rounds"] if ln else []):
             avg = avg_kg_per_bag(r["weight_kg"], r["bags"])
             for c, v in enumerate((str(r["round_no"]), _fmt_bags(r["bags"]), f"{r['weight_kg']:.2f}",
                                    "" if avg is None else f"{avg:,.2f}")):
@@ -277,6 +295,7 @@ class WeighTicketReviewDialog(QDialog):
                 if r.get("edited") and c:
                     cell.setForeground(QColor("#b45309"))
                 self.rounds_table.setItem(row, c, cell)
+        self.rounds_table.setUpdatesEnabled(True)
         self.rounds_table.blockSignals(False)
 
     def _recalc_amounts(self, *_a):
@@ -305,7 +324,7 @@ class WeighTicketReviewDialog(QDialog):
             WeighService.update_round(rid, bags=bags, weight_kg=kg)
         except Exception as e:
             QMessageBox.warning(self, "Round", str(e))
-        QTimer.singleShot(0, lambda: self.reload(self._active_line))     # not inside the edit's own signal
+        QTimer.singleShot(0, self.refresh_rounds)     # not inside the edit's own signal
 
     def _add_round(self):
         if not self._active_line:
@@ -319,7 +338,7 @@ class WeighTicketReviewDialog(QDialog):
             return
         self.add_bags.clear()
         self.add_kg.clear()
-        self.reload(self._active_line)
+        self.refresh_rounds()
 
     def _remove_round(self):
         row = self.rounds_table.currentRow()
@@ -332,7 +351,7 @@ class WeighTicketReviewDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Round", str(e))
             return
-        self.reload(self._active_line)
+        self.refresh_rounds()
 
     # ------------------------------------------------------------------ weigher: save the corrections
     def save_changes(self):
