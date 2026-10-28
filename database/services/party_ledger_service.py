@@ -29,6 +29,76 @@ from database.models.advance_allocations import AdvanceAllocation
 from database.models.sale_discount import SaleDiscount
 
 
+def _m(v) -> str:
+    return f"\u20a6{float(v or 0):,.2f}"
+
+
+def _advance_detail(a, amount: float, given: bool, uses, cash_settled: float, used: float, voided: bool,
+                    user: str) -> Dict[str, str]:
+    """Every fact about one advance, in words: which way, how much, what it was used on, what is left."""
+    way = ("Advance OUT - money we gave to the party (to be set against what we owe them)" if given
+           else "Advance IN - money the party gave us (to be set against what they owe us)")
+    parts = [f"{way}: {_m(amount)}"]
+    if a.ledger:
+        parts.append(f"Ledger: {a.ledger}")
+    if voided:
+        parts.append("VOIDED - no longer counts in any balance")
+    else:
+        if uses or cash_settled:
+            bits = [f"{'PUR' if u.entity_type == 'purchase' else 'SAL'}-{int(u.entity_id)} {_m(u.amount)}" for u in uses]
+            if cash_settled:
+                bits.append(f"settled in cash/transfer {_m(cash_settled)}")
+            parts.append(f"Used {_m(used)}: " + ", ".join(bits))
+        else:
+            parts.append("Not used yet")
+        parts.append(f"Still unused: {_m(max(amount - used, 0.0))}")
+    parts.append("Recorded " + (f"by {user}" if user else "by the system"))
+    if a.notes:
+        parts.append(f"Note: {a.notes}")
+    summary = f"{'Advance OUT' if given else 'Advance IN'} {_m(amount)}"
+    if voided:
+        summary += " - VOIDED"
+    elif used and used >= amount - 0.005:
+        summary += " - fully used"
+    elif used:
+        summary += f" - {_m(used)} used, {_m(amount - used)} unused"
+    else:
+        summary += " - unused"
+    if a.notes:
+        summary += f"  |  {a.notes}"
+    return {"summary": summary, "text": "\n".join(parts)}
+
+
+def _payment_detail(pay, ref: str, amount: float, is_sale: bool, what: str, bal, net_total, adv_sources,
+                    user: str) -> Dict[str, str]:
+    """Every fact about one payment, in words: who paid whom, how, for what, and what it left owing."""
+    method = (pay.method or "").lower()
+    word = {"cash": "Cash", "transfer": "Bank transfer", "bank": "Bank", "pos": "POS", "mobile": "Mobile money",
+            "cheque": "Cheque", "advance": "From advance"}.get(method, method.capitalize() or "Payment")
+    if is_sale:
+        head = f"{word}: customer paid us {_m(amount)} for {ref}"
+    else:
+        head = f"{word}: we paid the supplier {_m(amount)} for {ref}"
+    if method == "advance" and adv_sources:
+        head = f"From advance: {_m(amount)} of {', '.join(adv_sources)} set against {ref}"
+    parts = [head]
+    if what:
+        parts.append(f"For: {what}")
+    if net_total is not None:
+        parts.append(f"{ref} total: {_m(net_total)}")
+    if bal:
+        parts.append(f"Owed before this payment: {_m(bal['before'])}  |  after: {_m(bal['after'])}")
+    parts.append("Recorded " + (f"by {user}" if user else "by the system"))
+    if pay.notes:
+        parts.append(f"Note: {pay.notes}")
+    summary = head + (f"  |  {what}" if what else "")
+    if bal:
+        summary += f"  |  owed {_m(bal['before'])} -> {_m(bal['after'])}"
+    if pay.notes and method != "advance":
+        summary += f"  |  {pay.notes}"
+    return {"summary": summary, "text": "\n".join(parts)}
+
+
 def _doc_payment_status(net_total: float, settled: float, balance: float) -> str:
     if net_total <= 0:
         return "paid"
@@ -515,13 +585,33 @@ class PartyLedgerService:
                 .all()
             )
 
+            from database.models.user import User
+            adv_ids = [int(a.id) for a in adv]
+            adv_uses: Dict[int, List] = {}
+            for al in (s.query(AdvanceAllocation).filter(AdvanceAllocation.advance_id.in_(adv_ids or [0]))
+                       .order_by(AdvanceAllocation.id).all()):
+                adv_uses.setdefault(int(al.advance_id), []).append(al)
+            adv_cash: Dict[int, float] = {}
+            for eid, amt in (s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
+                             .filter(Payment.entity_type == "advance", Payment.entity_id.in_(adv_ids or [0]))
+                             .filter(Payment.status != "voided").group_by(Payment.entity_id).all()):
+                adv_cash[int(eid)] = float(amt or 0)
+            adv_users = {int(u.id): u.username for u in s.query(User).filter(
+                User.id.in_({int(a.created_by_user_id) for a in adv if a.created_by_user_id} or {0})).all()}
+
             for a in adv:
                 if not _in_range(a.created_at):
                     continue
                 amt = float(a.amount or 0)
+                given = (a.direction or "").lower() == "given"
+                uses = adv_uses.get(int(a.id), [])
+                used = sum(float(u.amount or 0) for u in uses) + adv_cash.get(int(a.id), 0.0)
+                voided = (a.status or "") == "voided"
+                detail = _advance_detail(a, amt, given, uses, adv_cash.get(int(a.id), 0.0), used, voided,
+                                         adv_users.get(int(a.created_by_user_id or 0), ""))
 
                 # normalize direction
-                if (a.direction or "").lower() == "given":
+                if given:
                     amt = -amt
 
                 rows.append({
@@ -529,11 +619,13 @@ class PartyLedgerService:
                     "ledger": "money",
                     "type": "advance",
                     "reference": f"ADV-{a.id}",
-                    "summary": a.notes or "Advance",
+                    "summary": detail["summary"],
+                    "detail": detail["text"],
                     "total": amt,
-                    "paid": None,
-                    "balance": None,
+                    "paid": None if voided else used,                  # how much of it has been used
+                    "balance": None if voided else max(abs(amt) - used, 0.0),   # how much is still unused
                     "status": a.status,
+                    "operator": adv_users.get(int(a.created_by_user_id or 0), ""),
                 })
 
         # --------------------------------------------------
@@ -563,6 +655,16 @@ class PartyLedgerService:
                         if walkin_name else sa_true())
                 .all()
             )
+            pay_adv_sources: Dict[tuple, List[str]] = {}
+            if any((p.method or "") == "advance" for p in pay_rows):
+                for al in (s.query(AdvanceAllocation).filter(AdvanceAllocation.entity_type.in_(("sale", "purchase")))
+                           .filter(or_(and_(AdvanceAllocation.entity_type == "sale",
+                                            AdvanceAllocation.entity_id.in_(sale_ids or [0])),
+                                       and_(AdvanceAllocation.entity_type == "purchase",
+                                            AdvanceAllocation.entity_id.in_(purchase_ids or [0]))))
+                           .order_by(AdvanceAllocation.id).all()):
+                    pay_adv_sources.setdefault((al.entity_type, int(al.entity_id)), []).append(
+                        f"ADV-{int(al.advance_id)} (\u20a6{float(al.amount or 0):,.2f})")
             payer_ids = {int(p.created_by_user_id) for p in pay_rows if p.created_by_user_id}
             payer_names = {
                 int(u.id): u.username for u in s.query(User).filter(User.id.in_(payer_ids)).all()
@@ -595,13 +697,21 @@ class PartyLedgerService:
                     bal = pur_pay_balances.get(int(pay.id))
 
                 amount_val = float(pay.amount or 0)
+                is_sale = pay.entity_type == "sale"
+                what = (sale_items_detail if is_sale else pur_items_detail).get(eid, "")
+                detail = _payment_detail(
+                    pay, parent_ref, amount_val, is_sale, what, bal,
+                    (sale_net_totals if is_sale else pur_net_totals).get(eid),
+                    pay_adv_sources.get((pay.entity_type, eid), []),
+                    payer_names.get(int(pay.created_by_user_id or 0), ""))
 
                 rows.append({
                     "dt": pay.created_at,
                     "ledger": ledger,
                     "type": "payment",
                     "reference": parent_ref,
-                    "summary": f"{parent_ref} PAYMENT - {(pay.method or '').capitalize() or 'Payment'}",
+                    "summary": detail["summary"],
+                    "detail": detail["text"],
                     # "Total" here is the combined outstanding sum across
                     # every sale/purchase for the party right before this
                     # payment landed (same value as Balance Before) -

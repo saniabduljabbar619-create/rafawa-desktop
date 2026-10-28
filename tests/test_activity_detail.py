@@ -1,0 +1,44 @@
+"""The Activity tab says everything about an advance and about each payment, in words."""
+from database.services.advance_service import AdvanceService
+from database.services.party_ledger_service import PartyLedgerService
+from database.services.payment_center import PaymentCenter
+from database.services.payment_service import PaymentService
+from tests.conftest import ADMIN_ID, SUPPLIER_ID
+from tests.test_advance_settlement import _purchase
+
+
+def _rows(kind):
+    return [r for r in PartyLedgerService.list_activity_details(SUPPLIER_ID) if r["type"] == kind]
+
+
+def test_advance_row_tells_the_whole_story():
+    pid = _purchase()                                                    # 50,000
+    AdvanceService.record_advance_out(SUPPLIER_ID, 20000, ADMIN_ID, ledger="crops", notes="for the next lorry")
+    adv = _rows("advance")[0]
+    assert "Advance OUT" in adv["detail"] and "Not used yet" in adv["detail"] and "for the next lorry" in adv["detail"]
+    assert adv["paid"] == 0 and adv["balance"] == 20000
+    PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(pid, 12000)], ADMIN_ID)
+    adv = _rows("advance")[0]
+    assert f"PUR-{pid} ₦12,000.00" in adv["detail"] and "Still unused: ₦8,000.00" in adv["detail"]
+    assert "Recorded by" in adv["detail"]
+    assert adv["paid"] == 12000 and adv["balance"] == 8000
+    assert "12,000.00 used" in adv["summary"] and "8,000.00 unused" in adv["summary"]
+
+
+def test_payment_row_says_who_paid_whom_for_what_and_what_it_left():
+    pid = _purchase()
+    PaymentService.record_purchase_payment(pid, SUPPLIER_ID, 10000, ADMIN_ID, method="cash", notes="part payment")
+    pay = _rows("payment")[0]
+    assert f"we paid the supplier ₦10,000.00 for PUR-{pid}" in pay["detail"]
+    assert "Maize" in pay["detail"] and "₦50,000.00" in pay["detail"]
+    assert "Owed before this payment: ₦50,000.00" in pay["detail"] and "after: ₦40,000.00" in pay["detail"]
+    assert "part payment" in pay["detail"] and "Recorded by" in pay["detail"]
+    assert "owed ₦50,000.00 -> ₦40,000.00" in pay["summary"]
+
+
+def test_payment_from_an_advance_names_the_advance():
+    pid = _purchase()
+    AdvanceService.record_advance_out(SUPPLIER_ID, 20000, ADMIN_ID)
+    PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(pid, 15000)], ADMIN_ID)
+    pay = [r for r in _rows("payment")][0]
+    assert "From advance" in pay["detail"] and "ADV-" in pay["detail"] and "₦15,000.00" in pay["detail"]

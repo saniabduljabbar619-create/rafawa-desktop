@@ -8,7 +8,7 @@ from database.session import get_session
 from database.models.purchase import Purchase
 from database.models.purchase_return import PurchaseReturn
 from database.models.payment import Payment
-from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+from database.models.purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.party import Party
 from database.services.document_balance import document_balances
@@ -213,3 +213,127 @@ class PurchaseAdjustmentService:
             s.flush()
             new_id = int(row.id)
             return new_id
+
+    # ------------------------------------------------------------------ edit prices product by product
+    @staticmethod
+    def _check_may_edit(s, purchase: Purchase) -> None:
+        """Admin and cashier may edit any purchase's prices; a weigher only the purchases of their OWN tickets."""
+        from database.models.weigh_ticket import WeighTicket
+        from shared.auth.permissions import PermissionDenied, current_role
+        from shared.auth.session import get_session as get_login_session
+
+        role = current_role()
+        if role in ("admin", "cashier"):
+            return
+        if role == "weigher":
+            uid = int(getattr(get_login_session(), "user_id", 0) or 0)
+            own = s.query(WeighTicket.id).filter(WeighTicket.purchase_id == int(purchase.id),
+                                                 WeighTicket.weigher_user_id == uid).first()
+            if own:
+                return
+            raise PermissionDenied("A weigher can only edit the prices of their own weighings.")
+        raise PermissionDenied("You are not allowed to edit purchase prices.")
+
+    @staticmethod
+    def line_prices(purchase_id: int, session=None) -> List[Dict[str, Any]]:
+        """
+        Each product line of a purchase with the price it carries NOW (the recorded price plus every earlier edit),
+        what it is priced per (kg for crops, bag for fertilizer) and the line's current amount.
+        """
+        if session is not None:
+            return PurchaseAdjustmentService._line_prices(session, purchase_id)
+        with get_session() as s:
+            return PurchaseAdjustmentService._line_prices(s, purchase_id)
+
+    @staticmethod
+    def _line_prices(s, purchase_id: int) -> List[Dict[str, Any]]:
+        from database.models.product import Product
+        from database.models.purchase_item import PurchaseItem
+
+        out: List[Dict[str, Any]] = []
+        items = s.query(PurchaseItem).filter(PurchaseItem.purchase_id == int(purchase_id)).order_by(PurchaseItem.id).all()
+        names = {int(p.id): p.name for p in s.query(Product).filter(
+            Product.id.in_([int(i.product_id) for i in items] or [0])).all()}
+        deltas = {int(iid): float(a or 0) for iid, a in
+                  s.query(PurchasePriceAdjustmentLine.purchase_item_id,
+                          func.coalesce(func.sum(PurchasePriceAdjustmentLine.amount), 0))
+                  .filter(PurchasePriceAdjustmentLine.purchase_item_id.in_([int(i.id) for i in items] or [0]))
+                  .group_by(PurchasePriceAdjustmentLine.purchase_item_id).all()}
+        for it in items:
+            fert = it.product_type_snapshot == "fertilizer"
+            basis = float(it.qty_bags or 0) if fert else float(it.total_weight_kg or 0)
+            original = float(it.unit_cost_rate or 0)
+            extra = deltas.get(int(it.id), 0.0)
+            current = original + (extra / basis if basis else 0.0)
+            out.append({
+                "item_id": int(it.id), "product": names.get(int(it.product_id), f"Product#{it.product_id}"),
+                "unit": "bag" if fert else "kg", "qty": basis, "bags": int(it.qty_bags or 0),
+                "kg": float(it.total_weight_kg or 0), "original_rate": original,
+                "rate": round(current, 2), "amount": round(float(it.line_total or 0) + extra, 2),
+            })
+        return out
+
+    @staticmethod
+    def edit_prices(purchase_id: int, new_rates: Dict[int, float], created_by_user_id: int, reason: str = "") -> int:
+        """
+        Change the price of one or more products on a purchase already recorded. new_rates = {item_id: new price per
+        kg/bag}. Only lines whose price really changes are touched. The difference (new - old) x quantity is saved as
+        ONE additive PurchasePriceAdjustment, with a detail row per product - the original rows stay exactly as
+        recorded, so the books can always be read back as they were. Raises ValueError and saves nothing if a price
+        is not a positive number, nothing changed, or the new total would fall below what is already paid.
+        """
+        purchase_id = int(purchase_id or 0)
+        if purchase_id <= 0:
+            raise ValueError("purchase_id is required.")
+        if int(created_by_user_id or 0) <= 0:
+            raise ValueError("created_by_user_id is required.")
+        current = {l["item_id"]: l for l in PurchaseAdjustmentService.line_prices(purchase_id)}
+        changes = []
+        for item_id, raw in (new_rates or {}).items():
+            line = current.get(int(item_id))
+            if line is None:
+                raise ValueError("That product line is not on this purchase.")
+            try:
+                new = round(float(raw), 2)
+            except (TypeError, ValueError):
+                raise ValueError(f"{line['product']}: type the price as a number.")
+            if new <= 0:
+                raise ValueError(f"{line['product']}: the price must be more than zero.")
+            if abs(new - line["rate"]) < 0.005:
+                continue
+            amount = round((new - line["rate"]) * line["qty"], 2)
+            if amount == 0:
+                continue
+            changes.append((line, new, amount))
+        if not changes:
+            raise ValueError("No price was changed.")
+        total = round(sum(a for _l, _n, a in changes), 2)
+
+        with get_session() as s:
+            purchase = s.get(Purchase, purchase_id)
+            if not purchase:
+                raise ValueError("Purchase not found.")
+            if (purchase.status or "") != "completed":
+                raise ValueError("Only a completed purchase can have its prices edited.")
+            PurchaseAdjustmentService._check_may_edit(s, purchase)
+            nums = PurchaseAdjustmentService._purchase_balance(s, purchase)
+            if total < 0 and nums["net_total"] + total < nums["paid"] - 0.01:
+                raise ValueError(
+                    f"This lowers the total by \u20a6{abs(total):,.2f}, below the \u20a6{nums['paid']:,.2f} already "
+                    "paid. Void or reduce a payment first.")
+            what = "; ".join(f"{l['product']} {l['rate']:,.2f}->{n:,.2f}/{l['unit']} x {l['qty']:,.0f}" for l, n, _a in changes)
+            row = PurchasePriceAdjustment(
+                purchase_id=purchase_id, amount=total, created_by_user_id=int(created_by_user_id),
+                reason=(("Price edit: " + what + (f" - {reason.strip()}" if (reason or "").strip() else ""))[:255]))
+            s.add(row)
+            s.flush()
+            for l, n, a in changes:
+                s.add(PurchasePriceAdjustmentLine(adjustment_id=int(row.id), purchase_item_id=l["item_id"],
+                                                  old_rate=l["rate"], new_rate=n, basis_qty=l["qty"],
+                                                  basis_unit=l["unit"], amount=a))
+            from database.services.audit_service import AuditService
+            AuditService.record("purchase.price_edit", "purchase", purchase_id,
+                                f"{purchase.purchase_no or f'PUR-{purchase_id}'}: {what} (total {total:+,.2f})", session=s)
+            s.commit()
+            return int(row.id)
+

@@ -23,7 +23,7 @@ from .advance_allocations import AdvanceAllocation # ⚡ Streamlined to use rela
 
 from .cashier_settlement import CashierSettlement
 from .cash_shortage import CashShortage             # cash-handling shortage/overpayment corrections
-from .purchase_price_adjustment import PurchasePriceAdjustment  # after-the-fact purchase price corrections
+from .purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine  # after-the-fact purchase price corrections (+ per-product detail)
 from .ledger_settlement_marker import LedgerSettlementMarker    # "everything settled" milestone markers
 from .driver import Driver                                      # reusable driver record for Sales/Purchase Order dispatch
 from .company import Company                                     # Sales Order buyer - never a customer, isolated from Party
