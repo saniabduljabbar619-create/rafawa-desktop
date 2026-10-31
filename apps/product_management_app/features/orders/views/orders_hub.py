@@ -1,14 +1,14 @@
 # apps/product_management_app/features/orders/views/orders_hub.py
 """
-Orders - ONE menu entry for Sales Orders and Purchase Orders.
+Orders - the one place for selling goods to companies (Sales Orders) and buying from suppliers (Purchase Orders).
 
-    Tracking board   every order of both kinds in one list: status, how long it has been on the road,
-                     overdue deliveries, value, payment state. Double-click to open, Track for history.
-    Sales Orders     companies we sell to (their profile holds the orders)
-    Purchase Orders  suppliers we buy from
+    Home          two big buttons to start an order, the orders that need attention with plain words for what to do
+                  next, and three small figures. Double-click an order to open it.
+    New order     one question - which company / supplier - then the order sheet opens.
+    Companies and suppliers   the people orders are made for (their profile holds all their orders), one click away.
 
-Companies and suppliers are one shared pool (OrderHubService.sync_partners), so a partner added on one
-side is pickable on the other.
+Companies and suppliers are one shared pool (OrderHubService.sync_partners), so a partner added on one side is
+pickable on the other.
 """
 from __future__ import annotations
 
@@ -20,14 +20,12 @@ from PySide2.QtWidgets import (
 )
 
 from database.services.order_hub_service import OrderHubService
+from shared.uix.layout.flow import FlowLayout, ResponsiveRow
 from shared.uix.widgets.cards import KpiCard, Segmented, money, style_table
 
-TABS = [("board", "All orders"), ("sales", "Sales Orders - companies"), ("purchase", "Purchase Orders - suppliers")]
-KIND_FILTER = [("", "All"), ("sales", "Sales"), ("purchase", "Purchase")]
-STATUS_FILTER = [("active", "Not finished"), ("draft", "Draft"), ("in_transit", "On the road"),
-                 ("confirmed", "Confirmed"), ("cancelled", "Cancelled"), ("", "All")]
-COLS = ["Type", "Order", "Company / supplier", "Status", "Created", "Days on the road", "Expected", "Value", "Payment"]
-_STATUS_TEXT = {"draft": "Draft", "in_transit": "On the road", "confirmed": "Confirmed", "cancelled": "Cancelled"}
+PARTNER_TABS = [("sales", "Companies we sell to"), ("purchase", "Suppliers we buy from")]
+FILTERS = [("open", "Needs attention"), ("finished", "Finished"), ("all", "All orders")]
+COLS = ["Order", "Company / supplier", "Type", "Status", "What to do next", "Value", "Still unpaid"]
 _STATUS_COLOR = {"draft": "#6b7280", "in_transit": "#1d4ed8", "confirmed": "#047857", "cancelled": "#b91c1c"}
 
 
@@ -35,8 +33,43 @@ def _day(dt) -> str:
     return dt.strftime("%d %b %Y") if dt else "-"
 
 
+def needs_attention(r) -> bool:
+    """Not finished: still a draft, still on the road, or delivered but not fully paid."""
+    if r["status"] in ("draft", "in_transit"):
+        return True
+    return r["status"] == "confirmed" and (r["balance"] or 0) > 0.005
+
+
+def status_words(r) -> str:
+    if r["status"] == "draft":
+        return "Draft"
+    if r["status"] == "in_transit":
+        d = r["days_out"]
+        base = "On the road"
+        return base + ("" if d is None else (" - today" if d == 0 else f" - {d} day{'s' if d != 1 else ''}"))
+    if r["status"] == "confirmed":
+        return "Delivered" if (r["balance"] or 0) > 0.005 else "Delivered and paid"
+    return "Cancelled"
+
+
+def next_step_words(r) -> str:
+    """The one thing to do with this order, in plain words."""
+    sales = r["kind"] == "sales"
+    if r["status"] == "draft":
+        return "Add the products, then press Dispatch" if sales else "Add the products, then mark it on the road"
+    if r["status"] == "in_transit":
+        late = "LATE - " if r["overdue"] else ""
+        return late + ("Confirm delivery when the goods arrive" if sales else "Confirm receipt when the goods arrive")
+    if r["status"] == "confirmed":
+        if (r["balance"] or 0) > 0.005:
+            return (f"Collect the payment ({money(r['balance'])})" if sales
+                    else f"Pay the supplier ({money(r['balance'])})")
+        return "Nothing - finished"
+    return "Nothing - cancelled"
+
+
 class OrdersBoard(QWidget):
-    """The unified tracking list."""
+    """The list of orders."""
 
     def __init__(self, hub):
         super().__init__()
@@ -46,16 +79,15 @@ class OrdersBoard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
-        bar = QHBoxLayout()
-        self.kind_seg = Segmented(KIND_FILTER)
-        self.status_seg = Segmented(STATUS_FILTER)
-        bar.addWidget(self.kind_seg)
+        bar = FlowLayout()
+        self.status_seg = Segmented(FILTERS)
         bar.addWidget(self.status_seg)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search an order number or a company / supplier name")
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(34)
-        bar.addWidget(self.search, 1)
+        self.search.setMinimumWidth(320)
+        bar.addWidget(self.search)
         self.btn_refresh = QPushButton("Refresh")
         bar.addWidget(self.btn_refresh)
         root.addLayout(bar)
@@ -65,63 +97,62 @@ class OrdersBoard(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        style_table(self.table, 42)
+        style_table(self.table, 44)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         root.addWidget(self.table, 1)
 
-        foot = QHBoxLayout()
-        self.btn_open = QPushButton("Open")
+        foot = FlowLayout()
+        self.btn_open = QPushButton("Open the order")
         self.btn_open.setObjectName("PrimaryButton")
         self.btn_track = QPushButton("Order history")
-        self.btn_new_sales = QPushButton("+ New Sales Order")
-        self.btn_new_purchase = QPushButton("+ New Purchase Order")
-        for b in (self.btn_open, self.btn_track):
-            foot.addWidget(b)
-        foot.addStretch(1)
-        foot.addWidget(self.btn_new_sales)
-        foot.addWidget(self.btn_new_purchase)
+        self.btn_track.setToolTip("Who did what to the selected order, and when")
+        foot.addWidget(self.btn_open)
+        foot.addWidget(self.btn_track)
+        hint = QLabel("Double-click an order to open it.")
+        hint.setStyleSheet("color:#6b7280;")
+        foot.addWidget(hint)
         root.addLayout(foot)
 
-        self.kind_seg.changed.connect(self.reload)
         self.status_seg.changed.connect(self.reload)
         self.search.textChanged.connect(self.reload)
         self.btn_refresh.clicked.connect(self.reload)
         self.btn_open.clicked.connect(self._open_selected)
         self.btn_track.clicked.connect(self._track)
         self.table.cellDoubleClicked.connect(lambda *_: self._open_selected())
-        self.btn_new_sales.clicked.connect(lambda: hub.show_tab("sales"))
-        self.btn_new_purchase.clicked.connect(lambda: hub.show_tab("purchase"))
 
     def reload(self, *_a) -> None:
-        self._rows = OrderHubService.board(self.kind_seg.key(), self.status_seg.key(), self.search.text())
-        self.table.setRowCount(len(self._rows))
-        for i, r in enumerate(self._rows):
-            road = "-"
-            if r["days_out"] is not None:
-                road = "today" if r["days_out"] == 0 else f"{r['days_out']} day(s)"
-            pay = (r["payment_status"] or "-").replace("_", " ").title()
-            if r["balance"]:
-                pay += f"  ({money(r['balance'])} due)"
-            vals = ["Sales" if r["kind"] == "sales" else "Purchase", r["order_no"], r["partner"],
-                    _STATUS_TEXT.get(r["status"], r["status"]) + ("  - OVERDUE" if r["overdue"] else ""),
-                    _day(r["created_at"]), road, _day(r["expected"]),
-                    money(r["value"]) + (" (est.)" if r["estimated"] and r["value"] else ""), pay]
+        key = self.status_seg.key()
+        rows = OrderHubService.board("", "", self.search.text())
+        if key == "open":
+            rows = [r for r in rows if needs_attention(r)]
+        elif key == "finished":
+            rows = [r for r in rows if not needs_attention(r)]
+        self._rows = rows
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            vals = [r["order_no"], r["partner"], "Sale" if r["kind"] == "sales" else "Purchase", status_words(r),
+                    next_step_words(r),
+                    money(r["value"]) + (" (est.)" if r["estimated"] and r["value"] else ""),
+                    money(r["balance"]) if r["balance"] and r["balance"] > 0.005 else "-"]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, (r["kind"], r["id"]))
+                it.setToolTip(f"Created {_day(r['created_at'])}" + (f"   Expected {_day(r['expected'])}" if r["expected"] else ""))
                 if c == 3:
                     it.setForeground(QColor("#b45309" if r["overdue"] else _STATUS_COLOR.get(r["status"], "#111827")))
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)
-                if c == 7:
+                if c == 4 and r["overdue"]:
+                    it.setForeground(QColor("#b91c1c"))
+                if c in (5, 6):
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(i, c, it)
 
     def _selected(self):
         row = self.table.currentRow()
         if row < 0 or row >= len(self._rows):
-            QMessageBox.information(self, "Orders", "Select an order first.")
+            QMessageBox.information(self, "Orders", "Click an order first.")
             return None
         return self._rows[row]
 
@@ -142,7 +173,7 @@ class OrdersBoard(QWidget):
         lines = [f"{e['at'].strftime('%d %b %Y %H:%M') if e['at'] else ''}   {e['event']}"
                  + (f"   (by {e['by']})" if e["by"] else "") for e in events]
         if r["overdue"]:
-            lines.append("\nExpected delivery date has passed - still on the road.")
+            lines.append("\nThe expected delivery date has passed - still on the road.")
         QMessageBox.information(self, f"{r['order_no']} - {r['partner']}", "\n".join(lines) or "No history yet.")
 
 
@@ -160,32 +191,52 @@ class OrdersHubView(QWidget):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
 
+        # ---- the header: only on the home page (deeper pages need the room)
+        self.header = QWidget()
+        hl = QVBoxLayout(self.header)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(10)
         titles = QVBoxLayout()
         titles.setSpacing(0)
         t = QLabel("Orders")
         t.setObjectName("Title")
-        s = QLabel("Every Sales Order (we sell to a company) and Purchase Order (we buy from a supplier), from draft to "
-                   "delivery. To start a new order, open Sales Orders or Purchase Orders and pick the company / supplier.")
+        s = QLabel("Sell goods to a company, or buy goods from a supplier. Open an order to see exactly what to do next.")
         s.setWordWrap(True)
         s.setStyleSheet("color:#6b7280; font-size:12px;")
         titles.addWidget(t)
         titles.addWidget(s)
-        root.addLayout(titles)
+        hl.addLayout(titles)
 
-        kp = QHBoxLayout()
-        kp.setSpacing(12)
-        self.kpi_sales = KpiCard("Sales on the road", "0", "", "blue")
-        self.kpi_purchase = KpiCard("Purchases on the road", "0", "", "amber")
-        self.kpi_overdue = KpiCard("Overdue deliveries", "0", "past expected date", "red")
-        self.kpi_owed = KpiCard("Order balances", "0.00", "", "green")
-        for k in (self.kpi_sales, self.kpi_purchase, self.kpi_overdue, self.kpi_owed):
-            kp.addWidget(k, 1)
-        root.addLayout(kp)
+        actions = FlowLayout(h_spacing=10)
+        self.btn_new_sales = QPushButton("+  New Sales Order      (sell to a company)")
+        self.btn_new_sales.setObjectName("PrimaryButton")
+        self.btn_new_purchase = QPushButton("+  New Purchase Order      (buy from a supplier)")
+        self.btn_new_purchase.setObjectName("PrimaryButton")
+        self.btn_partners = QPushButton("Companies and suppliers")
+        self.btn_partners.setToolTip("The people orders are made for - open one to see all their orders")
+        for b in (self.btn_new_sales, self.btn_new_purchase):
+            b.setMinimumHeight(42)
+        self.btn_partners.setMinimumHeight(42)
+        for b in (self.btn_new_sales, self.btn_new_purchase, self.btn_partners):
+            actions.addWidget(b)
+        hl.addLayout(actions)
 
-        self.tabs = Segmented(TABS)
+        kp = ResponsiveRow(spacing=12)
+        self.kpi_open = KpiCard("Orders needing attention", "0", "", "blue")
+        self.kpi_owed = KpiCard("Owed to us", "0.00", "money companies still have to pay", "green")
+        self.kpi_owe = KpiCard("We owe", "0.00", "money we still have to pay suppliers", "amber")
+        for k in (self.kpi_open, self.kpi_owed, self.kpi_owe):
+            kp.addWidget(k)
+        hl.addLayout(kp)
+        root.addWidget(self.header)
+
+        # ---- partners pages carry a way back
         self.tabs_row = QWidget()
         row = QHBoxLayout(self.tabs_row)
         row.setContentsMargins(0, 0, 0, 0)
+        self.btn_home = QPushButton("<  Back to orders")
+        self.tabs = Segmented(PARTNER_TABS, default_first=False)
+        row.addWidget(self.btn_home)
         row.addWidget(self.tabs)
         row.addStretch(1)
         root.addWidget(self.tabs_row)
@@ -197,6 +248,12 @@ class OrdersHubView(QWidget):
         self.stack.addWidget(self.board)
         self._pages = {"board": self.board}
         self.tabs.changed.connect(self.show_tab)
+        self.btn_home.clicked.connect(lambda: self.show_tab("board"))
+        self.btn_new_sales.clicked.connect(lambda: self.new_order("sales"))
+        self.btn_new_purchase.clicked.connect(lambda: self.new_order("purchase"))
+        self.btn_partners.clicked.connect(lambda: self.show_tab("sales"))
+        self.btn_new_sales.setVisible(self.is_admin)
+        self.btn_new_purchase.setVisible(self.is_admin)
         self.show_tab("board")
 
     def _page(self, key: str):
@@ -210,14 +267,28 @@ class OrdersHubView(QWidget):
 
     def show_tab(self, key: str) -> None:
         self._close_deep_pages()
-        self.tabs.set_key(key)
+        home = key == "board"
+        if key in ("sales", "purchase"):
+            self.tabs.set_key(key)
+        else:
+            self.tabs.clear()
         page = self._page(key)
         if hasattr(page, "refresh"):
             page.refresh()
-        if key == "board":
+        if home:
             self.board.reload()
         self.stack.setCurrentWidget(page)
+        self.header.setVisible(home)
+        self.tabs_row.setVisible(not home)
         self.refresh_kpis()
+
+    # ---------------------------------------------------------------- starting an order
+    def new_order(self, kind: str) -> None:
+        """Ask which company / supplier, then open a blank order sheet for them."""
+        from apps.product_management_app.features.orders.dialogs.partner_pick_dialog import PartnerPickDialog
+        dlg = PartnerPickDialog(kind, self, can_add=self.is_admin)
+        if dlg.exec_() == dlg.Accepted and dlg.partner_id:
+            self.open_order(kind, int(dlg.partner_id), None)
 
     # ---------------------------------------------------------------- deeper pages (profile, order sheet)
     def _push(self, page) -> None:
@@ -225,6 +296,7 @@ class OrdersHubView(QWidget):
         self.stack.addWidget(page)
         self.stack.setCurrentWidget(page)
         self.tabs_row.setVisible(False)
+        self.header.setVisible(False)
 
     def _pop(self) -> None:
         if not self._trail:
@@ -238,7 +310,10 @@ class OrdersHubView(QWidget):
             if hasattr(prev, fn):
                 getattr(prev, fn)()
                 break
-        self.tabs_row.setVisible(not self._trail)
+        if not self._trail:
+            home = prev is self.board
+            self.header.setVisible(home)
+            self.tabs_row.setVisible(not home)
         self.refresh_kpis()
 
     def _close_deep_pages(self) -> None:
@@ -261,13 +336,15 @@ class OrdersHubView(QWidget):
         self._push(page)
 
     def refresh(self) -> None:
-        self.show_tab(self.tabs.key())
+        self.show_tab(self.tabs.key() or "board")
 
     def refresh_kpis(self) -> None:
-        ov = OrderHubService.overview()
-        s, p = ov["sales"], ov["purchase"]
-        self.kpi_sales.set(str(s["in_transit"]), f"{money(s['in_transit_value'])} in transit  |  {s['draft']} draft")
-        self.kpi_purchase.set(str(p["in_transit"]), f"{money(p['in_transit_value'])} in transit  |  {p['draft']} draft")
-        self.kpi_overdue.set(str(s["overdue"] + p["overdue"]), f"sales {s['overdue']}  |  purchase {p['overdue']}")
-        self.kpi_owed.set(money(s["outstanding"] + p["outstanding"]),
-                          f"owed to us {money(s['outstanding'])}  |  we owe {money(p['outstanding'])}")
+        rows = OrderHubService.board("", "", "", limit=5000)
+        todo = [r for r in rows if needs_attention(r)]
+        late = sum(1 for r in todo if r["overdue"])
+        sales = sum(1 for r in todo if r["kind"] == "sales")
+        self.kpi_open.set(str(len(todo)), f"{sales} sales, {len(todo) - sales} purchases" + (f"   -   {late} LATE" if late else ""))
+        owed = sum((r["balance"] or 0) for r in rows if r["kind"] == "sales" and r["balance"] is not None)
+        owe = sum((r["balance"] or 0) for r in rows if r["kind"] == "purchase" and r["balance"] is not None)
+        self.kpi_owed.set(money(owed))
+        self.kpi_owe.set(money(owe))

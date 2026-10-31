@@ -58,26 +58,95 @@ def test_sidebar_has_a_single_orders_entry_in_both_workspaces(qapp):
         assert ws[key].routes[route]() is not None
 
 
-def test_board_shows_both_kinds_and_double_click_opens_the_order_sheet_and_back_returns(qapp):
+def test_home_lists_orders_needing_attention_and_double_click_opens_the_sheet_and_back_returns(qapp):
     so_c, _p, so, po = _seed()
     v = _hub()
-    assert v.board.table.rowCount() == 2 and v.kpi_sales.value.text() == "1"
-    v.board.kind_seg.set_key("sales")
-    v.board.reload()
-    v.board.table.selectRow(0)
-    v.board.table.cellDoubleClicked.emit(0, 0)
+    assert v.board.table.rowCount() == 2 and v.kpi_open.value.text() == "2"
+    assert v.tabs_row.isHidden() and not v.header.isHidden()
+    row = next(r for r in range(2) if v.board.table.item(r, 0).text() == f"SO-{so}")
+    v.board.table.selectRow(row)
+    v.board.table.cellDoubleClicked.emit(row, 0)
     from apps.product_management_app.features.orders.views.order_sheet_page import OrderSheetPage
     page = _sheet(v)
     assert isinstance(page, OrderSheetPage) and page.order_id == so and page.stage == "in_transit"
-    assert v.tabs_row.isHidden()
+    assert v.tabs_row.isHidden() and v.header.isHidden()                     # the order gets the whole screen
     page.btn_back.click()
-    assert _sheet(v) is v.board and not v.tabs_row.isHidden()
+    assert _sheet(v) is v.board and not v.header.isHidden() and v.tabs_row.isHidden()
+
+
+def test_home_says_in_plain_words_what_to_do_next_and_filters_by_attention(qapp):
+    from apps.product_management_app.features.orders.views.orders_hub import needs_attention, next_step_words, status_words
+    c, p, so, po = _seed()
+    v = _hub()
+    words = {v.board.table.item(r, 0).text(): (v.board.table.item(r, 3).text(), v.board.table.item(r, 4).text())
+             for r in range(v.board.table.rowCount())}
+    assert words[f"SO-{so}"] == ("On the road - today", "Confirm delivery when the goods arrive")
+    assert words[f"PO-{po}"] == ("Draft", "Add the products, then mark it on the road")
+    # a delivered order that is not yet paid still needs attention; a paid one is finished
+    row = {"kind": "sales", "status": "confirmed", "balance": 500.0, "overdue": False, "days_out": None}
+    assert needs_attention(row) and next_step_words(row) == "Collect the payment (500.00)" and status_words(row) == "Delivered"
+    row = dict(row, balance=0)
+    assert not needs_attention(row) and next_step_words(row) == "Nothing - finished" and status_words(row) == "Delivered and paid"
+    assert next_step_words({"kind": "purchase", "status": "confirmed", "balance": 70.0, "overdue": False}) == "Pay the supplier (70.00)"
+    assert next_step_words({"kind": "sales", "status": "in_transit", "overdue": True}).startswith("LATE - ")
+    # finished / all
+    v.board.status_seg.set_key("finished")
+    v.board.reload()
+    assert v.board.table.rowCount() == 0
+    v.board.status_seg.set_key("all")
+    v.board.reload()
+    assert v.board.table.rowCount() == 2
+    v.board.search.setText("farm")
+    assert v.board.table.rowCount() == 1 and v.board.table.item(0, 1).text() == "Farm Co"
+
+
+def test_new_order_asks_only_who_it_is_for_then_opens_the_blank_sheet(qapp, monkeypatch):
+    c, p, so, po = _seed()
+    v = _hub()
+    from apps.product_management_app.features.orders.dialogs import partner_pick_dialog as ppd
+    seen = {}
+
+    def fake_exec(self):
+        seen["kind"], seen["names"] = self.kind, [self.list.item(i).text() for i in range(self.list.count())]
+        self.search.setText("acme")
+        assert self.list.count() == 1 and self.btn_start.isEnabled()
+        self._start()
+        return self.Accepted
+
+    monkeypatch.setattr(ppd.PartnerPickDialog, "exec_", fake_exec)
+    v.btn_new_sales.click()
+    page = _sheet(v)
+    assert seen["kind"] == "sales" and len(seen["names"]) == 2
+    assert page.order_id is None and page.stage == "new" and page.partner_id == c
+    page.btn_back.click()
+    assert _sheet(v) is v.board
+    monkeypatch.setattr(ppd.PartnerPickDialog, "exec_", lambda self: self.Rejected)       # cancelled: nothing opens
+    v.btn_new_purchase.click()
+    assert _sheet(v) is v.board
+
+
+def test_picker_adds_a_new_partner_inline_and_starts_the_order(qapp, monkeypatch):
+    from apps.product_management_app.features.orders.dialogs.partner_pick_dialog import PartnerPickDialog
+    from apps.product_management_app.features.orders.views import partners_page as pp
+    dlg = PartnerPickDialog("purchase")
+    assert dlg.list.count() == 0 and "No supplier found" in dlg.hint.text() and not dlg.btn_start.isEnabled()
+
+    def fill(self):
+        self.name.setText("Green Valley")
+        self._save()
+        return self.Accepted
+
+    monkeypatch.setattr(pp.PartnerDialog, "exec_", fill)
+    dlg.btn_new.click()
+    assert dlg.partner_id and dlg.result() == dlg.Accepted
+    assert {c["name"] for c in CompanyService.search("")} == {"Green Valley"}              # shared pool
 
 
 def test_partner_lists_profile_and_new_order_navigation(qapp):
     c, _p, so, _po = _seed()
     v = _hub()
-    v.board.btn_new_sales.click()
+    v.btn_partners.click()
+    assert not v.tabs_row.isHidden() and v.header.isHidden()
     pl = v._pages["sales"]
     assert {pl.table.item(r, 1).text() for r in range(pl.table.rowCount())} == {"Acme Foods", "Farm Co"}   # shared pool
     row = next(r for r in range(pl.table.rowCount()) if pl.table.item(r, 1).text() == "Acme Foods")
@@ -96,6 +165,8 @@ def test_partner_lists_profile_and_new_order_navigation(qapp):
     _sheet(v).btn_back.click()
     prof.btn_back.click()
     assert _sheet(v) is pl and v.tabs.key() == "sales"
+    v.btn_home.click()
+    assert _sheet(v) is v.board and not v.header.isHidden()
 
 
 def test_add_a_new_partner_from_the_list(qapp, monkeypatch):
