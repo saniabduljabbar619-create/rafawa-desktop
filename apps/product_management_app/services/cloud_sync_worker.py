@@ -28,7 +28,10 @@ class CloudSyncWorker(QThread):
     # "syncing..." state, or show "not configured" instead of a spinner
     # that would never actually move.
     sync_started = Signal()
-    not_configured = Signal()
+    not_configured = Signal(str)          # why sync is not running (what to add / switch on)
+
+    # Errors of the pass that just ended (one line per failed table), for the bar's tooltip.
+    sync_detail = Signal(str)
 
     # (table_name, index, total, ok, pushed) - once per table, so the UI
     # can show real, table-by-table progress, not just a vague spinner.
@@ -42,11 +45,17 @@ class CloudSyncWorker(QThread):
         self._stop_requested = False
 
     def run(self):
+        problem = CloudSyncEngine.config_problem()
+        if problem:
+            # Settings are read once at start-up, so nothing can change while the app runs: say why, then end.
+            self.not_configured.emit(problem)
+            return
         while not self._stop_requested:
             if CloudSyncEngine.is_configured():
                 self.sync_started.emit()
 
                 failed_tables = []
+                errors = []
                 total_pushed = 0
 
                 def _on_table_done(table_name, index, total, result):
@@ -57,12 +66,12 @@ class CloudSyncWorker(QThread):
                         total_pushed += pushed
                     else:
                         failed_tables.append(table_name)
+                        errors.append(f"{table_name}: {result.get('error') or 'failed'}")
                     self.table_progress.emit(table_name, index, total, ok, pushed)
 
                 CloudSyncEngine.sync_all(progress_callback=_on_table_done)
+                self.sync_detail.emit("\n".join(errors))
                 self.sync_finished.emit(len(failed_tables) == 0, total_pushed, failed_tables)
-            else:
-                self.not_configured.emit()
 
             self._sleep_interruptibly(settings.CLOUD_SYNC_INTERVAL_SECONDS)
 
