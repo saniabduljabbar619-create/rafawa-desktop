@@ -33,26 +33,39 @@ def _m(v) -> str:
     return f"\u20a6{float(v or 0):,.2f}"
 
 
+def _stamp(dt) -> str:
+    return dt.strftime("%d %b %Y %H:%M") if dt else ""
+
+
 def _advance_detail(a, amount: float, given: bool, uses, cash_settled: float, used: float, voided: bool,
-                    user: str) -> Dict[str, str]:
-    """Every fact about one advance, in words: which way, how much, what it was used on, what is left."""
+                    user: str, user_names=None) -> Dict[str, str]:
+    """Every fact about one advance, in words: which way, how much, when and by whom, what it was used on (each use
+    with its date and who applied it), what is left, and what it does and does not touch."""
+    user_names = user_names or {}
     way = ("Advance OUT - money we gave to the party (to be set against what we owe them)" if given
            else "Advance IN - money the party gave us (to be set against what they owe us)")
-    parts = [f"{way}: {_m(amount)}"]
+    parts = [f"{way}: {_m(amount)}",
+             "Recorded " + (f"by {user}" if user else "by the system") + (f" on {_stamp(a.created_at)}" if a.created_at else "")
+             + " - entered by hand in the Advance Pay Center"]
     if a.ledger:
         parts.append(f"Ledger: {a.ledger}")
     if voided:
         parts.append("VOIDED - no longer counts in any balance")
     else:
         if uses or cash_settled:
-            bits = [f"{'PUR' if u.entity_type == 'purchase' else 'SAL'}-{int(u.entity_id)} {_m(u.amount)}" for u in uses]
+            parts.append(f"Used {_m(used)} so far:")
+            for u in uses:
+                doc = f"{'PUR' if u.entity_type == 'purchase' else 'SAL'}-{int(u.entity_id)}"
+                who = user_names.get(int(u.created_by_user_id or 0), "")
+                parts.append(f"   - {_m(u.amount)} set against {doc}" + (f" on {_stamp(u.created_at)}" if u.created_at else "")
+                             + (f" by {who}" if who else ""))
             if cash_settled:
-                bits.append(f"settled in cash/transfer {_m(cash_settled)}")
-            parts.append(f"Used {_m(used)}: " + ", ".join(bits))
+                parts.append(f"   - {_m(cash_settled)} settled in cash / transfer")
         else:
-            parts.append("Not used yet")
+            parts.append("Not used yet - it sits as advance until it is applied to a "
+                         + ("purchase" if given else "sale"))
         parts.append(f"Still unused: {_m(max(amount - used, 0.0))}")
-    parts.append("Recorded " + (f"by {user}" if user else "by the system"))
+    parts.append("Cash drawer: not counted (an advance is a balance with the party, not till cash)")
     if a.notes:
         parts.append(f"Note: {a.notes}")
     summary = f"{'Advance OUT' if given else 'Advance IN'} {_m(amount)}"
@@ -596,8 +609,10 @@ class PartyLedgerService:
                              .filter(Payment.entity_type == "advance", Payment.entity_id.in_(adv_ids or [0]))
                              .filter(Payment.status != "voided").group_by(Payment.entity_id).all()):
                 adv_cash[int(eid)] = float(amt or 0)
-            adv_users = {int(u.id): u.username for u in s.query(User).filter(
-                User.id.in_({int(a.created_by_user_id) for a in adv if a.created_by_user_id} or {0})).all()}
+            wanted_users = ({int(a.created_by_user_id) for a in adv if a.created_by_user_id}
+                            | {int(al.created_by_user_id) for rows_ in adv_uses.values() for al in rows_
+                               if al.created_by_user_id})
+            adv_users = {int(u.id): u.username for u in s.query(User).filter(User.id.in_(wanted_users or {0})).all()}
 
             for a in adv:
                 if not _in_range(a.created_at):
@@ -608,7 +623,7 @@ class PartyLedgerService:
                 used = sum(float(u.amount or 0) for u in uses) + adv_cash.get(int(a.id), 0.0)
                 voided = (a.status or "") == "voided"
                 detail = _advance_detail(a, amt, given, uses, adv_cash.get(int(a.id), 0.0), used, voided,
-                                         adv_users.get(int(a.created_by_user_id or 0), ""))
+                                         adv_users.get(int(a.created_by_user_id or 0), ""), adv_users)
 
                 # normalize direction
                 if given:

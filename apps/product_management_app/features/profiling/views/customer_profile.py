@@ -1039,6 +1039,8 @@ class CustomerProfileView(QWidget):
         self.revert_kind_combo.addItem("Purchase Transaction (no payment yet)", "purchase_txn")
         self.revert_kind_combo.addItem("Advance Settlement Payment", "advance")
         self.revert_kind_combo.addItem("Advance Recording", "advance_record")
+        self.revert_kind_combo.addItem("Purchase paid with Advance", "purchase_adv")
+        self.revert_kind_combo.addItem("Sale paid with Advance", "sale_adv")
         top.addWidget(self.revert_kind_combo)
         top.addStretch(1)
         self.btn_revert_refresh = QPushButton("Refresh")
@@ -1112,6 +1114,30 @@ class CustomerProfileView(QWidget):
                 for c, val in enumerate(cols, start=1):
                     it = QTableWidgetItem(str(val))
                     if c == 3:
+                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.revert_table.setItem(r, c, it)
+        elif kind in ("purchase_adv", "sale_adv"):
+            headers = ["Date", "Reference", "Total", "Advance used", "Which advance", "Paid in cash", "Still owed"]
+            self.revert_table.setColumnCount(len(headers))
+            self.revert_table.setHorizontalHeaderLabels(headers)
+
+            from database.services.advance_service import AdvanceService
+            rows = AdvanceService.list_documents_with_advance(
+                int(self.customer.id), "purchase" if kind == "purchase_adv" else "sale")
+            self.revert_table.setRowCount(len(rows))
+            for r, d in enumerate(rows):
+                created_at = d.get("created_at")
+                date_item = QTableWidgetItem(str(created_at)[:19] if created_at else "")
+                date_item.setData(Qt.UserRole, {"kind": kind, "id": int(d["id"]), "ref": d["reference"],
+                                                "advance_used": float(d["advance_used"]),
+                                                "cash_paid": float(d["cash_paid"])})
+                self.revert_table.setItem(r, 0, date_item)
+                which = ", ".join(f"ADV-{u['advance_id']} (\u20a6{u['amount']:,.2f})" for u in d["uses"])
+                cols = [d["reference"], f"{d['total']:,.2f}", f"{d['advance_used']:,.2f}", which,
+                        f"{d['cash_paid']:,.2f}", f"{d['balance']:,.2f}"]
+                for c, val in enumerate(cols, start=1):
+                    it = QTableWidgetItem(str(val))
+                    if c in (2, 3, 5, 6):
                         it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     self.revert_table.setItem(r, c, it)
         elif kind in ("sale_txn", "purchase_txn"):
@@ -1232,6 +1258,10 @@ class CustomerProfileView(QWidget):
                     return
                 cascade = True
 
+        if kind in ("purchase_adv", "sale_adv"):
+            self._revert_with_advance(kind, item_id, meta)
+            return
+
         label = {
             "advance_record": "advance recording",
             "sale_txn": "sale transaction",
@@ -1274,6 +1304,61 @@ class CustomerProfileView(QWidget):
 
         events.money_changed.emit()
         QMessageBox.information(self, "Reverted", "Done - every balance has been updated.")
+        self.refresh_all()
+
+    def _ask_advance_revert(self, kind: str, ref: str, advance_used: float, cash_paid: float) -> str:
+        """What to do with a purchase / sale that was paid with advance: 'release' (take the advance back, the document
+        stays and owes again), 'cancel' (cancel the whole document, advance given back) or '' (nothing)."""
+        word = "purchase" if kind == "purchase_adv" else "sale"
+        box = QMessageBox(self)
+        box.setWindowTitle("Revert " + ref)
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"{ref} was paid with \u20a6{advance_used:,.2f} of advance.\n\nWhat do you want to undo?")
+        box.setInformativeText(
+            f"Take the advance back: the {word} stays, owes that amount again, and the advance is unused again.\n"
+            f"Cancel the whole {word}: the {word} is voided (stock goes back) and the advance is given back."
+            + (f"\n\nNote: \u20a6{cash_paid:,.2f} was also paid in cash - cancelling needs that payment reverted first."
+               if cash_paid > 0.005 else ""))
+        b_release = box.addButton("Take the advance back", QMessageBox.AcceptRole)
+        b_cancel = box.addButton(f"Cancel the whole {word}", QMessageBox.DestructiveRole)
+        box.addButton("Keep it as it is", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        return "release" if clicked is b_release else ("cancel" if clicked is b_cancel else "")
+
+    def _revert_with_advance(self, kind: str, doc_id: int, meta: dict) -> None:
+        """Revert a purchase / sale that was paid with advance, one of two ways (see _ask_advance_revert)."""
+        from PySide2.QtWidgets import QInputDialog
+        from apps.product_management_app.app_state import events
+        from database.services.advance_service import AdvanceService
+
+        ref = meta.get("ref") or f"#{doc_id}"
+        choice = self._ask_advance_revert(kind, ref, float(meta.get("advance_used") or 0),
+                                          float(meta.get("cash_paid") or 0))
+        if choice not in ("release", "cancel"):
+            return
+        reason, ok = QInputDialog.getText(self, "Reason (optional)", "Why is this being reverted?")
+        if not ok:
+            return
+        entity = "purchase" if kind == "purchase_adv" else "sale"
+        try:
+            if choice == "release":
+                res = AdvanceService.revert_advance_use(entity, doc_id, self.session_user_id, reason or "")
+                done = (f"\u20a6{res['released']:,.2f} of advance is unused again and {ref} owes it again."
+                        if res["released"] > 0.004 else f"{ref} has no advance on it any more.")
+            elif entity == "purchase":
+                from database.services.purchase_service import PurchaseService
+                PurchaseService.void_purchase(doc_id, self.session_user_id, reason=reason or "")
+                done = f"{ref} is cancelled and its advance is unused again."
+            else:
+                from database.services.sales_service import SaleService
+                SaleService.void_sale(doc_id, self.session_user_id, reason=reason or "")
+                done = f"{ref} is cancelled and its advance is unused again."
+        except Exception as e:
+            QMessageBox.critical(self, "Revert Failed", str(e))
+            return
+        events.money_changed.emit()
+        QMessageBox.information(self, "Reverted", done + "\n\nEvery balance has been updated.")
         self.refresh_all()
 
     def _parse_reference(self, ref):

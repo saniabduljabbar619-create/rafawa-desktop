@@ -19,8 +19,10 @@ def test_advance_row_tells_the_whole_story():
     assert adv["paid"] == 0 and adv["balance"] == 20000
     PaymentCenter.apply_advance(SUPPLIER_ID, "purchase", [(pid, 12000)], ADMIN_ID)
     adv = _rows("advance")[0]
-    assert f"PUR-{pid} ₦12,000.00" in adv["detail"] and "Still unused: ₦8,000.00" in adv["detail"]
-    assert "Recorded by" in adv["detail"]
+    assert f"₦12,000.00 set against PUR-{pid}" in adv["detail"] and "Still unused: ₦8,000.00" in adv["detail"]
+    assert "Recorded by admin on" in adv["detail"] and "entered by hand in the Advance Pay Center" in adv["detail"]
+    assert " by admin" in adv["detail"].split("set against")[1]               # who applied it, and when
+    assert "Cash drawer: not counted" in adv["detail"] and "Ledger: crops" in adv["detail"]
     assert adv["paid"] == 12000 and adv["balance"] == 8000
     assert "12,000.00 used" in adv["summary"] and "8,000.00 unused" in adv["summary"]
 

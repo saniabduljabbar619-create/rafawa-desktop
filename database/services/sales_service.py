@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_ as sa_or
 
 from database.session import get_session
 from database.services.audit_service import AuditService
@@ -645,9 +645,12 @@ class SaleService:
             if sale.status == "voided":
                 return {"ok": True, "sale_id": sale_id, "already_voided": True}
 
+            # Money paid in cash / transfer blocks a void (void that payment first). Advance money does not: it is
+            # taken back here, so the customer's deposit becomes unused again.
             has_payment = (
                 s.query(Payment)
                 .filter(Payment.entity_type == "sale", Payment.entity_id == sale_id)
+                .filter(sa_or(Payment.method.is_(None), Payment.method != "advance"))
                 .first()
             )
             if has_payment is not None:
@@ -698,6 +701,9 @@ class SaleService:
                     ))
                     reversed_movements += 1
 
+            from database.services.advance_service import AdvanceService
+            advance_back = AdvanceService.release_in_session(s, "sale", sale_id, voided_by_user_id,
+                                                             reason or "Sale voided")["released"]
             sale.status = "voided"
             if reason:
                 sale.notes = ((sale.notes or "") + f" | [Voided: {reason}]").strip()
@@ -705,7 +711,8 @@ class SaleService:
                 "sale.void", "sale", sale_id,
                 f"Voided sale of {float(sale.total_amount or 0):,.2f}",
                 {"reason": reason, "total": float(sale.total_amount or 0),
-                 "buyer_party_id": sale.buyer_party_id, "stock_movements_reversed": reversed_movements},
+                 "buyer_party_id": sale.buyer_party_id, "stock_movements_reversed": reversed_movements,
+                 "advance_given_back": advance_back},
                 session=s)
 
         return {"ok": True, "sale_id": sale_id, "stock_movements_reversed": reversed_movements}
@@ -802,6 +809,7 @@ class SaleService:
                 s.query(Payment.entity_id)
                 .filter(Payment.entity_type == "sale",
                        Payment.entity_id.in_([sl.id for sl in sales]))
+                .filter(sa_or(Payment.method.is_(None), Payment.method != "advance"))
                 .distinct()
                 .all()
             } if sales else set()

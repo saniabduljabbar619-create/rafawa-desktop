@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Dict, List
 
-from sqlalchemy import func
+from sqlalchemy import func, or_ as sa_or
 
 from database.session import get_session
 from database.services.audit_service import AuditService
@@ -442,9 +442,12 @@ class PurchaseService:
             if purchase.status == "voided":
                 return {"ok": True, "purchase_id": purchase_id, "already_voided": True}
 
+            # Money paid in cash / transfer blocks a void (void that payment first). Advance money does not: it is
+            # taken back here, so the advance becomes unused again.
             has_payment = (
                 s.query(Payment)
                 .filter(Payment.entity_type == "purchase", Payment.entity_id == purchase_id)
+                .filter(sa_or(Payment.method.is_(None), Payment.method != "advance"))
                 .first()
             )
             if has_payment is not None:
@@ -495,6 +498,9 @@ class PurchaseService:
                     ))
                     reversed_movements += 1
 
+            from database.services.advance_service import AdvanceService
+            advance_back = AdvanceService.release_in_session(s, "purchase", purchase_id, voided_by_user_id,
+                                                             reason or "Purchase voided")["released"]
             purchase.status = "voided"
             if reason:
                 purchase.notes = ((purchase.notes or "") + f" | [Voided: {reason}]").strip()
@@ -503,7 +509,7 @@ class PurchaseService:
                 f"Voided purchase of {float(purchase.total_amount or 0):,.2f}",
                 {"reason": reason, "total": float(purchase.total_amount or 0),
                  "supplier_party_id": purchase.supplier_party_id,
-                 "stock_movements_reversed": reversed_movements}, session=s)
+                 "stock_movements_reversed": reversed_movements, "advance_given_back": advance_back}, session=s)
 
         return {"ok": True, "purchase_id": purchase_id, "stock_movements_reversed": reversed_movements}
 
@@ -529,6 +535,7 @@ class PurchaseService:
                 s.query(Payment.entity_id)
                 .filter(Payment.entity_type == "purchase",
                        Payment.entity_id.in_([p.id for p in purchases]))
+                .filter(sa_or(Payment.method.is_(None), Payment.method != "advance"))
                 .distinct()
                 .all()
             } if purchases else set()
