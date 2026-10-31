@@ -87,6 +87,10 @@ class PartnerProfilePage(QWidget):
         root.addLayout(kp)
 
         # where we stand beyond the orders themselves (positive net: they owe us; negative: we owe them)
+        self.statement_box = QWidget()                 # shown only when there is other money / an expense to talk about
+        sbl = QVBoxLayout(self.statement_box)
+        sbl.setContentsMargins(0, 0, 0, 0)
+        sbl.setSpacing(6)
         st = QHBoxLayout()
         st.setSpacing(10)
         self.k_money = kpi("Other money received")
@@ -94,11 +98,12 @@ class PartnerProfilePage(QWidget):
         self.k_net = kpi("Overall position", dark=True)
         for k in (self.k_money, self.k_recover, self.k_net):
             st.addWidget(k, 1)
-        root.addLayout(st)
+        sbl.addLayout(st)
         how = QLabel("Overall position = orders + other money + expenses we are owed. It tells you in one line who owes whom.")
         how.setObjectName("msHint")
         how.setWordWrap(True)
-        root.addWidget(how)
+        sbl.addWidget(how)
+        root.addWidget(self.statement_box)
         self.msg = QLabel("")
         self.msg.setWordWrap(True)
         self.msg.setVisible(False)
@@ -240,6 +245,8 @@ class PartnerProfilePage(QWidget):
         self.k_net.cap.setText("Overall: THEY owe us" if net > 0.005 else
                                ("Overall: WE owe them" if net < -0.005 else "Overall: all square"))
         self.statement = st
+        self.statement_box.setVisible(abs(st["money_net"]) > 0.005 or st["to_recover"] > 0.005 or abs(net) > 0.005
+                                      or bool(st["our_cost"]))
 
     # ------------------------------------------------------------------ money sheet (all orders + on account)
     def _order_choices(self):

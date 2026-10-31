@@ -30,7 +30,7 @@ from PySide2.QtWidgets import (
 from database.services.order_money_service import EXPENSE_CATEGORIES, OrderMoneyService
 from database.services.order_sheet_service import REVIEW_CATEGORIES, OrderSheetService, estimate
 from shared.auth.permissions import PermissionDenied
-from shared.uix.widgets.cards import avatar, chip, money
+from shared.uix.widgets.cards import Segmented, avatar, chip, money
 from apps.product_management_app.features.debt_center.sheet_style import STYLE
 from apps.product_management_app.features.debt_center.views.people_page import kpi
 from apps.product_management_app.features.debt_center.views.sheet_grid import SheetGrid
@@ -123,8 +123,9 @@ class OrderSheetPage(QWidget):
         self.k_paid = kpi("Paid so far")
         self.k_balance = kpi("Still to pay" if self.kind == "purchase" else "Still to receive")
         self.k_lines = kpi("Products")
-        for k in (self.k_value, self.k_paid, self.k_balance, self.k_lines):
+        for k in (self.k_value, self.k_paid, self.k_balance):
             kp.addWidget(k, 1)
+        self.k_lines.setVisible(False)                 # the number of products is plain to see in the table
         root.addLayout(kp)
 
         info = QHBoxLayout()
@@ -178,6 +179,24 @@ class OrderSheetPage(QWidget):
         self.msg.setVisible(False)
         root.addWidget(self.msg)
 
+        tabs = QHBoxLayout()
+        self.tabs = QTabBar()
+        self.tabs.setObjectName("msSheets")
+        self.tabs.setShape(QTabBar.RoundedNorth)
+        self.tabs.setExpanding(False)
+        self.tabs.setDrawBase(False)
+        self.tabs.setElideMode(Qt.ElideNone)
+        for text, tip in (("Products", "The products on this order, with their quantity and price"),
+                          ("Payments", "Money paid towards this order's price"),
+                          ("Costs & extras", "What we spent on this order (driver, fuel ...), and cash that moved "
+                                                    "between us outside the price (advances, loans, refunds)"),
+                          ("History", "Everything that happened to this order, in order")):
+            self.tabs.addTab(text)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
+        tabs.addWidget(self.tabs)
+        tabs.addStretch(1)
+        root.addLayout(tabs)
+
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
         self.slot_lines = QWidget()
@@ -195,26 +214,25 @@ class OrderSheetPage(QWidget):
         self.slot_hist = QWidget()
         self.slot_hist.setLayout(QVBoxLayout())
         self.slot_hist.layout().setContentsMargins(0, 0, 0, 0)
-        for s in (self.slot_lines, self.slot_pay, self.slot_money, self.slot_exp, self.slot_hist):
+        # "Costs and other money": two small sheets behind one switch, with a line saying what each is for
+        self.slot_extras = QWidget()
+        xl = QVBoxLayout(self.slot_extras)
+        xl.setContentsMargins(0, 0, 0, 0)
+        xl.setSpacing(6)
+        self.extras_seg = Segmented([("costs", "Costs we paid"), ("money", "Other money")])
+        xl.addWidget(self.extras_seg)
+        self.extras_help = QLabel("")
+        self.extras_help.setWordWrap(True)
+        self.extras_help.setStyleSheet("color:#6b7280; font-size:12px;")
+        xl.addWidget(self.extras_help)
+        self.extras_stack = QStackedWidget()
+        self.extras_stack.addWidget(self.slot_exp)
+        self.extras_stack.addWidget(self.slot_money)
+        xl.addWidget(self.extras_stack, 1)
+        self.extras_seg.changed.connect(self._extras_changed)
+        self._extras_changed("costs")
+        for s in (self.slot_lines, self.slot_pay, self.slot_extras, self.slot_hist):
             self.stack.addWidget(s)
-
-        tabs = QHBoxLayout()
-        self.tabs = QTabBar()
-        self.tabs.setObjectName("msSheets")
-        self.tabs.setShape(QTabBar.RoundedSouth)
-        self.tabs.setExpanding(False)
-        self.tabs.setDrawBase(False)
-        self.tabs.setElideMode(Qt.ElideNone)
-        for text, tip in (("Products", "The products on this order, with their quantity and price"),
-                          ("Payments", "Money paid towards this order's price"),
-                          ("Other money", "Cash that moved between us outside the order price (advances, loans, refunds)"),
-                          ("Expenses", "What we spent on this order (driver, fuel, food ...) and what they pay back"),
-                          ("History", "Everything that happened to this order, in order")):
-            self.tabs.addTab(text)
-            self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
-        tabs.addWidget(self.tabs)
-        tabs.addStretch(1)
-        root.addLayout(tabs)
 
         self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
         self.btn_add.clicked.connect(lambda: self.grid.add_row())
@@ -233,6 +251,14 @@ class OrderSheetPage(QWidget):
         self.pay_grid: SheetGrid = None
         self.money_grid: SheetGrid = None
         self.exp_grid: SheetGrid = None
+
+    def _extras_changed(self, key: str) -> None:
+        costs = key == "costs"
+        self.extras_stack.setCurrentIndex(0 if costs else 1)
+        self.extras_help.setText(
+            "Things we paid for on this order - driver, fuel, food. Mark each one \u201cThey pay back\u201d or \u201cOur cost\u201d."
+            if costs else
+            "Cash that moved between us but is NOT the order price - an advance, a loan, a refund.")
 
     # ================================================================== state
     @property
