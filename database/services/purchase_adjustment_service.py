@@ -339,6 +339,17 @@ class PurchaseAdjustmentService:
                 s.add(PurchasePriceAdjustmentLine(adjustment_id=int(row.id), purchase_item_id=l["item_id"],
                                                   old_rate=l["rate"], new_rate=n, basis_qty=l["qty"],
                                                   basis_unit=l["unit"], amount=a))
+            from shared.auth.permissions import current_role
+            if current_role() == "weigher":
+                # a weigher correcting their own weighing: their price follows (admin / cashier edits never move it)
+                from database.models.weigh_ticket import WeighTicket
+                tk = s.query(WeighTicket).filter(WeighTicket.purchase_id == purchase_id).first()
+                if tk is not None:
+                    weighed = [ln for ln in tk.lines if ln.rounds]
+                    position = {l["item_id"]: i for i, l in enumerate(current.values())}
+                    if len(weighed) == len(current):
+                        for l, n, _a in changes:
+                            weighed[position[l["item_id"]]].weigher_price = n
             from database.services.audit_service import AuditService
             AuditService.record("purchase.price_edit", "purchase", purchase_id,
                                 f"{purchase.purchase_no or f'PUR-{purchase_id}'}: {what} (total {total:+,.2f})", session=s)

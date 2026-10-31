@@ -24,7 +24,7 @@ from database.services.weigh_service import WeighService, avg_kg_per_bag
 from shared.auth.session import require_user_id
 from shared.uix.widgets.cards import avatar, chip, style_table
 
-LINE_COLS = ["Product", "Area / Grade", "Bags", "Weight (kg)", "Price per kg", "Amount"]
+LINE_COLS = ["Product", "Area / Grade", "Bags", "Weight (kg)", "Price per kg", "Amount", "Weigher's price"]
 
 
 def _fmt_bags(v) -> str:
@@ -231,6 +231,12 @@ class WeighTicketReviewDialog(QDialog):
             amt = QTableWidgetItem("")
             amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.lines_table.setItem(r, 5, amt)
+            wp = ln.get("weigher_price")                       # what the weigher set - changing the price here never moves it
+            ref = QTableWidgetItem(f"₦{wp:,.2f}" if wp else "-")
+            ref.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            ref.setForeground(QColor("#6b7280"))
+            ref.setToolTip("The price the weigher set. Changing the price here does not change it.")
+            self.lines_table.setItem(r, 6, ref)
             if int(ln["id"]) == self._active_line:
                 self.lines_table.selectRow(r)
         if self.lines_table.currentRow() < 0 and self.lines_table.rowCount():
@@ -263,6 +269,7 @@ class WeighTicketReviewDialog(QDialog):
 
     def _apply_mode(self):
         ed = self.editable
+        self.lines_table.setColumnHidden(6, self.mode == "weigher")
         for w in (self.btn_add_round, self.btn_remove_round, self.add_bags, self.add_kg, self.btn_finalize,
                   self.btn_reject):
             w.setEnabled(ed)

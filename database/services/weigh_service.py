@@ -562,7 +562,11 @@ class WeighService:
             amount = round(kg * price, 2) if (with_prices and price is not None) else None
             if amount:
                 total_amt += amount
+            wp = ln.weigher_price if ln.weigher_price is not None else ln.unit_price     # older rows: same as theirs
+            wprice = _f(wp) if wp is not None else None
             lines.append({
+                "weigher_price": wprice if with_prices else None,
+                "weigher_amount": round(kg * wprice, 2) if (with_prices and wprice is not None) else None,
                 "id": int(ln.id), "product_id": int(ln.product_id),
                 "product_name": ln.product.name if ln.product else "", "sku": (ln.product.sku if ln.product else "") or "",
                 "area": ln.area or "", "grade": ln.grade or "",
@@ -585,6 +589,17 @@ class WeighService:
                     d["unit_price"] = p["rate"]
                     d["amount"] = round(d["kg"] * p["rate"], 2)
                     total_amt += d["amount"]
+        # Two prices live side by side: the weigher's own, and the one intake confirms (the purchase's, once
+        # finalized). A weigher always sees their own; everyone else sees the confirmed one.
+        weigher_total = round(sum((d["weigher_amount"] or 0) for d in lines), 2) if with_prices else None
+        confirmed_total = round(total_amt, 2) if with_prices else None
+        for d in lines:
+            d["confirmed_price"], d["confirmed_amount"] = d["unit_price"], d["amount"]
+        if with_prices and _is_weigher():
+            for d in lines:
+                if d["weigher_price"] is not None:
+                    d["unit_price"], d["amount"] = d["weigher_price"], d["weigher_amount"]
+            total_amt = weigher_total
         tb, tk = WeighService._totals(t)
         payment = {"status": "Unpaid", "paid": 0.0, "balance": round(total_amt, 2), "total": round(total_amt, 2)}
         if with_prices and t.purchase_id:                       # finalized: the real purchase's position
@@ -614,6 +629,8 @@ class WeighService:
             "cancel_reason": t.cancel_reason or "",
             "total_bags": tb, "total_kg": tk,
             "total_amount": round(total_amt, 2) if with_prices else None,
+            "weigher_total": weigher_total, "confirmed_total": confirmed_total,
+            "is_walkin": bool(t.walkin_name) or bool(t.party is not None and t.party.party_type == "walkin"),
             "lines": lines,
         }
 
@@ -631,9 +648,14 @@ class WeighService:
     @staticmethod
     @require_role(*ANY_STAFF)
     def list_tickets(status: Optional[Iterable[str]] = None, mine_only: bool = False,
-                     limit: int = 300, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+                     limit: int = 300, since: Optional[datetime] = None, search: str = "",
+                     date_from: Optional[datetime] = None, date_to: Optional[datetime] = None,
+                     walkins: Optional[bool] = None) -> List[Dict[str, Any]]:
         """Summaries, newest first (with amounts). A weigher only ever sees their own tickets.
-        `since` keeps only tickets started at or after that moment (the weigher's screen passes today's midnight)."""
+        `since` keeps only tickets started at or after that moment (the weigher's screen passes today's midnight).
+        `search` matches the ticket number, the person's name / phone / walk-in code, or a product on it;
+        `date_from` / `date_to` keep tickets whose shown date and time (submitted, else started) falls in the range;
+        `walkins` True / False keeps only walk-ins / only registered customers and suppliers."""
         statuses = [x for x in ([status] if isinstance(status, str) else list(status or [])) if x in STATUSES]
         with get_session() as s:
             q = s.query(WeighTicket)
@@ -643,6 +665,28 @@ class WeighService:
                 q = q.filter(WeighTicket.created_at >= since)
             if mine_only or _is_weigher():
                 q = q.filter(WeighTicket.weigher_user_id == _uid())
+            shown = func.coalesce(WeighTicket.submitted_at, WeighTicket.created_at)
+            if date_from is not None:
+                q = q.filter(shown >= date_from)
+            if date_to is not None:
+                q = q.filter(shown <= date_to)
+            if walkins is not None:
+                is_w = or_(WeighTicket.walkin_name.isnot(None) & (WeighTicket.walkin_name != ""),
+                           WeighTicket.party_id.in_(s.query(Party.id).filter(Party.party_type == "walkin")))
+                q = q.filter(is_w if walkins else ~is_w)
+            text = (search or "").strip().lower()
+            if text:
+                like = f"%{text}%"
+                from database.models.weigh_ticket import WeighTicketLine as _L
+                q = q.filter(or_(
+                    func.lower(func.coalesce(WeighTicket.ticket_no, "")).like(like),
+                    func.lower(func.coalesce(WeighTicket.walkin_name, "")).like(like),
+                    WeighTicket.party_id.in_(s.query(Party.id).filter(or_(
+                        func.lower(func.coalesce(Party.display_name, "")).like(like),
+                        func.lower(func.coalesce(Party.phone, "")).like(like),
+                        func.lower(func.coalesce(Party.walkin_code, "")).like(like)))),
+                    WeighTicket.id.in_(s.query(_L.ticket_id).join(Product, Product.id == _L.product_id)
+                                       .filter(func.lower(Product.name).like(like)))))
             tickets = WeighService._eager(q).order_by(WeighTicket.id.desc()).limit(int(limit)).all()
             ctx = WeighService._prefetch(s, tickets)
             out = []
@@ -667,11 +711,20 @@ class WeighService:
             raise ValueError(f"This ticket is {t.status}.")
         if _is_weigher():
             WeighService._assert_can_edit(t)               # their own ticket only
+        weigher = _is_weigher()
         if _f(line.unit_price) != price:
             AuditService.record("weigh.price", "weigh_ticket", int(t.id),
-                                f"{t.ticket_no}: {line.product.name if line.product else 'line'} priced at {price:,.2f}/kg",
-                                session=s)
-        line.unit_price = price
+                                f"{t.ticket_no}: {line.product.name if line.product else 'line'} "
+                                f"{'priced by the weigher' if weigher else 'confirmed'} at {price:,.2f}/kg"
+                                + ("" if weigher or line.weigher_price is None
+                                   else f" (weigher's price {_f(line.weigher_price):,.2f})"), session=s)
+        if weigher:
+            line.weigher_price = price                    # their own price - and the one intake starts from
+            line.unit_price = price
+        else:
+            if line.weigher_price is None:
+                line.weigher_price = line.unit_price      # freeze what the weigher had set before it changes
+            line.unit_price = price
 
     @staticmethod
     @require_role(*ANY_STAFF)
@@ -705,6 +758,48 @@ class WeighService:
 
     @staticmethod
     @require_role(*INTAKE_ROLES)
+    def pay_walkins(ticket_ids: Iterable[int], method: str = "cash") -> Dict[str, Any]:
+        """
+        Finalize and pay several walk-in weighings in one go: each ticket becomes its purchase at its current
+        (confirmed) price and the whole amount is paid out with `method`. A ticket that cannot be done (not a
+        walk-in, not awaiting intake, no price) is skipped with its reason; the others still go through.
+        Returns {"paid": [{ticket_no, purchase_id, amount}], "failed": [{ticket_no, error}], "total"}.
+        """
+        from database.services.document_balance import document_balances
+        from database.services.payment_service import PaymentService
+
+        method = (method or "cash").strip().lower()
+        paid, failed = [], []
+        for tid in dict.fromkeys(int(x) for x in ticket_ids):
+            no = _ticket_no(tid)
+            try:
+                with get_session() as s:
+                    t = WeighService._load_ticket(s, tid)
+                    no = t.ticket_no or no
+                    walkin = bool(t.walkin_name) or (t.party is not None and t.party.party_type == "walkin")
+                    status, party_id = t.status, int(t.party_id)
+                if not walkin:
+                    raise ValueError("Not a walk-in - pay it from its own profile.")
+                if status != "submitted":
+                    raise ValueError(f"It is {status}, not awaiting intake.")
+                res = WeighService.finalize_ticket(tid)
+                pid = int(res["purchase_id"])
+                with get_session() as s:
+                    owed = float(document_balances(s, "purchase", [pid])[pid].balance)
+                if owed > 0.005:
+                    PaymentService.record_purchase_payment(
+                        pid, party_id, owed, _uid(), method=method, notes=f"Walk-in payment {no} (paid together)")
+                paid.append({"ticket_no": no, "purchase_id": pid, "amount": round(owed, 2)})
+            except Exception as e:
+                failed.append({"ticket_no": no, "error": str(e)})
+        total = round(sum(p["amount"] for p in paid), 2)
+        if paid:
+            AuditService.record("weigh.pay_walkins", "weigh_ticket", None,
+                                f"{len(paid)} walk-in weighing(s) paid together ({method}): {total:,.2f}")
+        return {"paid": paid, "failed": failed, "total": total}
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
     def finalize_ticket(ticket_id: int, prices: Optional[Dict[int, float]] = None) -> Dict[str, Any]:
         """Confirm prices and turn the ticket into a real purchase (stock in, payable raised).
         Payment is taken afterwards through the normal purchase payment screen."""
@@ -724,6 +819,8 @@ class WeighService:
                 price = prices.get(int(ln.id), _f(ln.unit_price))
                 if price <= 0:
                     raise ValueError(f"Confirm a price per kg for {ln.product.name if ln.product else 'every line'} first.")
+                if ln.weigher_price is None:
+                    ln.weigher_price = ln.unit_price         # the weigher's price stays as they set it
                 ln.unit_price = price
                 bags = sum(_f(r.bags) for r in ln.rounds)
                 kg = sum(_f(r.weight_kg) for r in ln.rounds)

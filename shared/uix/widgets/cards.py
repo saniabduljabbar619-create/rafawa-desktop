@@ -141,6 +141,11 @@ class Segmented(QWidget):
         if key in self._keys:
             self._buttons[self._keys.index(key)].setChecked(True)
 
+    def set_label(self, key: str, label: str) -> None:
+        """Change a button's text (e.g. to show a count) without touching the selection."""
+        if key in self._keys:
+            self._buttons[self._keys.index(key)].setText(label)
+
     def key(self) -> str:
         for k, b in zip(self._keys, self._buttons):
             if b.isChecked():
