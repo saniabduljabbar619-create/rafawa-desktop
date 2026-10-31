@@ -27,6 +27,7 @@ from PySide2.QtWidgets import (
 from database.services.drawer_service import DrawerService
 from database.services.user_admin_service import UserAdminService
 from shared.auth.session import require_user_id, get_session as get_user_session
+from shared.uix.layout.flow import FlowLayout, ResponsiveRow
 from apps.product_management_app.features.admin_users.views.drawer_widgets import (
     MoneyCard, StatCard, VerdictRow, Banner, money, GREEN, RED, GREY, INK, LINE
 )
@@ -117,7 +118,7 @@ class DrawerPanel(QWidget):
         outer.setSpacing(12)
 
         # ---------------- header (pinned, never scrolls) --------------
-        head = QHBoxLayout()
+        head = FlowLayout()
         title = QLabel(f"{username}  \u2022  {role}")
         title.setStyleSheet(f"font-size: 18px; font-weight: 900; color: {INK};")
         head.addWidget(title)
@@ -170,8 +171,7 @@ class DrawerPanel(QWidget):
         self.banner = Banner()
         root.addWidget(self.banner)
 
-        cards = QHBoxLayout()
-        cards.setSpacing(10)
+        cards = ResponsiveRow(spacing=10)
         self.card_in = MoneyCard("", 0, GREEN)
         self.card_out = MoneyCard("", 0, RED)
         self.card_settled = MoneyCard("", 0, GREY)
@@ -200,8 +200,7 @@ class DrawerPanel(QWidget):
             f"color: {GREY}; font-size: 11px; font-weight: 800;")
         root.addWidget(self.split1_lbl)
 
-        s1_details = QHBoxLayout()
-        s1_details.setSpacing(6)
+        s1_details = ResponsiveRow(spacing=6)
         self.stat_cards = {}
         for key, cap in _SPLIT1_CARDS:
             c = StatCard(cap, 0)
@@ -209,8 +208,7 @@ class DrawerPanel(QWidget):
             s1_details.addWidget(c)
         root.addLayout(s1_details)
 
-        s1_totals = QHBoxLayout()
-        s1_totals.setSpacing(10)
+        s1_totals = ResponsiveRow(spacing=10)
         self.card_net_in = MoneyCard("Total Net IN (Sales + Advance IN)", 0, GREEN)
         self.card_net_out = MoneyCard("Total Net OUT (Purchase + Advance OUT)", 0, RED)
         s1_totals.addWidget(self.card_net_in)
@@ -223,16 +221,14 @@ class DrawerPanel(QWidget):
             f"color: {GREY}; font-size: 11px; font-weight: 800;")
         root.addWidget(self.split2_lbl)
 
-        s2_details = QHBoxLayout()
-        s2_details.setSpacing(6)
+        s2_details = ResponsiveRow(spacing=6)
         for key, cap in _SPLIT2_CARDS:
             c = StatCard(cap, 0)
             self.stat_cards[key] = c
             s2_details.addWidget(c)
         root.addLayout(s2_details)
 
-        s2_totals = QHBoxLayout()
-        s2_totals.setSpacing(10)
+        s2_totals = ResponsiveRow(spacing=10)
         self.card_settlement_in = MoneyCard("Total Settlement IN (Sales + Advance IN)", 0, GREEN)
         self.card_settlement_out = MoneyCard("Total Settlement OUT (Purchase + Advance OUT)", 0, RED)
         s2_totals.addWidget(self.card_settlement_in)
@@ -240,7 +236,7 @@ class DrawerPanel(QWidget):
         root.addLayout(s2_totals)
 
         # ---------------- toggle + table -----------------------------
-        tog = QHBoxLayout()
+        tog = FlowLayout()
         self.toggle = QCheckBox("Show settlements other people did for me")
         self.toggle.stateChanged.connect(self.reload)
         tog.addWidget(self.toggle)

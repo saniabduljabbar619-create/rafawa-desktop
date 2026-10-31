@@ -6,6 +6,7 @@ from PySide2.QtCore import QTimer, Qt
 from PySide2.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from database.services.weigh_service import WeighService, day_start
+from shared.uix.layout.flow import FlowLayout
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.views.ticket_table import (
@@ -42,7 +43,7 @@ class WeigherTicketsView(QWidget):
             kp.addWidget(k, 1)
         root.addLayout(kp)
 
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.filter_seg = Segmented(FILTERS)
         bar.addWidget(self.filter_seg)
         self.chk_earlier = QCheckBox("Include earlier days")

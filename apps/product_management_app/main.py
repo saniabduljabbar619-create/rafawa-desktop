@@ -72,7 +72,7 @@ class ProductManagementMainWindow(QMainWindow):
 
         # never bigger than the screen it opens on, and small enough to snap into half a monitor
         avail = QApplication.primaryScreen().availableGeometry()
-        self.setMinimumSize(760, 520)
+        self.setMinimumSize(min(760, avail.width()), min(520, avail.height()))
         self.resize(min(1280, avail.width()), min(820, avail.height()))
 
         # Workspace registry
@@ -282,7 +282,12 @@ def run():
     from shared.version import __version__
     setup_logging()
 
+    # Learn this PC's screen first and fit the whole interface to it (see shared/uix/screen_profile.py)
+    from shared.uix.screen_profile import enable_high_dpi, prepare_screen_scaling
+    screen_info = prepare_screen_scaling()
+    enable_high_dpi()
     app = QApplication(sys.argv)
+    app.setProperty("rafawa_screen", f"{screen_info.width}x{screen_info.height} scale {screen_info.scale:g} ({screen_info.source})")
 
     def _notify_crash(message, report_path):
         from PySide2.QtWidgets import QMessageBox

@@ -17,16 +17,35 @@ def _table(qapp, width):
     return t, texts
 
 
-def test_autofit_never_squeezes_a_column_below_its_text(qapp):
+def test_autofit_narrows_text_columns_first_and_never_cuts_a_number(qapp):
     from shared.uix.widgets.table_fit import autofit
-    t, texts = _table(qapp, 300)                                             # far too narrow: scrolls, never clips
+    t, texts = _table(qapp, 520)                                             # too narrow for everything
     autofit(t)
     qapp.processEvents()
+    hh = t.horizontalHeader()
     fm = QFontMetrics(t.font())
-    for c in range(3):
-        assert t.horizontalHeader().sectionResizeMode(c) == QHeaderView.ResizeToContents
-        assert t.horizontalHeader().sectionSize(c) >= max(fm.horizontalAdvance(texts[0][c]),
-                                                          fm.horizontalAdvance(texts[1][c]))
+    assert hh.sectionSize(1) >= fm.horizontalAdvance(texts[0][1])           # the balance keeps its full width
+    assert sum(hh.sectionSize(c) for c in range(3)) <= t.viewport().width() + 2     # and the table fits: no sideways scroll
+    assert not t.horizontalScrollBar().isVisible() or t.horizontalScrollBar().maximum() == 0
+
+
+def test_a_table_refits_when_the_window_changes(qapp):
+    from shared.uix.widgets.table_fit import autofit
+    t, texts = _table(qapp, 520)
+    autofit(t)
+    narrow = t.horizontalHeader().sectionSize(0)
+    t.resize(1600, 200)
+    qapp.processEvents()
+    qapp.processEvents()
+    hh = t.horizontalHeader()
+    assert sum(hh.sectionSize(c) for c in range(3)) >= t.viewport().width() - 2     # grew back to use the room
+    assert max(hh.sectionSize(c) for c in range(3)) > narrow
+
+
+def test_autofit_numbers_are_recognised_but_names_and_notes_are_not(qapp):
+    from shared.uix.widgets.table_fit import _is_numeric_column
+    t, _ = _table(qapp, 800)
+    assert [_is_numeric_column(t, c) for c in range(3)] == [False, True, False]
 
 
 def test_autofit_gives_spare_room_to_the_widest_column(qapp):

@@ -8,6 +8,7 @@ from PySide2.QtWidgets import (
 )
 
 from database.services.weigh_service import WeighService
+from shared.uix.layout.flow import FlowLayout
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import WeighTicketReviewDialog
@@ -54,7 +55,7 @@ class WeighTicketsAdminView(QWidget):
             kp.addWidget(k, 1)
         root.addLayout(kp)
 
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.filter_seg = Segmented(FILTERS)
         bar.addWidget(self.filter_seg)
         bar.addStretch(1)
@@ -74,7 +75,7 @@ class WeighTicketsAdminView(QWidget):
         root.addWidget(self.filters)
 
         # registered people and walk-ins are kept apart; walk-ins can be ticked and paid together
-        who = QHBoxLayout()
+        who = FlowLayout()
         self.who_seg = Segmented(WHO)
         who.addWidget(self.who_seg)
         who.addStretch(1)

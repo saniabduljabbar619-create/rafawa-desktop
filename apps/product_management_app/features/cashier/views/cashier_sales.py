@@ -29,6 +29,7 @@ from database.models import Party
 from database.models.product import Product as DBProduct
 from database.session import get_session
 from datetime import datetime
+from shared.uix.layout.flow import FlowLayout
 from shared.uix.widgets.cards import Segmented, chip, style_table
 
 
@@ -251,7 +252,7 @@ class CashierSalesView(QWidget):
         self.cart_total_row.setStyleSheet("font-size:15px; font-weight:700; color:#0f766e; padding:6px 4px;")
         r.addWidget(self.cart_total_row)
 
-        btn_row = QHBoxLayout()
+        btn_row = FlowLayout()          # wraps on a narrow window instead of widening the whole page
         r.addLayout(btn_row)
 
         self.btn_remove = QPushButton("Remove Selected")

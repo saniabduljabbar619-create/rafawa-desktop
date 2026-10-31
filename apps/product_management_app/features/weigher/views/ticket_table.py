@@ -8,6 +8,7 @@ from PySide2.QtWidgets import (
     QTableWidget, QTableWidgetItem, QWidget,
 )
 
+from shared.uix.layout.flow import FlowLayout
 from shared.uix.widgets.cards import chip, style_table
 
 STATUS_TONE = {"open": "amber", "submitted": "blue", "finalized": "green", "cancelled": "grey"}
@@ -100,17 +101,20 @@ class TicketFilterBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        lay = FlowLayout(self, h_spacing=8, v_spacing=6)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search ticket no, name, phone, walk-in ID or product")
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(32)
-        lay.addWidget(self.search, 1)
+        self.search.setMinimumWidth(320)
+        lay.addWidget(self.search)
+        rng = QWidget()                                      # the range stays together on one line
+        rl = QHBoxLayout(rng)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(8)
         self.chk_range = QCheckBox("Date and time")
         self.chk_range.setToolTip("Only weighings between these two moments")
-        lay.addWidget(self.chk_range)
+        rl.addWidget(self.chk_range)
         today = QDate.currentDate()
         self.d_from, self.d_to = QDateTimeEdit(), QDateTimeEdit()
         for w, t in ((self.d_from, QTime(0, 0)), (self.d_to, QTime(23, 59))):
@@ -118,13 +122,14 @@ class TicketFilterBar(QWidget):
             w.setCalendarPopup(True)
             w.setDateTime(QDateTime(today, t))
             w.setEnabled(False)
-        lay.addWidget(QLabel("from"))
-        lay.addWidget(self.d_from)
-        lay.addWidget(QLabel("to"))
-        lay.addWidget(self.d_to)
+        rl.addWidget(QLabel("from"))
+        rl.addWidget(self.d_from)
+        rl.addWidget(QLabel("to"))
+        rl.addWidget(self.d_to)
         self.btn_today = QPushButton("Today")
         self.btn_today.setToolTip("Set the range to today, midnight to midnight")
-        lay.addWidget(self.btn_today)
+        rl.addWidget(self.btn_today)
+        lay.addWidget(rng)
 
         self._wait = QTimer(self)
         self._wait.setSingleShot(True)
