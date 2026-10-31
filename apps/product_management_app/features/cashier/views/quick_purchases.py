@@ -12,6 +12,7 @@ from apps.product_management_app.features.receipts_v2 import PURCHASE, SALE
 from database.models import Party
 from database.services.quick_purchase_order_service import QuickPurchaseOrderService as Q
 from database.session import get_session
+from shared.uix.layout.flow import FlowLayout
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.cashier.dialogs.sale_checkout_dialog import SaleCheckoutDialog
@@ -55,7 +56,7 @@ class QuickPurchasesView(QWidget):
             kp.addWidget(k, 1)
         root.addLayout(kp)
 
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.filter_seg = Segmented(FILTERS)
         bar.addWidget(self.filter_seg)
         bar.addStretch(1)
@@ -66,7 +67,7 @@ class QuickPurchasesView(QWidget):
         bar.addWidget(self.btn_refresh)
         root.addLayout(bar)
 
-        act = QHBoxLayout()
+        act = FlowLayout()
         self.btn_edit = QPushButton("Edit")
         self.btn_send = QPushButton("Send to supplier")
         self.btn_receive = QPushButton("Goods received")
