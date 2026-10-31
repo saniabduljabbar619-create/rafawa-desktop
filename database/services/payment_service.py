@@ -430,12 +430,19 @@ class PaymentService:
             payment.voided_at = datetime.now()
             payment.voided_by_user_id = voided_by_user_id
             payment.void_reason = (reason or "").strip()[:255] or None
+            freed = 0.0
+            if (payment.method or "") == "advance" and payment.entity_type in ("purchase", "sale"):
+                # a 'paid from advance' row is backed by advance allocations: voiding only the row would leave the
+                # advance used up and the document unchanged - give that advance back
+                from database.services.advance_service import AdvanceService
+                freed = AdvanceService.release_amount_in_session(
+                    s, payment.entity_type, int(payment.entity_id), float(payment.amount or 0))
             AuditService.record(
                 "payment.void", "payment", payment_id,
                 f"Voided {payment.entity_type} #{payment.entity_id} payment of {float(payment.amount or 0):,.2f}",
                 {"reason": reason, "amount": float(payment.amount or 0), "direction": payment.direction,
                  "entity_type": payment.entity_type, "entity_id": payment.entity_id,
-                 "method": payment.method}, session=s)
+                 "method": payment.method, "advance_released": freed}, session=s)
 
             if settlement:
                 s.delete(settlement)

@@ -403,8 +403,13 @@ class AdvanceService:
                     p.voided_by_user_id = int(created_by_user_id or 0)
                     p.void_reason = (f"Cascaded from voiding advance #{advance_id}"
                                      if not reason else f"{reason} (cascaded)")[:255]
+                docs = sorted({(a.entity_type, int(a.entity_id)) for a in allocations})
                 for a in allocations:
                     s.delete(a)
+                s.flush()
+                for et, eid in docs:
+                    AdvanceService._restate_advance_payments(s, et, eid, created_by_user_id,
+                                                             f"Advance #{advance_id} voided")
 
             adv.status = "voided"
             if reason:
@@ -416,3 +421,160 @@ class AdvanceService:
                  "settled": settled, "party_id": adv.party_id}, session=s)
             s.commit()
             return adv.id
+
+    # -------------------------------------------------
+    # ADVANCE USED ON A PURCHASE / SALE - and taking it back
+    # -------------------------------------------------
+    @staticmethod
+    def _doc_party_direction(s, entity_type: str, entity_id: int):
+        from database.models.purchase import Purchase
+        from database.models.sale import Sale
+        if entity_type == "purchase":
+            doc = s.get(Purchase, int(entity_id))
+            return (int(doc.supplier_party_id) if doc else 0), "out"
+        doc = s.get(Sale, int(entity_id))
+        return (int(doc.buyer_party_id) if doc else 0), "in"
+
+    @staticmethod
+    def _advance_payments(s, entity_type: str, entity_id: int):
+        """The document's active 'paid from advance' payment rows (history rows - the books use the allocations)."""
+        return (s.query(Payment)
+                .filter(Payment.entity_type == entity_type, Payment.entity_id == int(entity_id),
+                        Payment.method == "advance", Payment.status != "voided")
+                .order_by(Payment.id.desc()).all())
+
+    @staticmethod
+    def _void_payment_rows(rows, user_id: int, reason: str) -> None:
+        for p in rows:
+            p.status = "voided"
+            p.voided_at = datetime.now()
+            p.voided_by_user_id = int(user_id or 0)
+            p.void_reason = (reason or "Advance taken back")[:255]
+
+    @staticmethod
+    def release_in_session(s, entity_type: str, entity_id: int, user_id: int, reason: str = "",
+                           allocation_ids=None) -> Dict:
+        """
+        Take advance money back off one purchase / sale (inside the caller's session): the document's
+        AdvanceAllocation rows are removed (all, or just `allocation_ids`), so the advance is unused again and the
+        document owes that amount again; the document's 'paid from advance' history rows are voided and, if some
+        advance use remains, restated as one row for what is left. Returns {"released": total, "uses": [...]}.
+        Nothing is touched when the document has no advance on it.
+        """
+        entity_type = "purchase" if entity_type == "purchase" else "sale"
+        q = (s.query(AdvanceAllocation)
+             .filter(AdvanceAllocation.entity_type == entity_type, AdvanceAllocation.entity_id == int(entity_id)))
+        if allocation_ids is not None:
+            q = q.filter(AdvanceAllocation.id.in_([int(a) for a in allocation_ids] or [0]))
+        rows = q.order_by(AdvanceAllocation.id).all()
+        uses = [{"allocation_id": int(a.id), "advance_id": int(a.advance_id), "amount": float(a.amount or 0),
+                 "applied_at": a.created_at, "applied_by": a.created_by_user_id} for a in rows]
+        released = round(sum(u["amount"] for u in uses), 2)
+        if not rows:
+            return {"released": 0.0, "uses": []}
+        for a in rows:
+            s.delete(a)
+        s.flush()
+        AdvanceService._restate_advance_payments(s, entity_type, int(entity_id), user_id, reason)
+        return {"released": released, "uses": uses}
+
+    @staticmethod
+    def _restate_advance_payments(s, entity_type: str, entity_id: int, user_id: int, reason: str = "") -> None:
+        """Make the document's 'paid from advance' history rows add up to the advance still allocated to it."""
+        left = float(s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+                     .filter(AdvanceAllocation.entity_type == entity_type,
+                             AdvanceAllocation.entity_id == int(entity_id)).scalar() or 0)
+        pays = AdvanceService._advance_payments(s, entity_type, entity_id)
+        if abs(sum(float(p.amount or 0) for p in pays) - left) < 0.005:
+            return
+        party_id, direction = AdvanceService._doc_party_direction(s, entity_type, entity_id)
+        if pays:
+            party_id, direction = int(pays[0].party_id), pays[0].direction
+        AdvanceService._void_payment_rows(pays, user_id, reason or "Advance taken back")
+        if left > 0.005 and party_id:
+            s.add(Payment(entity_type=entity_type, entity_id=int(entity_id), party_id=party_id, direction=direction,
+                          amount=left, method="advance", notes="Advance settlement (restated after a revert)",
+                          created_by_user_id=int(user_id or 0), created_at=datetime.now()))
+
+    @staticmethod
+    def release_amount_in_session(s, entity_type: str, entity_id: int, amount: float) -> float:
+        """Free `amount` of advance from a document, newest use first (splitting one if needed); returns what was freed.
+        Used when a single 'paid from advance' payment row is voided."""
+        remaining = round(float(amount or 0), 2)
+        freed = 0.0
+        rows = (s.query(AdvanceAllocation)
+                .filter(AdvanceAllocation.entity_type == entity_type, AdvanceAllocation.entity_id == int(entity_id))
+                .order_by(AdvanceAllocation.id.desc()).all())
+        for a in rows:
+            if remaining <= 0.004:
+                break
+            have = float(a.amount or 0)
+            if have <= remaining + 0.004:
+                s.delete(a)
+                remaining -= have
+                freed += have
+            else:
+                a.amount = round(have - remaining, 2)
+                freed += remaining
+                remaining = 0.0
+        return round(freed, 2)
+
+    @staticmethod
+    def list_documents_with_advance(party_id: int, entity_type: str, limit: int = 300):
+        """Purchases (entity_type="purchase") or sales ("sale") of this party that have advance money on them -
+        what the Revert tab lists. Newest first; voided documents are left out."""
+        from database.models.purchase import Purchase
+        from database.models.sale import Sale
+        from database.services.document_balance import document_balances
+
+        entity_type = "purchase" if entity_type == "purchase" else "sale"
+        model, col, prefix = ((Purchase, Purchase.supplier_party_id, "PUR") if entity_type == "purchase"
+                              else (Sale, Sale.buyer_party_id, "SAL"))
+        out = []
+        with get_session() as s:
+            ids = [int(i) for (i,) in
+                   s.query(AdvanceAllocation.entity_id)
+                   .filter(AdvanceAllocation.entity_type == entity_type).distinct().all()]
+            if not ids:
+                return out
+            docs = (s.query(model).filter(col == int(party_id), model.id.in_(ids), model.status != "voided")
+                    .order_by(model.id.desc()).limit(limit).all())
+            bal = document_balances(s, entity_type, [int(d.id) for d in docs])
+            for d in docs:
+                uses = (s.query(AdvanceAllocation).filter(AdvanceAllocation.entity_type == entity_type,
+                                                          AdvanceAllocation.entity_id == int(d.id))
+                        .order_by(AdvanceAllocation.id).all())
+                b = bal.get(int(d.id))
+                out.append({
+                    "id": int(d.id), "reference": f"{prefix}-{int(d.id)}", "created_at": d.created_at,
+                    "total": float(b.net_total) if b else float(d.total_amount or 0),
+                    "advance_used": round(sum(float(u.amount or 0) for u in uses), 2),
+                    "uses": [{"allocation_id": int(u.id), "advance_id": int(u.advance_id),
+                              "amount": float(u.amount or 0)} for u in uses],
+                    "cash_paid": float(b.cash_paid) if b else 0.0,
+                    "balance": float(b.balance) if b else 0.0,
+                    "notes": d.notes or "",
+                })
+        return out
+
+    @staticmethod
+    @require_admin
+    def revert_advance_use(entity_type: str, entity_id: int, user_id: int, reason: str = "") -> Dict:
+        """
+        Undo the advance used on one purchase / sale WITHOUT cancelling the document: the advance becomes unused
+        again (available for another purchase / sale or to keep), and this document owes that amount again.
+        Idempotent - a document with no advance on it just reports 0 released.
+        """
+        entity_type = "purchase" if entity_type == "purchase" else "sale"
+        with get_session() as s:
+            res = AdvanceService.release_in_session(s, entity_type, int(entity_id), int(user_id or 0),
+                                                    reason or "Advance taken back")
+            if res["released"] > 0.004:
+                AuditService.record(
+                    "advance.revert_use", entity_type, int(entity_id),
+                    f"Took {res['released']:,.2f} of advance back off {entity_type} #{entity_id}",
+                    {"reason": reason, "released": res["released"],
+                     "advances": [{"advance_id": u["advance_id"], "amount": u["amount"]} for u in res["uses"]]},
+                    session=s)
+            s.commit()
+        return {"released": res["released"], "advances": sorted({u["advance_id"] for u in res["uses"]})}
