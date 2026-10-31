@@ -825,8 +825,9 @@ class WeigherStationView(QWidget):
         cap = QLabel("RECEIPT TYPE")
         cap.setObjectName("SectionLabel")
         ll.addWidget(cap)
-        self.receipt_seg = Segmented([("weighing", "Option 1 - Weighing Receipt"),
-                                      ("value", "Option 2 - Full Value Receipt")])
+        self.receipt_seg = Segmented([("weighing", "Weighing receipt"), ("value", "Value receipt")])
+        self.receipt_seg.setToolTip("Option 1 - weighing receipt: products, bags and weight.\n"
+                                    "Option 2 - full value receipt: adds prices, amounts, paid and balance.")
         ll.addWidget(self.receipt_seg)
         self.lbl_receipt_totals = QLabel("")
         self.lbl_receipt_totals.setStyleSheet("font-size:15px; font-weight:700; color:#0f766e; margin-top:6px;")
@@ -856,6 +857,7 @@ class WeigherStationView(QWidget):
         rl.setContentsMargins(16, 14, 16, 14)
         cap2 = QLabel("RECEIPT PREVIEW - nothing prints until you press Print Receipt")
         cap2.setObjectName("SectionLabel")
+        cap2.setWordWrap(True)
         rl.addWidget(cap2)
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)

@@ -22,6 +22,9 @@ def window(qapp):
     from apps.product_management_app.main import ProductManagementMainWindow, _FitTables, _FitToScreen
     from shared.uix.theme import apply_theme
     apply_theme(qapp)
+    # a deliberately WIDE font (wider than Windows' Segoe UI): a screen that fits with this fits on any PC, and the
+    # result does not depend on which fonts the machine running the test happens to have
+    qapp.setStyleSheet(qapp.styleSheet() + ' QWidget { font-family: "DejaVu Sans"; }')
     tables, dialogs = _FitTables(qapp), _FitToScreen(qapp)        # the same app-wide helpers run() installs
     qapp.installEventFilter(tables)
     qapp.installEventFilter(dialogs)
