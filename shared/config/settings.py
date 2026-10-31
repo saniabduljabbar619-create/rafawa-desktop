@@ -88,6 +88,21 @@ if not _cloud_db_url:
 # SSL - correct for a local/dev target that has none configured.
 _cloud_ssl_ca = os.getenv("CLOUD_DB_SSL_CA", "").strip()
 
+
+def _find_file(name: str) -> str:
+    """A relative path in .env ('ca.pem') is looked up where .env itself is looked up - the packaged exe is rarely
+    started from its own folder - and the first place the file really exists wins."""
+    if not name or os.path.isabs(name):
+        return name
+    for p in _dotenv_candidates():
+        cand = os.path.join(os.path.dirname(p), name)
+        if os.path.exists(cand):
+            return cand
+    return name
+
+
+_cloud_ssl_ca = _find_file(_cloud_ssl_ca)
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = os.getenv("APP_NAME", "Rafawa Desktop V1")

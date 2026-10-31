@@ -31,7 +31,7 @@ class SyncStatusBar(QWidget):
         lay.setContentsMargins(12, 3, 12, 3)
         lay.setSpacing(10)
 
-        self.label = QLabel("Cloud sync: not configured")
+        self.label = QLabel("Cloud sync: starting…")
         self.label.setStyleSheet(f"background: transparent; color: {_MUTED}; font-size: 11px; font-weight: 600;")
         lay.addWidget(self.label)
 
@@ -68,12 +68,18 @@ class SyncStatusBar(QWidget):
     # else - safe by construction since Qt guarantees these run on the
     # main thread regardless of which thread emitted the signal.
     # ------------------------------------------------------------------
-    def on_not_configured(self):
+    def on_not_configured(self, reason: str = ""):
         self.bar.setVisible(False)
-        self.label.setText("Cloud sync: not configured")
+        self.label.setText("Cloud sync: " + (reason.split(" - ")[0] if reason else "not configured"))
+        self.setToolTip(reason or "Cloud sync is not configured")
         self.label.setStyleSheet(f"background: transparent; color: {_MUTED}; font-size: 11px; font-weight: 600;")
 
+    def on_sync_detail(self, errors: str):
+        """The errors of the pass that just ended - shown as a tooltip so a failure can be read, not guessed."""
+        self.setToolTip(errors)
+
     def on_sync_started(self):
+        self.setToolTip("")
         self.bar.setVisible(True)
         self.bar.setMinimum(0)
         self.bar.setValue(0)

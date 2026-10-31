@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from PySide2.QtWidgets import (QApplication, QDialog, QFrame, QMainWindow, QScrollArea, QStackedWidget,
                                QTableView)
-from PySide2.QtCore import QEvent, QObject, Qt
+from PySide2.QtCore import QEvent, QObject, Qt, QTimer
 from shared.uix.layout.shell import AppShell
 from apps.product_management_app.routes import Router
 from apps.product_management_app.launcher import LauncherView
@@ -95,7 +95,10 @@ class ProductManagementMainWindow(QMainWindow):
         self.cloud_sync_worker.sync_started.connect(self.shell.sync_status_bar.on_sync_started)
         self.cloud_sync_worker.table_progress.connect(self.shell.sync_status_bar.on_table_progress)
         self.cloud_sync_worker.sync_finished.connect(self.shell.sync_status_bar.on_sync_finished)
-        # self.cloud_sync_worker.start()
+        self.cloud_sync_worker.sync_detail.connect(self.shell.sync_status_bar.on_sync_detail)
+        # Started a moment after the window is up (never delaying startup). It was never started at all before -
+        # the bar just kept its first text, "not configured", whatever the settings were.
+        QTimer.singleShot(2500, self._start_cloud_sync)
 
         # Global TopBar actions
         from shared.auth.session import set_session, require_user_id
@@ -212,6 +215,11 @@ class ProductManagementMainWindow(QMainWindow):
 
         # Switch back to launcher
         self._root_stack.setCurrentIndex(0)
+
+    def _start_cloud_sync(self):
+        worker = getattr(self, "cloud_sync_worker", None)
+        if worker is not None and not worker.isRunning():
+            worker.start()
 
     def closeEvent(self, event):
         # Stop the sync worker and genuinely wait for its current sleep/

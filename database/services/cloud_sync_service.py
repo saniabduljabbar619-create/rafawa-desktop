@@ -95,17 +95,31 @@ class CloudSyncEngine:
     def is_configured() -> bool:
         return bool(settings.cloud_database_url) and settings.CLOUD_SYNC_ENABLED
 
+    @staticmethod
+    def config_problem() -> str:
+        """Why cloud sync is not running, in words the operator can act on ('' when it is configured)."""
+        import os
+        if not settings.cloud_database_url:
+            wanted = ("CLOUD_DB_HOST", "CLOUD_DB_NAME", "CLOUD_DB_USER", "CLOUD_DB_PASSWORD")
+            missing = [k for k in wanted if not os.getenv(k, "").strip()]
+            if len(missing) == len(wanted):
+                return ("not set up - add the CLOUD_DB_HOST, CLOUD_DB_NAME, CLOUD_DB_USER and CLOUD_DB_PASSWORD "
+                        "lines to the .env file (see .env.example), then restart the app")
+            return "incomplete - the .env file is missing " + ", ".join(missing)
+        if not settings.CLOUD_SYNC_ENABLED:
+            return "switched off (CLOUD_SYNC_ENABLED=0 in the .env file)"
+        return ""
+
     @classmethod
     def _get_cloud_engine(cls) -> Engine:
         if cls._cloud_engine is None:
-            connect_args = {}
+            connect_args = {"connect_timeout": 8}     # seconds - fail fast, never hang the sync thread
             if settings.cloud_ssl_ca:
                 # PyMySQL's real SSL mechanism - a dict with "ca" pointing
                 # at the certificate file, passed via connect_args, not a
                 # URL query parameter (that name belongs to a different
                 # driver entirely and silently breaks every connection).
                 connect_args["ssl"] = {"ca": settings.cloud_ssl_ca}
-                connect_args["connect_timeout"] = 8   # seconds - fail fast, don't hang the sync thread
             cls._cloud_engine = create_engine(
                 settings.cloud_database_url,
                 pool_pre_ping=True,   # detects a dead/dropped connection before using it, not after
