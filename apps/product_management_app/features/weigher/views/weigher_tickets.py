@@ -9,7 +9,7 @@ from database.services.weigh_service import WeighService, day_start
 from shared.uix.layout.scrollable import make_scrollable_page
 from shared.uix.widgets.cards import KpiCard, Segmented
 from apps.product_management_app.features.weigher.views.ticket_table import (
-    edit_finalized_prices, fill_ticket_table, make_ticket_table, selected_ticket_id,
+    TicketFilterBar, edit_finalized_prices, fill_ticket_table, make_ticket_table, selected_ticket_id,
 )
 
 FILTERS = [("all", "All"), ("open", "Weighing"), ("submitted", "Awaiting cashier"), ("finalized", "Finalized"),
@@ -63,11 +63,15 @@ class WeigherTicketsView(QWidget):
             bar.addWidget(b)
         root.addLayout(bar)
 
+        self.filters = TicketFilterBar()
+        root.addWidget(self.filters)
+
         self.table = make_ticket_table(show_amount=True, show_weigher=False)
         root.addWidget(self.table, 1)
 
         self.filter_seg.changed.connect(lambda _k: self.refresh())
         self.chk_earlier.toggled.connect(lambda _c: self.refresh())
+        self.filters.changed.connect(self.refresh)
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_print.clicked.connect(lambda: self.print_selected("weighing"))
         self.btn_print_value.clicked.connect(lambda: self.print_selected("value"))
@@ -95,7 +99,11 @@ class WeigherTicketsView(QWidget):
 
     def refresh(self):
         try:
-            allrows = WeighService.list_tickets(since=None if self.chk_earlier.isChecked() else day_start())
+            f = self.filters.values()
+            # a typed search or a chosen date range looks across days; otherwise the list starts from zero each day
+            wide = self.chk_earlier.isChecked() or self.filters.has_range() or bool(f["search"])
+            allrows = WeighService.list_tickets(since=None if wide else day_start(), search=f["search"],
+                                                date_from=f["date_from"], date_to=f["date_to"])
         except Exception as e:
             QMessageBox.warning(self, "Finalize List", str(e))
             return
@@ -106,7 +114,8 @@ class WeigherTicketsView(QWidget):
         key = self.filter_seg.key()
         rows = allrows if key == "all" else [t for t in allrows if t["status"] == key]
         self.subtitle.setText(f"{len(rows)} of {len(allrows)} tickets"
-                              + ("" if self.chk_earlier.isChecked() else " today"))
+                              + ("" if (self.chk_earlier.isChecked() or self.filters.has_range()
+                                        or self.filters.values()["search"]) else " today"))
         self._rows = {int(t["id"]): t for t in rows}
         fill_ticket_table(self.table, rows)
         self._buttons()

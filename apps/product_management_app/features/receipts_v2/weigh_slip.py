@@ -83,11 +83,20 @@ def _line_name(ln: Dict[str, Any]) -> str:
     return ln.get("product_name", "") + (f" ({ln['grade']})" if ln.get("grade") else "")
 
 
-def _line_amount(ln: Dict[str, Any]):
-    amount = ln.get("amount")
+def _line_amount(ln: Dict[str, Any], confirmed: bool = False):
+    """A line's amount. The weigher's own receipts carry the WEIGHER's price (what was agreed at the scale);
+    the payment receipt carries the confirmed one (what is actually owed and paid)."""
+    key = "confirmed_amount" if confirmed else "weigher_amount"
+    amount = ln.get(key)
+    if amount is None:
+        amount = ln.get("amount")
     if amount is None and ln.get("unit_price"):
         amount = float(ln["unit_price"]) * float(ln.get("kg") or 0)
     return amount
+
+
+def _line_price(ln: Dict[str, Any]):
+    return ln.get("weigher_price") if ln.get("weigher_price") is not None else ln.get("unit_price")
 
 
 def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = WEIGHING) -> str:
@@ -120,14 +129,17 @@ def render_weigh_receipt(ticket: Dict[str, Any], shop: ShopInfo, option: str = W
             out.append(_b(extra))
         if value:
             out.append(_b(f"{wrapped[-1]:<{nw}}") + f"{_bags(ln.get('bags')):>5}{_money(ln.get('kg')):>9}"
-                       f"{_money(ln.get('unit_price')):>8}{_money(_line_amount(ln)):>12}")
+                       f"{_money(_line_price(ln)):>8}{_money(_line_amount(ln)):>12}")
         else:
             out.append(_b(f"{wrapped[-1]:<{nw}}") + f"{_bags(ln.get('bags')):>8}{_money(ln.get('kg')):>14}")
     out.append(_rule())
     if value:
         pay = ticket.get("payment") or {}
-        total = ticket.get("total_amount")
+        total = ticket.get("weigher_total") if ticket.get("weigher_total") is not None else ticket.get("total_amount")
         out.append(_two("TOTAL:", f"N{_money(total)}"))
+        confirmed = ticket.get("confirmed_total")
+        if confirmed is not None and abs(float(confirmed) - float(total or 0)) > 0.005:
+            out.append(_two("Confirmed total:", f"N{_money(confirmed)}"))       # intake settled on a different price
         out.append(_two("Paid:", f"N{_money(pay.get('paid'))}"))
         out.append(_b(_two("BALANCE:", f"N{_money(pay.get('balance', total))}")))
         out.append(f"Status: {pay.get('status', 'Unpaid')}")
@@ -151,7 +163,7 @@ def render_payment_receipt(ticket: Dict[str, Any], shop: ShopInfo) -> str:
     out.append(_fmt_dt(datetime.now()))
     out.append(_rule())
     for ln in _lines_with_rounds(ticket):
-        right = f"N{_money(_line_amount(ln))}"
+        right = f"N{_money(_line_amount(ln, confirmed=True))}"
         wrapped = _wrap(_line_name(ln), WIDTH - len(right) - 1)
         for extra in wrapped[:-1]:
             out.append(_b(extra))

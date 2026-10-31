@@ -68,8 +68,12 @@ class WeighTicketLine(Base):
     area = Column(String(80), nullable=True)
     grade = Column(String(40), nullable=True)
 
-    # Set by admin/cashier at review time - never by the weigher.
-    unit_price = Column(Numeric(12, 2), nullable=True)                 # price per kg
+    # The price now being worked with (starts as the weigher's, admin / cashier confirm or change it at intake;
+    # a finalized ticket's real price lives on its purchase). Price per kg.
+    unit_price = Column(Numeric(12, 2), nullable=True)
+    # The weigher's own price: what they set after weighing. Admin / cashier changes never touch it, so the
+    # weigher's screens and receipts keep showing what they agreed at the scale.
+    weigher_price = Column(Numeric(12, 2), nullable=True)
 
     ticket = relationship("WeighTicket", back_populates="lines")
     product = relationship("Product")
