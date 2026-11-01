@@ -1,16 +1,18 @@
-"""Editing the price of a purchase already recorded: per product, additive, audited, balances follow."""
+"""Editing the price of a purchase or sale already recorded: per product, additive, audited, balances follow."""
 import pytest
 
 from database.models.audit_log import AuditLog
 from database.models.purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine
+from database.models.sale_discount import SaleDiscount, SalePriceAdjustmentLine
 from database.services.document_balance import document_balances
 from database.services.payment_service import PaymentService
 from database.services.purchase_adjustment_service import PurchaseAdjustmentService as A
 from database.services.purchase_service import PurchaseService
+from database.services.sale_adjustment_service import SaleAdjustmentService as SA
 from database.session import get_session
 from shared.auth.permissions import PermissionDenied
 from shared.auth.session import UserSession, set_session
-from tests.conftest import ADMIN_ID, CASHIER_A, SUPPLIER_ID
+from tests.conftest import ADMIN_ID, CASHIER_A, CROP_ID, CUSTOMER_ID, FERT_ID, SUPPLIER_ID, make_sale
 
 
 def _purchase():                                    # Maize 1000 kg x 50 = 50,000 ; NPK 10 bags x 9,000 = 90,000
@@ -21,14 +23,31 @@ def _purchase():                                    # Maize 1000 kg x 50 = 50,00
          "total_weight_kg": 0, "unit_cost": 9000}]})["purchase_id"]
 
 
+def _sale(buyer=SUPPLIER_ID):                       # Maize 200 kg x 100 = 20,000 ; NPK 5 bags x 10,000 = 50,000 -> 70,000
+    return make_sale([
+        {"product_id": CROP_ID, "qty_bags": 2, "total_weight_kg": 200, "unit_price": 100},
+        {"product_id": FERT_ID, "qty_bags": 5, "total_weight_kg": 0, "unit_price": 10000},
+    ], buyer=buyer)["sale_id"]
+
+
 def _balance(pid):
     with get_session() as s:
         b = document_balances(s, "purchase", [pid])[pid]
         return b.net_total, b.balance
 
 
+def _sale_balance(sid):
+    with get_session() as s:
+        b = document_balances(s, "sale", [sid])[sid]
+        return b.net_total, b.balance
+
+
 def _ids(pid):
     return {l["product"]: l["item_id"] for l in A.line_prices(pid)}
+
+
+def _sale_ids(sid):
+    return {l["product"]: l["item_id"] for l in SA.line_prices(sid)}
 
 
 def test_lines_show_each_products_price_and_basis():
@@ -51,6 +70,21 @@ def test_edit_one_price_raises_the_total_and_keeps_the_original_rows():
         rows = s.query(PurchasePriceAdjustmentLine).filter_by(adjustment_id=aid).all()
         assert len(rows) == 1 and float(rows[0].old_rate) == 50 and float(rows[0].new_rate) == 52.5
         assert s.query(AuditLog).filter(AuditLog.action == "purchase.price_edit").count() == 1
+
+
+def test_edit_sale_price_updates_total_and_keeps_original_rows():
+    sid = _sale()
+    ids = _sale_ids(sid)
+    did = SA.edit_prices(sid, {ids["Maize"]: 110}, ADMIN_ID, "customer grade adjustment")
+    assert _sale_balance(sid) == (72000, 72000)                            # +200 x 10.00
+    line = {l["product"]: l for l in SA.line_prices(sid)}["Maize"]
+    assert line["rate"] == 110 and line["original_rate"] == 100 and line["amount"] == 22000
+    with get_session() as s:
+        disc = s.get(SaleDiscount, did)
+        assert float(disc.amount) == -2000 and "Maize" in disc.reason and "customer grade adjustment" in disc.reason
+        rows = s.query(SalePriceAdjustmentLine).filter_by(discount_id=did).all()
+        assert len(rows) == 1 and float(rows[0].old_rate) == 100 and float(rows[0].new_rate) == 110
+        assert s.query(AuditLog).filter(AuditLog.action == "sale.price_edit").count() == 1
 
 
 def test_a_second_edit_starts_from_the_price_now_in_force():
@@ -112,20 +146,21 @@ def test_a_weigher_may_edit_only_the_purchase_of_their_own_ticket():
 
 
 # ---------------------------------------------------------------- the screens
-def test_right_click_edit_on_the_purchases_tab(qapp, monkeypatch):
+def test_right_click_edit_on_the_purchases_and_sales_tab(qapp, monkeypatch):
     from apps.product_management_app.features.profiling.dialogs import purchase_price_edit_dialog as ped
     from apps.product_management_app.features.profiling.views.records_tabs import SalesPurchasesTab
     pid = _purchase()
+    sid = _sale(SUPPLIER_ID)
     tab = SalesPurchasesTab(SUPPLIER_ID)
     assert tab.purchases.btn_edit.isVisibleTo(tab) or not tab.purchases.btn_edit.isHidden()
-    assert tab.sales.btn_edit.isHidden()                                  # sales rows have no price edit
+    assert tab.sales.btn_edit.isVisibleTo(tab) or not tab.sales.btn_edit.isHidden()
     seen = {}
 
     def fake_exec(self):
         seen["lines"] = [(l["product"], l["rate"]) for l in self.lines]
-        self.edits[0].setText("52.5")                                     # Maize 50 -> 52.50
-        assert self.btn_save.isEnabled() and "+2,500.00" in self.lbl.text()
-        self.reason.setText("asked for more")
+        self.edits[0].setText("52.5" if self.kind == "purchase" else "110")
+        assert self.btn_save.isEnabled()
+        self.reason.setText("adjusted")
         self._save()
         return self.Accepted
 
@@ -137,6 +172,71 @@ def test_right_click_edit_on_the_purchases_tab(qapp, monkeypatch):
     assert seen["lines"] == [("Maize", 50.0), ("NPK", 9000.0)] and changed == [1]
     assert _balance(pid)[0] == 142500
     assert tab.purchases.table.item(0, 4).text() == "142,500.00"          # the row follows the new total
+
+    tab.sales.table.setCurrentCell(0, 1)
+    assert tab.sales.edit_prices() is True
+    assert _sale_balance(sid)[0] == 72000
+    assert tab.sales.table.item(0, 4).text() == "72,000.00"
+
+
+def test_edit_prices_across_customer_profile_tabs_and_payment_dialogs(qapp, monkeypatch):
+    from apps.product_management_app.features.profiling.dialogs import purchase_price_edit_dialog as ped
+    from apps.product_management_app.features.profiling.dialogs.purchase_payment_dialog import PurchasePaymentDialog
+    from apps.product_management_app.features.profiling.dialogs.sale_payment_dialog import SalePaymentDialog
+    from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
+
+    pid = _purchase()
+    sid = _sale(SUPPLIER_ID)
+    PaymentService.record_purchase_payment(pid, SUPPLIER_ID, 10000, ADMIN_ID, method="cash")
+    PaymentService.record_sale_payment(sid, SUPPLIER_ID, 5000, ADMIN_ID, method="cash")
+
+    view = CustomerProfileView()
+    view.load_party(SUPPLIER_ID)
+
+    rate_step = {"purchase": 51.0, "sale": 105.0}
+
+    def fake_exec(self):
+        r = rate_step[self.kind]
+        rate_step[self.kind] = r + 1.0
+        self.edits[0].setText(str(r))
+        self.reason.setText("row price edit")
+        self._save()
+        return self.Accepted
+
+    monkeypatch.setattr(ped.PurchasePriceEditDialog, "exec_", fake_exec)
+
+    # 1. Activity table (edit first purchase or sale row)
+    view.activity_table.setCurrentCell(0, 0)
+    assert view.edit_row_prices(view.activity_table) is True
+
+    # 2. Crops table
+    view.crops_table.setCurrentCell(0, 0)
+    assert view.edit_row_prices(view.crops_table) is True
+
+    # 3. Fertilizers table
+    view.fertilizers_table.setCurrentCell(0, 0)
+    assert view.edit_row_prices(view.fertilizers_table) is True
+
+    # 4. Payments table (payment row resolves to its parent purchase/sale document)
+    view.payments_table.setCurrentCell(0, 0)
+    assert view.edit_row_prices(view.payments_table) is True
+
+    # 5. Products tab
+    view.tab_products.table.setCurrentCell(0, 0)
+    assert view.tab_products.edit_prices() is True
+
+    # 6. History tab
+    view.tab_history.table.setCurrentCell(0, 0)
+    assert view.tab_history.edit_prices() is True
+
+    # 7. PurchasePaymentDialog & SalePaymentDialog
+    pdlg = PurchasePaymentDialog(None, party_id=SUPPLIER_ID, party_name="Supplier One", user_id=ADMIN_ID)
+    pdlg.table.setCurrentCell(0, 0)
+    assert pdlg.edit_prices() is True
+
+    sdlg = SalePaymentDialog(None, party_id=SUPPLIER_ID, party_name="Supplier One", user_id=ADMIN_ID)
+    sdlg.table.setCurrentCell(0, 0)
+    assert sdlg.edit_prices() is True
 
 
 def test_edit_dialog_will_not_confirm_an_unchanged_or_bad_price(qapp):

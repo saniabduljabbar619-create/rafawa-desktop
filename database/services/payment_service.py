@@ -178,7 +178,8 @@ class PaymentService:
             advance_id=int(advance_id),
             amount=float(amount),
             method=str(method or ""),
-            created_by_user_id=int(created_by_user_id)
+            created_by_user_id=int(created_by_user_id),
+            notes=str(notes or ""),
         )
 
         # Returns the fresh Payment record ID if a historical drawdown happens.

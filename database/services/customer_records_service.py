@@ -13,12 +13,15 @@ other screen. The ids on sales/purchases rows are what the swap page takes.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from sqlalchemy import func
 
 from database.models.document_offset import DocumentOffset
 from database.models.payment import Payment
 from database.models.purchase import Purchase
+from database.models.purchase_price_adjustment import PurchasePriceAdjustmentLine
 from database.models.purchase_return import PurchaseReturn
 from database.models.sale import Sale
+from database.models.sale_discount import SalePriceAdjustmentLine
 from database.models.sale_return import SaleReturn
 from database.services.document_balance import document_balances
 from database.session import get_session
@@ -106,23 +109,62 @@ class CustomerRecordsService:
                 "product_id": int(item.product_id), "name": p.name if p else "?",
                 "type": str(item.product_type_snapshot or "").lower(),
                 "bought_bags": 0.0, "bought_kg": 0.0, "bought_value": 0.0,
-                "sold_bags": 0.0, "sold_kg": 0.0, "sold_value": 0.0})
+                "sold_bags": 0.0, "sold_kg": 0.0, "sold_value": 0.0,
+                "latest_purchase_id": 0, "latest_purchase_ref": "",
+                "latest_sale_id": 0, "latest_sale_ref": "",
+                "latest_doc_kind": "", "latest_doc_id": 0, "latest_doc_ref": ""})
 
         with get_session() as s:
-            for d in s.query(Purchase).filter(Purchase.supplier_party_id == int(party_id),
-                                              Purchase.status.notin_(["draft", "voided"])).all():
+            purchases = (s.query(Purchase).filter(Purchase.supplier_party_id == int(party_id),
+                                                  Purchase.status.notin_(["draft", "voided"]))
+                         .order_by(Purchase.id.asc()).all())
+            p_item_ids = [int(i.id) for d in purchases for i in d.items]
+            p_deltas = {
+                int(iid): _f(a) for iid, a in
+                s.query(PurchasePriceAdjustmentLine.purchase_item_id,
+                        func.coalesce(func.sum(PurchasePriceAdjustmentLine.amount), 0))
+                .filter(PurchasePriceAdjustmentLine.purchase_item_id.in_(p_item_ids or [0]))
+                .group_by(PurchasePriceAdjustmentLine.purchase_item_id).all()
+            } if p_item_ids else {}
+
+            for d in purchases:
+                ref = d.purchase_no or f"PUR-{d.id}"
                 for i in d.items:
                     b = bucket(i)
                     b["bought_bags"] += _f(i.qty_bags)
                     b["bought_kg"] += _f(i.total_weight_kg)
-                    b["bought_value"] += _f(i.line_total)
-            for d in s.query(Sale).filter(Sale.buyer_party_id == int(party_id),
-                                          Sale.status.notin_(["draft", "voided"])).all():
+                    b["bought_value"] += _f(i.line_total) + p_deltas.get(int(i.id), 0.0)
+                    b["latest_purchase_id"] = int(d.id)
+                    b["latest_purchase_ref"] = ref
+                    b["latest_doc_kind"] = "purchase"
+                    b["latest_doc_id"] = int(d.id)
+                    b["latest_doc_ref"] = ref
+
+            sales = (s.query(Sale).filter(Sale.buyer_party_id == int(party_id),
+                                          Sale.status.notin_(["draft", "voided"]))
+                     .order_by(Sale.id.asc()).all())
+            s_item_ids = [int(i.id) for d in sales for i in d.items]
+            s_deltas = {
+                int(iid): _f(a) for iid, a in
+                s.query(SalePriceAdjustmentLine.sale_item_id,
+                        func.coalesce(func.sum(SalePriceAdjustmentLine.amount), 0))
+                .filter(SalePriceAdjustmentLine.sale_item_id.in_(s_item_ids or [0]))
+                .group_by(SalePriceAdjustmentLine.sale_item_id).all()
+            } if s_item_ids else {}
+
+            for d in sales:
+                ref = d.sale_no or f"SAL-{d.id}"
                 for i in d.items:
                     b = bucket(i)
                     b["sold_bags"] += _f(i.qty_bags)
                     b["sold_kg"] += _f(i.total_weight_kg)
-                    b["sold_value"] += _f(i.line_total)
+                    b["sold_value"] += _f(i.line_total) + s_deltas.get(int(i.id), 0.0)
+                    b["latest_sale_id"] = int(d.id)
+                    b["latest_sale_ref"] = ref
+                    b["latest_doc_kind"] = "sale"
+                    b["latest_doc_id"] = int(d.id)
+                    b["latest_doc_ref"] = ref
+
         rows = sorted(agg.values(), key=lambda r: r["name"].lower())
         for r in rows:
             r["net"] = round(r["sold_value"] - r["bought_value"], 2)       # + he owes us more than we owe him
@@ -137,11 +179,11 @@ class CustomerRecordsService:
         for d in CustomerRecordsService.documents(pid, "sale"):
             if not d["voided"]:
                 events.append({"date": d["date"], "type": "Sale", "ref": d["ref"], "detail": d["summary"],
-                               "delta": d["total"]})
+                               "delta": d["total"], "doc_kind": "sale", "doc_id": int(d["id"]), "doc_ref": d["ref"]})
         for d in CustomerRecordsService.documents(pid, "purchase"):
             if not d["voided"]:
                 events.append({"date": d["date"], "type": "Purchase", "ref": d["ref"], "detail": d["summary"],
-                               "delta": -d["total"]})
+                               "delta": -d["total"], "doc_kind": "purchase", "doc_id": int(d["id"]), "doc_ref": d["ref"]})
         with get_session() as s:
             for p in (s.query(Payment).filter(Payment.party_id == pid, Payment.status != "voided",
                                               Payment.entity_type.in_(["sale", "purchase"]))
@@ -149,20 +191,29 @@ class CustomerRecordsService:
                 inbound = p.direction == "in"
                 if str(p.notes or "").startswith("Advance settlement"):
                     continue
+                ref = f"{'SAL' if p.entity_type == 'sale' else 'PUR'}-{p.entity_id}"
                 events.append({"date": p.created_at, "type": "Payment in" if inbound else "Payment out",
-                               "ref": f"{'SAL' if p.entity_type == 'sale' else 'PUR'}-{p.entity_id}",
-                               "detail": (p.method or "").title(), "delta": -_f(p.amount) if inbound else _f(p.amount)})
+                               "ref": ref, "detail": (p.method or "").title(),
+                               "delta": -_f(p.amount) if inbound else _f(p.amount),
+                               "doc_kind": p.entity_type, "doc_id": int(p.entity_id or 0), "doc_ref": ref})
             for r in s.query(SaleReturn).filter(SaleReturn.party_id == pid).all():
-                events.append({"date": r.created_at, "type": "Sale return", "ref": f"SAL-{r.sale_id}",
-                               "detail": "", "delta": -abs(_f(r.amount))})
+                ref = f"SAL-{r.sale_id}"
+                events.append({"date": r.created_at, "type": "Sale return", "ref": ref,
+                               "detail": "", "delta": -abs(_f(r.amount)),
+                               "doc_kind": "sale", "doc_id": int(r.sale_id or 0), "doc_ref": ref})
             for r in s.query(PurchaseReturn).filter(PurchaseReturn.party_id == pid).all():
-                events.append({"date": r.created_at, "type": "Purchase return", "ref": f"PUR-{r.purchase_id}",
-                               "detail": "", "delta": abs(_f(r.amount))})
+                ref = f"PUR-{r.purchase_id}"
+                events.append({"date": r.created_at, "type": "Purchase return", "ref": ref,
+                               "detail": "", "delta": abs(_f(r.amount)),
+                               "doc_kind": "purchase", "doc_id": int(r.purchase_id or 0), "doc_ref": ref})
             for o in s.query(DocumentOffset).filter(DocumentOffset.party_id == pid,
                                                     DocumentOffset.status == "active").all():
                 events.append({"date": o.created_at, "type": "Swap" if o.kind == "swap" else "Set off",
                                "ref": f"PUR-{o.purchase_id} / SAL-{o.sale_id}", "detail": o.note or "",
-                               "delta": 0.0, "amount": _f(o.amount)})
+                               "delta": 0.0, "amount": _f(o.amount),
+                               "doc_kind": "purchase", "doc_id": int(o.purchase_id or 0),
+                               "doc_ref": f"PUR-{o.purchase_id}",
+                               "purchase_id": int(o.purchase_id or 0), "sale_id": int(o.sale_id or 0)})
         events.sort(key=lambda e: (e["date"] is None, e["date"]))
         run = 0.0
         for e in events:

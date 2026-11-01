@@ -3,7 +3,7 @@
 from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget, QTextEdit,
     QTableWidget, QTableWidgetItem, QMessageBox, QPushButton, QGroupBox,
-    QDialog, QFormLayout, QComboBox, QRadioButton, QLineEdit, QCheckBox, QDateEdit
+    QDialog, QFormLayout, QComboBox, QRadioButton, QLineEdit, QCheckBox, QDateEdit, QMenu
 )
 
 import re
@@ -158,6 +158,10 @@ class CustomerProfileView(QWidget):
 
         export_row = QHBoxLayout()
         export_row.addStretch(1)
+        self.btn_edit_activity_prices = QPushButton("Edit prices")
+        self.btn_edit_prices = self.btn_edit_activity_prices
+        self.btn_edit_activity_prices.clicked.connect(lambda: self.edit_row_prices(self.activity_table))
+        export_row.addWidget(self.btn_edit_activity_prices)
         self.btn_export_activity = QPushButton("Export to Excel")
         self.btn_export_activity.clicked.connect(self._export_activity_to_excel)
         export_row.addWidget(self.btn_export_activity)
@@ -180,6 +184,12 @@ class CustomerProfileView(QWidget):
         # 2. Crops Tab
         crops_tab = QWidget()
         cv = QVBoxLayout(crops_tab)
+        crops_top = QHBoxLayout()
+        crops_top.addStretch(1)
+        self.btn_edit_crops_prices = QPushButton("Edit prices")
+        self.btn_edit_crops_prices.clicked.connect(lambda: self.edit_row_prices(self.crops_table))
+        crops_top.addWidget(self.btn_edit_crops_prices)
+        cv.addLayout(crops_top)
         self.crops_table = self._make_crops_table()
         cv.addWidget(self.crops_table)
         tabs.addTab(crops_tab, "Crops")
@@ -187,6 +197,12 @@ class CustomerProfileView(QWidget):
         # 3. Fertilizers Tab
         fert_tab = QWidget()
         fv = QVBoxLayout(fert_tab)
+        fert_top = QHBoxLayout()
+        fert_top.addStretch(1)
+        self.btn_edit_fertilizers_prices = QPushButton("Edit prices")
+        self.btn_edit_fertilizers_prices.clicked.connect(lambda: self.edit_row_prices(self.fertilizers_table))
+        fert_top.addWidget(self.btn_edit_fertilizers_prices)
+        fv.addLayout(fert_top)
         self.fertilizers_table = self._make_fertilizers_table()
         fv.addWidget(self.fertilizers_table)
         tabs.addTab(fert_tab, "Fertilizers")
@@ -195,6 +211,12 @@ class CustomerProfileView(QWidget):
         returns_tab = QWidget()
         rv = QVBoxLayout(returns_tab)
 
+        ret_top = QHBoxLayout()
+        ret_top.addStretch(1)
+        self.btn_edit_returns_prices = QPushButton("Edit prices")
+        self.btn_edit_returns_prices.clicked.connect(lambda: self.edit_row_prices(self.returns_table))
+        ret_top.addWidget(self.btn_edit_returns_prices)
+        rv.addLayout(ret_top)
         self.returns_table = self._make_returns_table()
         rv.addWidget(self.returns_table)
         tabs.addTab(returns_tab, "Returns")
@@ -220,7 +242,11 @@ class CustomerProfileView(QWidget):
         self.btn_advance_pay.setMinimumHeight(32)
 
         top.addWidget(self.btn_make_payment)
+        self.btn_edit_payment_prices = QPushButton("Edit prices")
+        self.btn_edit_payment_prices.setMinimumHeight(32)
+        self.btn_edit_payment_prices.clicked.connect(lambda: self.edit_row_prices(self.payments_table))
         top.addWidget(self.btn_advance_pay)
+        top.addWidget(self.btn_edit_payment_prices)
         top.addStretch(1)
 
         self.payments_table = QTableWidget(0, 10)
@@ -273,6 +299,8 @@ class CustomerProfileView(QWidget):
                 tabs.insertTab(i, w, label)
             self.tab_docs.swap_requested.connect(self.open_swap)
             self.tab_docs.changed.connect(self.refresh_all)      # a price was edited: every tab follows
+            self.tab_products.changed.connect(self.refresh_all)
+            self.tab_history.changed.connect(self.refresh_all)
 
         # Connect Signal Slots
         self.btn_make_payment.clicked.connect(self.open_payment_router)
@@ -285,6 +313,10 @@ class CustomerProfileView(QWidget):
         self.fertilizers_table.cellDoubleClicked.connect(self._preview_document)
         self.returns_table.cellDoubleClicked.connect(self._preview_document)
         self.payments_table.cellDoubleClicked.connect(self._preview_document)
+        for _tbl in (self.activity_table, self.crops_table, self.fertilizers_table,
+                     self.returns_table, self.payments_table):
+            _tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+            _tbl.customContextMenuRequested.connect(lambda pos, t=_tbl: self._table_price_menu(t, pos))
         self.advances_table.cellDoubleClicked.connect(self._preview_advance)
         self.btn_void_advance.clicked.connect(self._void_selected_advance)
 
@@ -1360,6 +1392,98 @@ class CustomerProfileView(QWidget):
         events.money_changed.emit()
         QMessageBox.information(self, "Reverted", done + "\n\nEvery balance has been updated.")
         self.refresh_all()
+
+    def _table_price_menu(self, table: QTableWidget, pos):
+        row = table.rowAt(pos.y())
+        if not 0 <= row < table.rowCount():
+            return
+        table.setCurrentCell(row, 0)
+        kind, doc_id, ref = self._resolve_row_price_target(table, row)
+        menu = QMenu(self)
+        act = menu.addAction(f"Edit prices ({ref})…" if ref else "Edit prices…")
+        act.setEnabled(bool(doc_id > 0 and kind in ("purchase", "sale")))
+        act.triggered.connect(lambda: self.edit_row_prices(table, row))
+        menu.exec_(table.viewport().mapToGlobal(pos))
+
+    def _resolve_row_price_target(self, table: QTableWidget = None, row: int = -1):
+        if table is None:
+            w = self.tabs.currentWidget()
+            for candidate in (self.activity_table, self.crops_table, self.fertilizers_table,
+                              self.returns_table, self.payments_table):
+                if w is not None and w.isAncestorOf(candidate):
+                    table = candidate
+                    break
+            if table is None:
+                table = self.activity_table
+        r = table.currentRow() if row < 0 else row
+        if not 0 <= r < table.rowCount():
+            return "", 0, ""
+
+        it0 = table.item(r, 0)
+        meta = it0.data(Qt.UserRole) if it0 is not None else None
+        if isinstance(meta, dict):
+            et = str(meta.get("entity_type") or "").strip().lower()
+            eid = int(meta.get("entity_id") or 0)
+            if et in ("purchase", "sale") and eid > 0:
+                return et, eid, f"{'SAL' if et == 'sale' else 'PUR'}-{eid}"
+
+        ref_col = 2 if table is self.payments_table else 3
+        ref_item = table.item(r, ref_col)
+        ref_text = (ref_item.text() if ref_item else "").strip()
+        if ref_text.endswith(" PAYMENT"):
+            ref_text = ref_text[:-8].strip()
+
+        etype, eid = self._parse_reference(ref_text)
+        if etype in ("purchase", "sale") and eid > 0:
+            return etype, eid, f"{'SAL' if etype == 'sale' else 'PUR'}-{eid}"
+
+        from database.session import get_session
+        if etype == "purchase_return" and eid > 0:
+            from database.models.purchase_return import PurchaseReturn
+            with get_session() as s:
+                pr = s.get(PurchaseReturn, eid)
+                if pr and pr.purchase_id:
+                    pid = int(pr.purchase_id)
+                    return "purchase", pid, f"PUR-{pid}"
+        elif etype == "sale_return" and eid > 0:
+            from database.models.sale_return import SaleReturn
+            with get_session() as s:
+                sr = s.get(SaleReturn, eid)
+                if sr and sr.sale_id:
+                    sid = int(sr.sale_id)
+                    return "sale", sid, f"SAL-{sid}"
+        elif etype == "payment" and eid > 0:
+            from database.models.payment import Payment
+            with get_session() as s:
+                pay = s.get(Payment, eid)
+                if pay and pay.entity_type in ("purchase", "sale") and pay.entity_id:
+                    did = int(pay.entity_id)
+                    return pay.entity_type, did, f"{'SAL' if pay.entity_type == 'sale' else 'PUR'}-{did}"
+        return "", 0, ""
+
+    def edit_row_prices(self, table: QTableWidget = None, row: int = -1) -> bool:
+        """Open the price editor for the purchase or sale linked to the selected row in any profile tab."""
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        kind, doc_id, ref = self._resolve_row_price_target(table, row)
+        if doc_id <= 0 or kind not in ("purchase", "sale"):
+            QMessageBox.information(
+                self, "Edit prices", "Select a purchase, sale, return, or payment row first."
+            )
+            return False
+        dlg = PurchasePriceEditDialog(
+            self,
+            purchase_id=doc_id if kind == "purchase" else 0,
+            sale_id=doc_id if kind == "sale" else 0,
+            ref=ref,
+            user_id=self.session_user_id,
+            kind=kind,
+        )
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.refresh_all()
+        return True
 
     def _parse_reference(self, ref):
         ref = str(ref).upper()

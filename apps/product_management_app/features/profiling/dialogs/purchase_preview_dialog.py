@@ -1,59 +1,67 @@
-from PySide2.QtWidgets import QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem
+from PySide2.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem
 from database.session import get_session
 from database.models.purchase import Purchase
-from database.models.purchase_item import PurchaseItem
-from database.models.product import Product
+from database.services.purchase_adjustment_service import PurchaseAdjustmentService
 
 
 class PurchasePreviewDialog(QDialog):
 
     def __init__(self, purchase_id, parent=None):
         super().__init__(parent)
+        self.purchase_id = int(purchase_id)
+        self.edited = False
 
         self.setWindowTitle(f"Purchase #{purchase_id}")
         self.resize(700, 400)
 
         layout = QVBoxLayout(self)
 
-        with get_session() as s:
+        top = QHBoxLayout()
+        self.header = QLabel("")
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit.clicked.connect(self.edit_prices)
+        top.addWidget(self.header)
+        top.addStretch(1)
+        top.addWidget(self.btn_edit)
+        layout.addLayout(top)
 
-            p = s.query(Purchase).get(purchase_id)
-
-            header = QLabel(
-                f"Date: {p.completed_at} | Status: {p.status}"
-            )
-
-            layout.addWidget(header)
-
-            items = (
-                s.query(
-                    Product.name,
-                    PurchaseItem.qty_bags,
-                    PurchaseItem.total_weight_kg,
-                    PurchaseItem.unit_cost_rate,
-                    PurchaseItem.line_total
-                )
-                .join(Product, Product.id == PurchaseItem.product_id)
-                .filter(PurchaseItem.purchase_id == purchase_id)
-                .all()
-            )
-
-        table = QTableWidget(len(items), 5)
-
-        table.setHorizontalHeaderLabels([
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels([
             "Product",
             "Bags",
             "KG",
             "Rate",
             "Amount"
         ])
+        layout.addWidget(self.table)
+        self._load()
 
-        for r, row in enumerate(items):
+    def _load(self):
+        with get_session() as s:
+            p = s.query(Purchase).get(self.purchase_id)
+            if p:
+                nums = PurchaseAdjustmentService._purchase_balance(s, p)
+                self.header.setText(
+                    f"Date: {p.completed_at} | Status: {p.status} | Total: \u20a6{nums['net_total']:,.2f} | Balance: \u20a6{nums['balance']:,.2f}"
+                )
+            lines = PurchaseAdjustmentService._line_prices(s, self.purchase_id)
 
-            table.setItem(r, 0, QTableWidgetItem(str(row[0])))
-            table.setItem(r, 1, QTableWidgetItem(str(row[1])))
-            table.setItem(r, 2, QTableWidgetItem(str(row[2])))
-            table.setItem(r, 3, QTableWidgetItem(str(row[3])))
-            table.setItem(r, 4, QTableWidgetItem(str(row[4])))
+        self.table.setRowCount(len(lines))
+        for r, l in enumerate(lines):
+            self.table.setItem(r, 0, QTableWidgetItem(str(l["product"])))
+            self.table.setItem(r, 1, QTableWidgetItem(str(l["bags"])))
+            self.table.setItem(r, 2, QTableWidgetItem(f"{l['kg']:,.2f}"))
+            self.table.setItem(r, 3, QTableWidgetItem(f"{l['rate']:,.2f}"))
+            self.table.setItem(r, 4, QTableWidgetItem(f"{l['amount']:,.2f}"))
 
-        layout.addWidget(table)
+    def edit_prices(self) -> bool:
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            open_price_editor,
+        )
+        if open_price_editor(self, "purchase", self.purchase_id, ref=f"PUR-{self.purchase_id}"):
+            self.edited = True
+            self._load()
+            if self.parent() is not None and hasattr(self.parent(), "refresh_all"):
+                self.parent().refresh_all()
+            return True
+        return False

@@ -776,7 +776,9 @@ class SupplierProfileService:
                 .filter(Purchase.supplier_party_id == party_id).all()
             ]
             if purchase_ids:
-                from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+                from database.models.purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine
+                for (aid,) in s.query(PurchasePriceAdjustment.id).filter(PurchasePriceAdjustment.purchase_id.in_(purchase_ids)).all():
+                    s.query(PurchasePriceAdjustmentLine).filter(PurchasePriceAdjustmentLine.adjustment_id == aid).delete(synchronize_session=False)
                 # Real FK to purchases.id - would block the purchase delete.
                 s.query(PurchasePriceAdjustment).filter(
                     PurchasePriceAdjustment.purchase_id.in_(purchase_ids)
@@ -814,7 +816,9 @@ class SupplierProfileService:
                 .filter(Sale.buyer_party_id == party_id).all()
             ]
             if sale_ids:
-                from database.models.sale_discount import SaleDiscount
+                from database.models.sale_discount import SaleDiscount, SalePriceAdjustmentLine
+                for (did,) in s.query(SaleDiscount.id).filter(SaleDiscount.sale_id.in_(sale_ids)).all():
+                    s.query(SalePriceAdjustmentLine).filter(SalePriceAdjustmentLine.discount_id == did).delete(synchronize_session=False)
                 # Real FK to sales.id - would block the sale delete.
                 s.query(SaleDiscount).filter(
                     SaleDiscount.sale_id.in_(sale_ids)

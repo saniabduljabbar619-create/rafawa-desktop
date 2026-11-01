@@ -3,7 +3,7 @@
 from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QMenu
 )
 
 from PySide2.QtCore import Qt
@@ -101,6 +101,8 @@ class PurchasePaymentDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.itemSelectionChanged.connect(self.autofill_amount)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -147,6 +149,9 @@ class PurchasePaymentDialog(QDialog):
         btns.addWidget(self.btn_print_receipt)
         self.btn_counter_shortage = QPushButton("Counter Shortage")
         btns.addWidget(self.btn_counter_shortage)
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit_prices = self.btn_edit
+        btns.addWidget(self.btn_edit)
         self.btn_price_adjustment = QPushButton("Price Adjustment")
         btns.addWidget(self.btn_price_adjustment)
         btns.addWidget(self.btn_close)
@@ -157,6 +162,7 @@ class PurchasePaymentDialog(QDialog):
         self.btn_record.clicked.connect(self.record_payment)
         self.btn_print_receipt.clicked.connect(self._print_receipt)
         self.btn_counter_shortage.clicked.connect(self._open_counter_shortage)
+        self.btn_edit.clicked.connect(lambda: self.edit_prices())
         self.btn_price_adjustment.clicked.connect(self._open_price_adjustment)
 
         # --------------------------------------------------
@@ -456,7 +462,41 @@ class PurchasePaymentDialog(QDialog):
         dlg.exec_()
         self.shortage_banner.refresh()
 
+    def _row_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if not 0 <= row < self.table.rowCount():
+            return
+        self.table.setCurrentCell(row, 0)
+        menu = QMenu(self)
+        menu.addAction("Edit prices…").triggered.connect(lambda: self.edit_prices(row))
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def edit_prices(self, row: int = -1) -> bool:
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        r = self.table.currentRow() if row < 0 else row
+        if not 0 <= r < self.table.rowCount():
+            QMessageBox.information(self, "Edit prices", "Select a purchase row first.")
+            return False
+        purchase_id = int(self.table.item(r, 0).text())
+        dlg = PurchasePriceEditDialog(
+            self, purchase_id=purchase_id, ref=f"PUR-{purchase_id}", user_id=self.user_id, kind="purchase"
+        )
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.load_purchases()
+        for idx in range(self.table.rowCount()):
+            if int(self.table.item(idx, 0).text()) == purchase_id:
+                self.table.setCurrentCell(idx, 0)
+                break
+        self.autofill_amount()
+        return True
+
     def _open_price_adjustment(self):
+        if 0 <= self.table.currentRow() < self.table.rowCount():
+            self.edit_prices(self.table.currentRow())
+            return
         from apps.product_management_app.features.profiling.dialogs.purchase_price_adjustment_dialog import (
             PurchasePriceAdjustmentDialog,
         )

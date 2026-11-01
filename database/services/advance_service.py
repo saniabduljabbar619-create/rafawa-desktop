@@ -107,7 +107,8 @@ class AdvanceService:
         advance_id: int,
         amount: float,
         method: str,
-        created_by_user_id: int
+        created_by_user_id: int,
+        notes: str = "",
     ):
         from database.models.payment import Payment
 
@@ -136,7 +137,7 @@ class AdvanceService:
                 direction=direction,
                 amount=float(amount),
                 method=str(method),
-                notes="Advance settlement",
+                notes=(f"Advance settlement - {notes.strip()}" if (notes or "").strip() and "advance settlement" not in (notes or "").lower() else ((notes or "").strip() or "Advance settlement")),
                 created_by_user_id=created_by_user_id,
                 created_at=datetime.now()
             )
@@ -153,7 +154,12 @@ class AdvanceService:
             .filter(Payment.status != "voided")
             .scalar()
         )
-        return float(advance.amount) - float(paid)
+        allocated = (
+            s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0))
+            .filter(AdvanceAllocation.advance_id == advance_id)
+            .scalar()
+        )
+        return max(float(advance.amount or 0) - float(paid or 0) - float(allocated or 0), 0.0)
 
     @staticmethod
     def get_fifo_advances(party_id: int, direction: str):

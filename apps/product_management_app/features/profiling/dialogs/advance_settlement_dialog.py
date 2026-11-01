@@ -6,12 +6,10 @@ from PySide2.QtWidgets import (
     QComboBox
 )
 from PySide2.QtCore import Qt
-from PySide2.QtGui import QColor, QBrush
 
 from database.session import get_session
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
-from database.services.payment_center import PaymentCenter
 from database.models.payment import Payment
 from database.services.payment_service import PaymentService
 
@@ -27,7 +25,7 @@ class AdvanceSettlementDialog(QDialog):
         self.user_id = user_id
 
         self.setWindowTitle("Advance Settlement Hub")
-        self.setMinimumWidth(800) # Slightly widened for the extra column
+        self.setMinimumWidth(800)
         self.setMinimumHeight(450)
 
         layout = QVBoxLayout(self)
@@ -37,14 +35,14 @@ class AdvanceSettlementDialog(QDialog):
         layout.addWidget(title)
 
         # --------------------------------------------------
-        # ADVANCE TABLE (🚧 BRIDGE EXPANSION: 7 Columns now)
+        # ADVANCE TABLE (7 Columns)
         # --------------------------------------------------
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
             "Advance ID",
             "Date",
             "Direction",
-            "Ledger Track", # Added to prevent cross-ledger mistakes
+            "Ledger Track",
             "Amount",
             "Settled",
             "Remaining"
@@ -78,11 +76,6 @@ class AdvanceSettlementDialog(QDialog):
 
         layout.addLayout(form)
 
-        # Free-text context for this settlement - same reasoning as the
-        # Sale/Purchase payment dialogs: a partial settlement completed
-        # weeks or days later should carry a note explaining why (a
-        # discount, a special arrangement), not just a machine-generated
-        # "Automated pool settlement" string.
         note_row = QHBoxLayout()
         note_row.addWidget(QLabel("Note:"))
         self.note_input = QLineEdit()
@@ -114,20 +107,24 @@ class AdvanceSettlementDialog(QDialog):
     # LOAD ADVANCES
     # --------------------------------------------------
     def load_advances(self):
-        self.open_advances_pool = [] # 🚀 Holds open records for the backend engine
+        self.open_advances_pool = []
         total_advance_in = 0.0
+        total_amount_in = 0.0
+        total_settled_in = 0.0
         total_advance_out = 0.0
+        total_amount_out = 0.0
+        total_settled_out = 0.0
 
         with get_session() as s:
             advances = (
                 s.query(Advance)
                 .filter(Advance.party_id == int(self.party.id))
-                .order_by(Advance.created_at.asc()) # Keep chronological order
+                .filter(Advance.status != "voided")
+                .order_by(Advance.created_at.asc())
                 .all()
             )
 
             for adv in advances:
-                # Calculate what has already been deducted from this specific record
                 settled_alloc = s.query(func.coalesce(func.sum(AdvanceAllocation.amount), 0)).filter(
                     AdvanceAllocation.advance_id == adv.id
                 ).scalar()
@@ -137,55 +134,81 @@ class AdvanceSettlementDialog(QDialog):
                     Payment.status != "voided",
                 ).scalar()
 
+                amt = float(adv.amount or 0)
                 settled = float(settled_alloc or 0) + float(settled_payments or 0)
-                remaining = float(adv.amount) - settled
+                remaining = amt - settled
 
-                if remaining <= 0:
+                if remaining <= 0.005:
                     continue
 
-                # Save active records into an in-memory pool for later distribution
                 self.open_advances_pool.append({
-                    "id": adv.id,
+                    "id": int(adv.id),
+                    "created_at": adv.created_at,
                     "direction": adv.direction,
-                    "remaining": remaining
+                    "ledger": adv.ledger or adv.advance_type or "money",
+                    "amount": amt,
+                    "settled": settled,
+                    "remaining": remaining,
                 })
 
                 if adv.direction == "received":
+                    total_amount_in += amt
+                    total_settled_in += settled
                     total_advance_in += remaining
                 else:
+                    total_amount_out += amt
+                    total_settled_out += settled
                     total_advance_out += remaining
 
-        # --------------------------------------------------
-        # POPULATE A CLEAN CONSOLIDATED TWO-ROW SUMMARY
-        # --------------------------------------------------
         self.table.setRowCount(0)
-        
-        # Row 1: Total Customer Deposits Remaining
-        if total_advance_in > 0:
-            r = self.table.rowCount()
-            self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem("POOL-IN"))
-            self.table.setItem(r, 1, QTableWidgetItem("All Customer Deposits Combined"))
-            self.table.setItem(r, 2, QTableWidgetItem("Advance IN"))
-            self.table.setItem(r, 6, QTableWidgetItem(f"{total_advance_in:,.2f}")) # Dynamic balance
 
-        # Row 2: Total Extended Supplier Debts Remaining
-        if total_advance_out > 0:
+        for rec in self.open_advances_pool:
             r = self.table.rowCount()
             self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem("POOL-OUT"))
-            self.table.setItem(r, 1, QTableWidgetItem("All System Debts Combined"))
-            self.table.setItem(r, 2, QTableWidgetItem("Advance OUT"))
-            self.table.setItem(r, 6, QTableWidgetItem(f"{total_advance_out:,.2f}"))
+            cols = [
+                f"ADV-{rec['id']}",
+                str(rec["created_at"] or "")[:19],
+                "Advance IN" if rec["direction"] == "received" else "Advance OUT",
+                str(rec["ledger"]),
+                f"{rec['amount']:,.2f}",
+                f"{rec['settled']:,.2f}",
+                f"{rec['remaining']:,.2f}",
+            ]
+            for c, val in enumerate(cols):
+                it = QTableWidgetItem(val)
+                if c >= 4:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(r, c, it)
+
+        if len([a for a in self.open_advances_pool if a["direction"] == "received"]) > 1:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            for c, val in enumerate([
+                "POOL-IN", "All Customer Deposits Combined", "Advance IN", "money",
+                f"{total_amount_in:,.2f}", f"{total_settled_in:,.2f}", f"{total_advance_in:,.2f}",
+            ]):
+                it = QTableWidgetItem(val)
+                if c >= 4:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(r, c, it)
+
+        if len([a for a in self.open_advances_pool if a["direction"] == "given"]) > 1:
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            for c, val in enumerate([
+                "POOL-OUT", "All System Debts Combined", "Advance OUT", "money",
+                f"{total_amount_out:,.2f}", f"{total_settled_out:,.2f}", f"{total_advance_out:,.2f}",
+            ]):
+                it = QTableWidgetItem(val)
+                if c >= 4:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(r, c, it)
 
     def autofill_amount(self):
         r = self.table.currentRow()
-        if r < 0:
+        if r < 0 or self.table.item(r, 6) is None:
             return
-
-        # 🚧 THE BRIDGE: Remaining column shifted from index 5 to index 6
-        remaining = self.table.item(r, 6).text()
-        remaining = remaining.replace(",", "")
+        remaining = self.table.item(r, 6).text().replace(",", "")
         self.amount_input.setText(remaining)
 
     # --------------------------------------------------
@@ -194,42 +217,49 @@ class AdvanceSettlementDialog(QDialog):
     def record_payment(self):
         r = self.table.currentRow()
         if r < 0:
-            QMessageBox.information(self, "Select Pool", "Select an advance pool first.")
+            QMessageBox.information(self, "Select Advance", "Select an advance or pool row first.")
             return
 
         try:
-            payment_amount = float(self.amount_input.text())
+            payment_amount = float(self.amount_input.text().replace(",", ""))
         except Exception:
             QMessageBox.warning(self, "Invalid Amount", "Enter a valid amount.")
             return
 
-        pool_type = self.table.item(r, 0).text() # "POOL-IN" or "POOL-OUT"
-        target_direction = "received" if pool_type == "POOL-IN" else "given"
-        
-        # Filter our memory pool to match only the selected direction
-        active_records = [a for a in self.open_advances_pool if a["direction"] == target_direction]
-        total_pool_available = sum(a["remaining"] for a in active_records)
-
-        if payment_amount > total_pool_available:
-            QMessageBox.warning(self, "Over Settlement", f"Amount exceeds total pool balance ({total_pool_available:,.2f}).")
+        if payment_amount <= 0:
+            QMessageBox.warning(self, "Invalid Amount", "Amount must be greater than zero.")
             return
 
-        # Explicitly map cash context directions
+        row_id_text = self.table.item(r, 0).text().strip()
+        if row_id_text.startswith("ADV-"):
+            adv_id = int(row_id_text.split("-", 1)[1])
+            active_records = [a for a in self.open_advances_pool if a["id"] == adv_id]
+            target_direction = active_records[0]["direction"] if active_records else "received"
+        else:
+            target_direction = "received" if row_id_text == "POOL-IN" else "given"
+            active_records = [a for a in self.open_advances_pool if a["direction"] == target_direction]
+
+        total_pool_available = sum(a["remaining"] for a in active_records)
+
+        if payment_amount > total_pool_available + 0.005:
+            QMessageBox.warning(
+                self, "Over Settlement",
+                f"Amount exceeds remaining advance balance ({total_pool_available:,.2f})."
+            )
+            return
+
         payment_direction = "out" if target_direction == "received" else "in"
         amount_left_to_distribute = payment_amount
 
         try:
-            # 🚀 THE AUTO-KNOCK LOOP
-            # This loops through individual records and automatically chips away at balances
             for record in active_records:
                 if amount_left_to_distribute <= 0:
                     break
 
-                # Determine how much this specific record can absorb
                 absorb_amount = min(amount_left_to_distribute, record["remaining"])
 
                 own_note = self.note_input.text().strip()
-                auto_ref = f"Automated pool settlement linked to Advance ID #{record['id']}"
+                auto_ref = f"Advance settlement linked to ADV-{record['id']}"
                 combined_note = f"{own_note} ({auto_ref})" if own_note else auto_ref
 
                 PaymentService.record_advance_payment(
@@ -239,12 +269,15 @@ class AdvanceSettlementDialog(QDialog):
                     amount=absorb_amount,
                     created_by_user_id=self.user_id,
                     method=self.method_combo.currentText(),
-                    notes=combined_note
+                    notes=combined_note,
                 )
 
                 amount_left_to_distribute -= absorb_amount
 
-            QMessageBox.information(self, "Success", f"Successfully deducted ₦{payment_amount:,.2f} from the advance pool.")
+            QMessageBox.information(
+                self, "Success",
+                f"Successfully recorded \u20a6{payment_amount:,.2f} advance payment."
+            )
             self.load_advances()
             self.amount_input.clear()
             self.note_input.clear()

@@ -132,6 +132,18 @@ def build_sale(sale_id: int, shop: ShopInfo) -> ReceiptDoc:
             for si, prod in rows
         ]
 
+        from database.services.sale_adjustment_service import SaleAdjustmentService
+        lines = [
+            ReceiptLine(
+                name=l["product"],
+                bags=_f(l["bags"]),
+                kg=_f(l["kg"]),
+                is_fertilizer=(l["unit"] == "bag"),
+                rate=_f(l["rate"]),
+                amount=_f(l["amount"]),
+            )
+            for l in SaleAdjustmentService._line_prices(s, sale.id)
+        ]
         paid = _sum_paid(s, "sale", sale.id)
         payments = _payment_lines(s, "sale", sale.id)
 
@@ -196,7 +208,24 @@ def build_purchase(purchase_id: int, shop: ShopInfo) -> ReceiptDoc:
             for pi, prod in rows
         ]
 
-        paid = _sum_paid(s, "purchase", pur.id)
+        from database.services.purchase_adjustment_service import PurchaseAdjustmentService
+        from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+        lines = [
+            ReceiptLine(
+                name=l["product"],
+                bags=_f(l["bags"]),
+                kg=_f(l["kg"]),
+                is_fertilizer=(l["unit"] == "bag"),
+                rate=_f(l["rate"]),
+                amount=_f(l["amount"]),
+            )
+            for l in PurchaseAdjustmentService._line_prices(s, pur.id)
+        ]
+        price_adj = float(
+            s.query(func.coalesce(func.sum(PurchasePriceAdjustment.amount), 0.0))
+            .filter(PurchasePriceAdjustment.purchase_id == pur.id)
+            .scalar() or 0.0
+        )
         payments = _payment_lines(s, "purchase", pur.id)
 
         party_info = PartyInfo(
@@ -214,7 +243,7 @@ def build_purchase(purchase_id: int, shop: ShopInfo) -> ReceiptDoc:
             note=(pur.notes or ""),
             lines=lines, payments=payments,
             subtotal=_f(pur.subtotal), discount=_f(pur.discount),
-            total=_f(pur.total_amount), paid=paid,
+            total=max(_f(pur.total_amount) + price_adj, 0.0), paid=_sum_paid(s, "purchase", pur.id),
         )
 
 

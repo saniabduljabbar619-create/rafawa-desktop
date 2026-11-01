@@ -3,7 +3,7 @@
 from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QMenu
 )
 
 from PySide2.QtCore import Qt
@@ -106,6 +106,8 @@ class SalePaymentDialog(QDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.itemSelectionChanged.connect(self.autofill_amount)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
@@ -150,11 +152,15 @@ class SalePaymentDialog(QDialog):
         self.btn_print_receipt = QPushButton("Print Receipt")
         self.btn_print_receipt.setEnabled(False)
         self.btn_counter_shortage = QPushButton("Counter Shortage")
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit_prices = self.btn_edit
+        self.btn_price_adjustment = self.btn_edit
         self.btn_close = QPushButton("Close")
 
         btns.addWidget(self.btn_record)
         btns.addWidget(self.btn_print_receipt)
         btns.addWidget(self.btn_counter_shortage)
+        btns.addWidget(self.btn_edit)
         btns.addWidget(self.btn_close)
 
         layout.addLayout(btns)
@@ -163,6 +169,7 @@ class SalePaymentDialog(QDialog):
         self.btn_record.clicked.connect(self.record_payment)
         self.btn_print_receipt.clicked.connect(self._print_receipt)
         self.btn_counter_shortage.clicked.connect(self._open_counter_shortage)
+        self.btn_edit.clicked.connect(lambda: self.edit_prices())
 
         # --------------------------------------------------
         # LOAD DATA
@@ -465,6 +472,37 @@ class SalePaymentDialog(QDialog):
     # --------------------------------------------------
     # PRINT RECEIPT (manual, on demand - no auto-print)
     # --------------------------------------------------
+
+    def _row_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if not 0 <= row < self.table.rowCount():
+            return
+        self.table.setCurrentCell(row, 0)
+        menu = QMenu(self)
+        menu.addAction("Edit prices…").triggered.connect(lambda: self.edit_prices(row))
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def edit_prices(self, row: int = -1) -> bool:
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        r = self.table.currentRow() if row < 0 else row
+        if not 0 <= r < self.table.rowCount():
+            QMessageBox.information(self, "Edit prices", "Select a sale row first.")
+            return False
+        sale_id = int(self.table.item(r, 0).text())
+        dlg = PurchasePriceEditDialog(
+            self, sale_id=sale_id, ref=f"SAL-{sale_id}", user_id=self.user_id, kind="sale"
+        )
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.load_sales()
+        for idx in range(self.table.rowCount()):
+            if int(self.table.item(idx, 0).text()) == sale_id:
+                self.table.setCurrentCell(idx, 0)
+                break
+        self.autofill_amount()
+        return True
 
     def _open_counter_shortage(self):
         from apps.product_management_app.features.profiling.dialogs.shortage_activity_picker_dialog import (

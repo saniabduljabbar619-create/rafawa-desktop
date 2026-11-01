@@ -20,13 +20,13 @@ from database.models.sale import Sale
 from database.models.sale_item import SaleItem
 
 from database.models.purchase_return import PurchaseReturn
-from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+from database.models.purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine
 from database.models.sale_return import SaleReturn
 
 from database.models.payment import Payment
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
-from database.models.sale_discount import SaleDiscount
+from database.models.sale_discount import SaleDiscount, SalePriceAdjustmentLine
 
 
 def _m(v) -> str:
@@ -38,7 +38,7 @@ def _stamp(dt) -> str:
 
 
 def _advance_detail(a, amount: float, given: bool, uses, cash_settled: float, used: float, voided: bool,
-                    user: str, user_names=None) -> Dict[str, str]:
+                    user: str, user_names=None, cash_payments=None) -> Dict[str, str]:
     """Every fact about one advance, in words: which way, how much, when and by whom, what it was used on (each use
     with its date and who applied it), what is left, and what it does and does not touch."""
     user_names = user_names or {}
@@ -52,19 +52,27 @@ def _advance_detail(a, amount: float, given: bool, uses, cash_settled: float, us
     if voided:
         parts.append("VOIDED - no longer counts in any balance")
     else:
-        if uses or cash_settled:
+        if uses or cash_settled or cash_payments:
             parts.append(f"Used {_m(used)} so far:")
             for u in uses:
                 doc = f"{'PUR' if u.entity_type == 'purchase' else 'SAL'}-{int(u.entity_id)}"
                 who = user_names.get(int(u.created_by_user_id or 0), "")
                 parts.append(f"   - {_m(u.amount)} set against {doc}" + (f" on {_stamp(u.created_at)}" if u.created_at else "")
                              + (f" by {who}" if who else ""))
-            if cash_settled:
+            if cash_payments:
+                for cp in cash_payments:
+                    who = user_names.get(int(cp.created_by_user_id or 0), "")
+                    m_str = (cp.method or "cash").capitalize()
+                    parts.append(f"   - {_m(cp.amount)} settled in {m_str}"
+                                 + (f" on {_stamp(cp.created_at)}" if cp.created_at else "")
+                                 + (f" by {who}" if who else ""))
+            elif cash_settled:
                 parts.append(f"   - {_m(cash_settled)} settled in cash / transfer")
         else:
             parts.append("Not used yet - it sits as advance until it is applied to a "
                          + ("purchase" if given else "sale"))
-        parts.append(f"Still unused: {_m(max(amount - used, 0.0))}")
+        rem = max(amount - used, 0.0)
+        parts.append(f"Still unused: {_m(rem)} (Remaining: {_m(rem)})")
     parts.append("Cash drawer: not counted (an advance is a balance with the party, not till cash)")
     if a.notes:
         parts.append(f"Note: {a.notes}")
@@ -79,6 +87,34 @@ def _advance_detail(a, amount: float, given: bool, uses, cash_settled: float, us
         summary += " - unused"
     if a.notes:
         summary += f"  |  {a.notes}"
+    return {"summary": summary, "text": "\n".join(parts)}
+
+
+def _advance_payment_detail(pay, ref: str, amount: float, given: bool, bal, adv_total: float, user: str) -> Dict[str, str]:
+    """Every fact about one payment against an advance, including the remaining advance balance."""
+    method = (pay.method or "").lower()
+    word = {"cash": "Cash", "transfer": "Bank transfer", "bank": "Bank", "pos": "POS", "mobile": "Mobile money",
+            "cheque": "Cheque"}.get(method, method.capitalize() or "Payment")
+    dir_label = "Advance OUT" if given else "Advance IN"
+    if given:
+        head = f"{word}: party paid {_m(amount)} of {dir_label} {ref}"
+    else:
+        head = f"{word}: we paid {_m(amount)} of {dir_label} {ref}"
+    parts = [head]
+    if adv_total is not None:
+        parts.append(f"{ref} ({dir_label}) total: {_m(adv_total)}")
+    if bal:
+        parts.append(
+            f"Owed before this payment: {_m(bal['before'])}  |  after: {_m(bal['after'])} (Remaining: {_m(bal['after'])})"
+        )
+    parts.append("Recorded " + (f"by {user}" if user else "by the system"))
+    if pay.notes:
+        parts.append(f"Note: {pay.notes}")
+    summary = head
+    if bal:
+        summary += f"  |  remaining {_m(bal['before'])} -> {_m(bal['after'])}"
+    if pay.notes:
+        summary += f"  |  {pay.notes}"
     return {"summary": summary, "text": "\n".join(parts)}
 
 
@@ -124,17 +160,17 @@ def _doc_payment_status(net_total: float, settled: float, balance: float) -> str
 
 def _group_activity(rows: List[Dict]) -> List[Dict]:
     """
-    Newest first, but a sale/purchase is followed directly by its own payments (oldest first), so each document
+    Newest first, but a sale/purchase/advance is followed directly by its own payments (oldest first), so each document
     "carries its tail". A group is dated by its latest event. A settlement marker sorts ABOVE the row that
     settled the balance (same instant), so nothing sits after a marker unless it is genuinely newer activity.
     """
-    docs = {r["reference"]: r for r in rows if r.get("type") in ("sale", "purchase")}
+    docs = {r["reference"]: r for r in rows if r.get("type") in ("sale", "purchase", "advance")}
     tails: Dict[str, List[Dict]] = {}
     singles: List[Dict] = []
     for r in rows:
         if r.get("type") == "payment" and r.get("reference") in docs:
             tails.setdefault(r["reference"], []).append(r)
-        elif r.get("type") not in ("sale", "purchase"):
+        elif r.get("type") not in ("sale", "purchase", "advance"):
             singles.append(r)
 
     def _t(r):
@@ -229,11 +265,67 @@ def _party_wide_running_balances(
     return payment_balances, settlement_dts
 
 
+def _advance_running_balances(s, party_id: int) -> Dict[int, Dict[str, float]]:
+    """
+    For each non-voided Advance of `party_id`, walks its allocations and
+    cash/transfer settlement payments in chronological order starting from
+    `float(adv.amount)` and records the exact before/after remaining balance
+    around each `Payment(entity_type="advance")` row.
+    """
+    out: Dict[int, Dict[str, float]] = {}
+    advances = (
+        s.query(Advance)
+        .filter(Advance.party_id == int(party_id), Advance.status != "voided")
+        .all()
+    )
+    if not advances:
+        return out
+    adv_by_id = {int(a.id): a for a in advances}
+    adv_ids = list(adv_by_id.keys())
+    allocs = (
+        s.query(AdvanceAllocation)
+        .filter(AdvanceAllocation.advance_id.in_(adv_ids))
+        .all()
+    )
+    pays = (
+        s.query(Payment)
+        .filter(Payment.entity_type == "advance", Payment.entity_id.in_(adv_ids))
+        .filter(Payment.status != "voided")
+        .all()
+    )
+    events_by_adv: Dict[int, List[tuple]] = {aid: [] for aid in adv_ids}
+    for al in allocs:
+        aid = int(al.advance_id or 0)
+        if aid in events_by_adv:
+            events_by_adv[aid].append((getattr(al, "created_at", None) or _dt.min, 0, int(al.id), float(al.amount or 0), None))
+    for p in pays:
+        aid = int(p.entity_id or 0)
+        if aid in events_by_adv:
+            events_by_adv[aid].append((p.created_at or _dt.min, 1, int(p.id), float(p.amount or 0), int(p.id)))
+
+    for aid, evs in events_by_adv.items():
+        adv = adv_by_id[aid]
+        total_amt = float(adv.amount or 0.0)
+        running = total_amt
+        evs.sort(key=lambda e: (e[0], e[1], e[2]))
+        for _dt_val, _kind, _eid, amt, pay_id in evs:
+            before = running
+            running = max(running - amt, 0.0)
+            after = running
+            if pay_id is not None:
+                out[pay_id] = {
+                    "before": before,
+                    "after": after,
+                    "advance_amount": total_amt,
+                    "given": (adv.direction or "").lower() == "given",
+                }
+    return out
+
+
 class PartyLedgerService:
 
     @staticmethod
     def _net_totals_for_sales(s, sale_ids: List[int]) -> Dict[int, float]:
-        # A voided sale owes nothing; discounts/returns netted - see document_balance.
         bals = document_balances(s, "sale", sale_ids)
         return {int(sid): (bals[int(sid)].net_total if int(sid) in bals else 0.0) for sid in sale_ids}
 
@@ -245,14 +337,9 @@ class PartyLedgerService:
     @staticmethod
     def payment_document_balances(party_id: int) -> Dict[int, Dict[str, float]]:
         """
-        Public entry point: for every real cash Payment against a sale or
-        purchase belonging to this party, returns the COMBINED balance
-        across every one of that party's sales (or every one of their
-        purchases) immediately before / after that specific payment -
-        matching the Payment Center, where a payment isn't tied to one
-        specific row. The Payments tab uses this so it shows exactly the
-        same numbers as the Activity tab, both reading from this single
-        place.
+        Public entry point: for every real cash Payment against a sale,
+        purchase, or advance belonging to this party, returns the balance
+        immediately before / after that specific payment.
         """
         with get_session() as s:
             sale_rows = s.query(Sale.id, Sale.completed_at).filter(Sale.buyer_party_id == party_id).all()
@@ -271,6 +358,7 @@ class PartyLedgerService:
             result: Dict[int, Dict[str, float]] = {}
             result.update(sale_balances)
             result.update(pur_balances)
+            result.update(_advance_running_balances(s, party_id))
             return result
 
     @staticmethod
@@ -600,18 +688,26 @@ class PartyLedgerService:
 
             from database.models.user import User
             adv_ids = [int(a.id) for a in adv]
+            adv_by_id = {int(a.id): a for a in adv}
             adv_uses: Dict[int, List] = {}
             for al in (s.query(AdvanceAllocation).filter(AdvanceAllocation.advance_id.in_(adv_ids or [0]))
                        .order_by(AdvanceAllocation.id).all()):
                 adv_uses.setdefault(int(al.advance_id), []).append(al)
             adv_cash: Dict[int, float] = {}
-            for eid, amt in (s.query(Payment.entity_id, func.coalesce(func.sum(Payment.amount), 0))
-                             .filter(Payment.entity_type == "advance", Payment.entity_id.in_(adv_ids or [0]))
-                             .filter(Payment.status != "voided").group_by(Payment.entity_id).all()):
-                adv_cash[int(eid)] = float(amt or 0)
+            adv_cash_rows: Dict[int, List] = {}
+            for cp in (s.query(Payment)
+                       .filter(Payment.entity_type == "advance", Payment.entity_id.in_(adv_ids or [0]))
+                       .filter(Payment.status != "voided")
+                       .order_by(Payment.created_at.asc(), Payment.id.asc()).all()):
+                eid_val = int(cp.entity_id or 0)
+                adv_cash_rows.setdefault(eid_val, []).append(cp)
+                adv_cash[eid_val] = adv_cash.get(eid_val, 0.0) + float(cp.amount or 0)
+
             wanted_users = ({int(a.created_by_user_id) for a in adv if a.created_by_user_id}
                             | {int(al.created_by_user_id) for rows_ in adv_uses.values() for al in rows_
-                               if al.created_by_user_id})
+                               if al.created_by_user_id}
+                            | {int(cp.created_by_user_id) for rows_ in adv_cash_rows.values() for cp in rows_
+                               if cp.created_by_user_id})
             adv_users = {int(u.id): u.username for u in s.query(User).filter(User.id.in_(wanted_users or {0})).all()}
 
             for a in adv:
@@ -620,15 +716,20 @@ class PartyLedgerService:
                 amt = float(a.amount or 0)
                 given = (a.direction or "").lower() == "given"
                 uses = adv_uses.get(int(a.id), [])
+                c_pays = adv_cash_rows.get(int(a.id), [])
                 used = sum(float(u.amount or 0) for u in uses) + adv_cash.get(int(a.id), 0.0)
                 voided = (a.status or "") == "voided"
-                detail = _advance_detail(a, amt, given, uses, adv_cash.get(int(a.id), 0.0), used, voided,
-                                         adv_users.get(int(a.created_by_user_id or 0), ""), adv_users)
+                detail = _advance_detail(
+                    a, amt, given, uses, adv_cash.get(int(a.id), 0.0), used, voided,
+                    adv_users.get(int(a.created_by_user_id or 0), ""), adv_users,
+                    cash_payments=c_pays,
+                )
 
                 # normalize direction
                 if given:
                     amt = -amt
 
+                remaining_adv = max(abs(amt) - used, 0.0)
                 rows.append({
                     "dt": a.created_at,
                     "ledger": "money",
@@ -637,33 +738,30 @@ class PartyLedgerService:
                     "summary": detail["summary"],
                     "detail": detail["text"],
                     "total": amt,
-                    "paid": None if voided else used,                  # how much of it has been used
-                    "balance": None if voided else max(abs(amt) - used, 0.0),   # how much is still unused
+                    "paid": None if voided else used,                          # how much of it has been used / paid
+                    "balance": None if voided else remaining_adv,              # how much is still unused / remaining
+                    "balance_before": None if voided else abs(amt),
+                    "balance_after": None if voided else remaining_adv,
                     "status": a.status,
                     "operator": adv_users.get(int(a.created_by_user_id or 0), ""),
                 })
 
         # --------------------------------------------------
-        # INDIVIDUAL PAYMENT ROWS - one per real Payment record, each
-        # clearly labeled back to its parent document (e.g. "Payment -
-        # SAL-1"). Added ALONGSIDE the combined summary rows above (which
-        # still carry the document's own running Paid/Balance/Status) -
-        # this doesn't replace that, it makes each individual payment
-        # event visible and traceable to its parent, no matter how much
-        # time passed between the sale/purchase and its payment. Sorted
-        # the same newest-first way as everything else, so a payment
-        # naturally lands right next to its own document in the common
-        # case where nothing else happened for this party in between.
+        # INDIVIDUAL PAYMENT ROWS - one per real Payment record (sale,
+        # purchase, AND advance settlements), each labeled back to its
+        # parent document ("SAL-1", "PUR-1", or "ADV-1").
+        # --------------------------------------------------
         with get_session() as s:
             from database.models.user import User
 
             sale_no_by_id = {int(sid): f"SAL-{sid}" for sid in sale_ids} if sale_ids else {}
             pur_no_by_id = {int(p.id): f"PUR-{p.id}" for p in purchases}
 
+            allowed_types = ("sale", "purchase") if walkin_name else ("sale", "purchase", "advance")
             pay_rows = (
                 s.query(Payment)
                 .filter(Payment.party_id == party_id)
-                .filter(Payment.entity_type.in_(("sale", "purchase")))
+                .filter(Payment.entity_type.in_(allowed_types))
                 .filter(Payment.status != "voided")
                 .filter(or_(and_(Payment.entity_type == "sale", Payment.entity_id.in_(sale_ids or [0])),
                             and_(Payment.entity_type == "purchase", Payment.entity_id.in_(purchase_ids or [0])))
@@ -685,40 +783,51 @@ class PartyLedgerService:
                 int(u.id): u.username for u in s.query(User).filter(User.id.in_(payer_ids)).all()
             } if payer_ids else {}
 
-            # Combined party-wide running balance across every sale (and,
-            # separately, every purchase) for this party - a payment
-            # isn't tied to one specific row, it pays down whatever's
-            # outstanding overall. Also returns the exact timestamps
-            # where that combined balance hit 0.0, for the settlement
-            # markers below. See _party_wide_running_balances.
             sale_pay_balances, sale_settle_dts = _party_wide_running_balances(
                 s, "sale", sale_ids, sale_net_totals, sale_creation_dt
             )
             pur_pay_balances, pur_settle_dts = _party_wide_running_balances(
                 s, "purchase", purchase_ids, pur_net_totals, pur_creation_dt
             )
+            adv_pay_balances = _advance_running_balances(s, party_id) if not walkin_name else {}
 
             for pay in pay_rows:
                 if not _in_range(pay.created_at):
                     continue
                 eid = int(pay.entity_id or 0)
-                if pay.entity_type == "sale":
+                amount_val = float(pay.amount or 0)
+                op_name = payer_names.get(int(pay.created_by_user_id or 0), "")
+
+                if pay.entity_type == "advance":
+                    parent_ref = f"ADV-{eid}"
+                    ledger = "money"
+                    bal = adv_pay_balances.get(int(pay.id))
+                    adv_obj = adv_by_id.get(eid)
+                    given_adv = ((adv_obj.direction or "").lower() == "given") if adv_obj else (pay.direction == "in")
+                    adv_tot = float(adv_obj.amount or 0) if adv_obj else (bal["advance_amount"] if bal else amount_val)
+                    detail = _advance_payment_detail(pay, parent_ref, amount_val, given_adv, bal, adv_tot, op_name)
+                elif pay.entity_type == "sale":
                     parent_ref = sale_no_by_id.get(eid, f"SAL-{eid}")
                     ledger = sale_ledger.get(eid, "crops")
                     bal = sale_pay_balances.get(int(pay.id))
+                    what = sale_items_detail.get(eid, "")
+                    detail = _payment_detail(
+                        pay, parent_ref, amount_val, True, what, bal,
+                        sale_net_totals.get(eid),
+                        pay_adv_sources.get((pay.entity_type, eid), []),
+                        op_name,
+                    )
                 else:
                     parent_ref = pur_no_by_id.get(eid, f"PUR-{eid}")
                     ledger = pur_ledger.get(eid, "crops")
                     bal = pur_pay_balances.get(int(pay.id))
-
-                amount_val = float(pay.amount or 0)
-                is_sale = pay.entity_type == "sale"
-                what = (sale_items_detail if is_sale else pur_items_detail).get(eid, "")
-                detail = _payment_detail(
-                    pay, parent_ref, amount_val, is_sale, what, bal,
-                    (sale_net_totals if is_sale else pur_net_totals).get(eid),
-                    pay_adv_sources.get((pay.entity_type, eid), []),
-                    payer_names.get(int(pay.created_by_user_id or 0), ""))
+                    what = pur_items_detail.get(eid, "")
+                    detail = _payment_detail(
+                        pay, parent_ref, amount_val, False, what, bal,
+                        pur_net_totals.get(eid),
+                        pay_adv_sources.get((pay.entity_type, eid), []),
+                        op_name,
+                    )
 
                 rows.append({
                     "dt": pay.created_at,
@@ -727,30 +836,21 @@ class PartyLedgerService:
                     "reference": parent_ref,
                     "summary": detail["summary"],
                     "detail": detail["text"],
-                    # "Total" here is the combined outstanding sum across
-                    # every sale/purchase for the party right before this
-                    # payment landed (same value as Balance Before) -
-                    # "Paid" is this one transaction's own amount. None
-                    # for advance-settlement-tagged payments, since those
-                    # are counted through the allocation instead of as
-                    # their own independent cash event (see helper).
                     "total": bal["before"] if bal else amount_val,
                     "paid": amount_val,
                     "balance": bal["after"] if bal else None,
                     "balance_before": bal["before"] if bal else None,
                     "balance_after": bal["after"] if bal else None,
                     "status": "",
-                    "operator": payer_names.get(int(pay.created_by_user_id or 0), ""),
+                    "operator": op_name,
+                    "entity_type": pay.entity_type,
+                    "entity_id": eid,
+                    "payment_id": int(pay.id),
+                    "direction": pay.direction,
                 })
 
         # --------------------------------------------------
-        # SETTLEMENT MARKERS - fire once the COMBINED balance across the
-        # party's sales (Receivables) or purchases (Payables) reaches
-        # exactly 0.0 - not per individual document. Dated to the moment
-        # that combined balance actually crossed to zero, so the marker
-        # takes its natural place in the newest-first list: everything
-        # that contributed sits below it, and only genuinely new activity
-        # after that point ever appears above it.
+        # SETTLEMENT MARKERS
         # --------------------------------------------------
         for dt in sale_settle_dts:
             if _in_range(dt):
@@ -790,7 +890,6 @@ class PartyLedgerService:
                                      "summary": "Weighed - waiting for the cashier", "total": 0, "paid": None,
                                      "balance": None, "status": "pending"})
         return _group_activity(rows)[:limit]
-    
 
     # --------------------------------------------------
     # CROP ACTIVITY LEDGER
@@ -798,23 +897,10 @@ class PartyLedgerService:
 
     @staticmethod
     def list_crop_activity(party_id: int, limit: int = 500):
-
-        from database.models.purchase import Purchase
-        from database.models.purchase_item import PurchaseItem
-        from database.models.sale import Sale
-        from database.models.sale_item import SaleItem
-        from database.models.purchase_return import PurchaseReturn
-        from database.models.sale_return import SaleReturn
-        from database.models.product import Product
-
         rows = []
 
         with get_session() as s:
-
-            # --------------------------------------------------
             # PURCHASE ITEMS (CROPS ONLY)
-            # --------------------------------------------------
-
             q = (
                 s.query(
                     Purchase.completed_at,
@@ -824,7 +910,8 @@ class PartyLedgerService:
                     PurchaseItem.unit_cost_rate,
                     PurchaseItem.line_total,
                     Purchase.id,
-                    Purchase.status
+                    Purchase.status,
+                    PurchaseItem.id,
                 )
                 .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
                 .join(Product, Product.id == PurchaseItem.product_id)
@@ -832,9 +919,21 @@ class PartyLedgerService:
                 .filter(PurchaseItem.product_type_snapshot == "crops")
                 .all()
             )
+            p_item_ids = [int(r[8]) for r in q]
+            p_deltas = {
+                int(iid): float(a or 0) for iid, a in
+                s.query(PurchasePriceAdjustmentLine.purchase_item_id,
+                        func.coalesce(func.sum(PurchasePriceAdjustmentLine.amount), 0))
+                .filter(PurchasePriceAdjustmentLine.purchase_item_id.in_(p_item_ids or [0]))
+                .group_by(PurchasePriceAdjustmentLine.purchase_item_id).all()
+            } if p_item_ids else {}
 
             for r in q:
-
+                extra = p_deltas.get(int(r[8]), 0.0)
+                kg = float(r[3] or 0)
+                orig_rate = float(r[4] or 0)
+                rate = round(orig_rate + (extra / kg if kg else 0.0), 2)
+                amt = round(float(r[5] or 0) + extra, 2)
                 rows.append({
                     "dt": r[0],
                     "product": r[1],
@@ -842,15 +941,12 @@ class PartyLedgerService:
                     "reference": f"PUR-{r[6]}",
                     "bags": r[2],
                     "kg": r[3],
-                    "unit_rate": r[4],
-                    "amount": r[5],
+                    "unit_rate": rate,
+                    "amount": amt,
                     "status": r[7]
                 })
 
-            # --------------------------------------------------
             # SALE ITEMS (CROPS ONLY)
-            # --------------------------------------------------
-
             q = (
                 s.query(
                     Sale.completed_at,
@@ -860,7 +956,8 @@ class PartyLedgerService:
                     SaleItem.unit_sale_rate,
                     SaleItem.line_total,
                     Sale.id,
-                    Sale.status
+                    Sale.status,
+                    SaleItem.id,
                 )
                 .join(Sale, Sale.id == SaleItem.sale_id)
                 .join(Product, Product.id == SaleItem.product_id)
@@ -868,9 +965,21 @@ class PartyLedgerService:
                 .filter(SaleItem.product_type_snapshot == "crops")
                 .all()
             )
+            s_item_ids = [int(r[8]) for r in q]
+            s_deltas = {
+                int(iid): float(a or 0) for iid, a in
+                s.query(SalePriceAdjustmentLine.sale_item_id,
+                        func.coalesce(func.sum(SalePriceAdjustmentLine.amount), 0))
+                .filter(SalePriceAdjustmentLine.sale_item_id.in_(s_item_ids or [0]))
+                .group_by(SalePriceAdjustmentLine.sale_item_id).all()
+            } if s_item_ids else {}
 
             for r in q:
-
+                extra = s_deltas.get(int(r[8]), 0.0)
+                kg = float(r[3] or 0)
+                orig_rate = float(r[4] or 0)
+                rate = round(orig_rate + (extra / kg if kg else 0.0), 2)
+                amt = round(float(r[5] or 0) + extra, 2)
                 rows.append({
                     "dt": r[0],
                     "product": r[1],
@@ -878,15 +987,12 @@ class PartyLedgerService:
                     "reference": f"SAL-{r[6]}",
                     "bags": r[2],
                     "kg": r[3],
-                    "unit_rate": r[4],
-                    "amount": r[5],
+                    "unit_rate": rate,
+                    "amount": amt,
                     "status": r[7]
                 })
 
-            # --------------------------------------------------
             # PURCHASE RETURNS (CROPS ONLY)
-            # --------------------------------------------------
-
             q = (
                 s.query(
                     PurchaseReturn.created_at,
@@ -904,7 +1010,6 @@ class PartyLedgerService:
             )
 
             for r in q:
-
                 rows.append({
                     "dt": r[0],
                     "product": r[1],
@@ -917,10 +1022,7 @@ class PartyLedgerService:
                     "status": "posted"
                 })
 
-            # --------------------------------------------------
             # SALE RETURNS (CROPS ONLY)
-            # --------------------------------------------------
-
             q = (
                 s.query(
                     SaleReturn.created_at,
@@ -938,7 +1040,6 @@ class PartyLedgerService:
             )
 
             for r in q:
-
                 rows.append({
                     "dt": r[0],
                     "product": r[1],
@@ -952,25 +1053,13 @@ class PartyLedgerService:
                 })
 
         rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
-
         return rows[:limit]
-
 
     @staticmethod
     def list_fertilizer_activity(party_id: int, limit: int = 500):
-
-        from database.models.purchase import Purchase
-        from database.models.purchase_item import PurchaseItem
-        from database.models.sale import Sale
-        from database.models.sale_item import SaleItem
-        from database.models.purchase_return import PurchaseReturn
-        from database.models.sale_return import SaleReturn
-        from database.models.product import Product
-
         rows = []
 
         with get_session() as s:
-
             # PURCHASE ITEMS
             q = (
                 s.query(
@@ -981,7 +1070,8 @@ class PartyLedgerService:
                     PurchaseItem.unit_cost_rate,
                     PurchaseItem.line_total,
                     Purchase.id,
-                    Purchase.status
+                    Purchase.status,
+                    PurchaseItem.id,
                 )
                 .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
                 .join(Product, Product.id == PurchaseItem.product_id)
@@ -989,8 +1079,21 @@ class PartyLedgerService:
                 .filter(PurchaseItem.product_type_snapshot == "fertilizer")
                 .all()
             )
+            p_item_ids = [int(r[8]) for r in q]
+            p_deltas = {
+                int(iid): float(a or 0) for iid, a in
+                s.query(PurchasePriceAdjustmentLine.purchase_item_id,
+                        func.coalesce(func.sum(PurchasePriceAdjustmentLine.amount), 0))
+                .filter(PurchasePriceAdjustmentLine.purchase_item_id.in_(p_item_ids or [0]))
+                .group_by(PurchasePriceAdjustmentLine.purchase_item_id).all()
+            } if p_item_ids else {}
 
             for r in q:
+                extra = p_deltas.get(int(r[8]), 0.0)
+                bags = float(r[2] or 0)
+                orig_rate = float(r[4] or 0)
+                rate = round(orig_rate + (extra / bags if bags else 0.0), 2)
+                amt = round(float(r[5] or 0) + extra, 2)
                 rows.append({
                     "dt": r[0],
                     "product_label": f"Fertilizer ({r[1]})",
@@ -998,8 +1101,8 @@ class PartyLedgerService:
                     "reference": f"PUR-{r[6]}",
                     "bags": r[2],
                     "kg": r[3],
-                    "unit_rate": r[4],
-                    "amount": r[5],
+                    "unit_rate": rate,
+                    "amount": amt,
                     "status": r[7]
                 })
 
@@ -1013,7 +1116,8 @@ class PartyLedgerService:
                     SaleItem.unit_sale_rate,
                     SaleItem.line_total,
                     Sale.id,
-                    Sale.status
+                    Sale.status,
+                    SaleItem.id,
                 )
                 .join(Sale, Sale.id == SaleItem.sale_id)
                 .join(Product, Product.id == SaleItem.product_id)
@@ -1021,8 +1125,21 @@ class PartyLedgerService:
                 .filter(SaleItem.product_type_snapshot == "fertilizer")
                 .all()
             )
+            s_item_ids = [int(r[8]) for r in q]
+            s_deltas = {
+                int(iid): float(a or 0) for iid, a in
+                s.query(SalePriceAdjustmentLine.sale_item_id,
+                        func.coalesce(func.sum(SalePriceAdjustmentLine.amount), 0))
+                .filter(SalePriceAdjustmentLine.sale_item_id.in_(s_item_ids or [0]))
+                .group_by(SalePriceAdjustmentLine.sale_item_id).all()
+            } if s_item_ids else {}
 
             for r in q:
+                extra = s_deltas.get(int(r[8]), 0.0)
+                bags = float(r[2] or 0)
+                orig_rate = float(r[4] or 0)
+                rate = round(orig_rate + (extra / bags if bags else 0.0), 2)
+                amt = round(float(r[5] or 0) + extra, 2)
                 rows.append({
                     "dt": r[0],
                     "product_label": f"Fertilizer ({r[1]})",
@@ -1030,8 +1147,8 @@ class PartyLedgerService:
                     "reference": f"SAL-{r[6]}",
                     "bags": r[2],
                     "kg": r[3],
-                    "unit_rate": r[4],
-                    "amount": r[5],
+                    "unit_rate": rate,
+                    "amount": amt,
                     "status": r[7]
                 })
 
@@ -1096,9 +1213,7 @@ class PartyLedgerService:
                 })
 
         rows.sort(key=lambda x: x["dt"] or _dt.min, reverse=True)
-
         return rows[:limit]
-    
 
     @staticmethod
     def list_return_activity(party_id: int, limit: int = 500):

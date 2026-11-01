@@ -9,7 +9,7 @@ from database.models import (
     Purchase, PurchaseItem, PurchaseItemBag,
     Sale, SaleItem, SaleItemBag,
     StockMovement,
-    Advance, SaleDiscount
+    Advance, SaleDiscount, SalePriceAdjustmentLine
 
 
 )

@@ -18,9 +18,9 @@ from database.models.payment import Payment
 from database.models.advance import Advance
 from database.models.advance_allocations import AdvanceAllocation
 from database.models.sale_return import SaleReturn
-from database.models.sale_discount import SaleDiscount
+from database.models.sale_discount import SaleDiscount, SalePriceAdjustmentLine
 from database.models.purchase_return import PurchaseReturn 
-from database.models.purchase_price_adjustment import PurchasePriceAdjustment
+from database.models.purchase_price_adjustment import PurchasePriceAdjustment, PurchasePriceAdjustmentLine
 from database.models.user import User
 from database.models.party import Party
 from database.models.purchase import Purchase
@@ -765,6 +765,8 @@ def delete_purchase(purchase_id: int, deleted_by_user_id: int, reason: str | Non
                 PurchaseReturn.purchase_id == purchase_id
             ).delete(synchronize_session=False)
 
+            for (aid,) in s.query(PurchasePriceAdjustment.id).filter(PurchasePriceAdjustment.purchase_id == purchase_id).all():
+                s.query(PurchasePriceAdjustmentLine).filter(PurchasePriceAdjustmentLine.adjustment_id == aid).delete(synchronize_session=False)
             s.query(PurchasePriceAdjustment).filter(
                 PurchasePriceAdjustment.purchase_id == purchase_id
             ).delete(synchronize_session=False)
@@ -829,6 +831,8 @@ def delete_sale(sale_id: int, deleted_by_user_id: int, reason: str | None = None
                 SaleReturn.sale_id == sale_id
             ).delete(synchronize_session=False)
 
+            for (did,) in s.query(SaleDiscount.id).filter(SaleDiscount.sale_id == sale_id).all():
+                s.query(SalePriceAdjustmentLine).filter(SalePriceAdjustmentLine.discount_id == did).delete(synchronize_session=False)
             s.query(SaleDiscount).filter(
                 SaleDiscount.sale_id == sale_id
             ).delete(synchronize_session=False)

@@ -39,3 +39,28 @@ class SaleDiscount(Base):
     __table_args__ = (
         Index("idx_sale_discounts_sale", "sale_id"),
     )
+
+
+class SalePriceAdjustmentLine(Base):
+    """
+    One product's part of a sale price edit: "NPK 25,000 -> 24,000 per bag on 10 bags = -10,000". An edit made from the
+    sale's rows writes ONE SaleDiscount (with amount = -signed_total so net_total = gross - ret - disc changes by
+    signed_total) and one of these per product whose price changed - so the edit screen can show each product's current
+    price and the history says exactly what was changed. The original SaleItem is never touched.
+    """
+    __tablename__ = "sale_price_adjustment_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    discount_id: Mapped[int] = mapped_column(ForeignKey("sale_discounts.id", ondelete="CASCADE"),
+                                             nullable=False)
+    sale_item_id: Mapped[int] = mapped_column(ForeignKey("sale_items.id"), nullable=False)
+    old_rate: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    new_rate: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    basis_qty: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)      # kg (crops) or bags (fertilizer)
+    basis_unit: Mapped[str] = mapped_column(String(10), nullable=False)           # "kg" | "bag"
+    amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)         # (new - old) x basis_qty
+
+    __table_args__ = (
+        Index("idx_spa_lines_discount", "discount_id"),
+        Index("idx_spa_lines_item", "sale_item_id"),
+    )

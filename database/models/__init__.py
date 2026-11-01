@@ -14,7 +14,7 @@ from .sale import Sale
 from .sale_item import SaleItem
 from .sale_item_bag import SaleItemBag
 from .sale_return import SaleReturn         # was stale-commented-out here; SaleReturn has been in real use throughout
-from .sale_discount import SaleDiscount     # per-line manual discount adjustments (Payments section)
+from .sale_discount import SaleDiscount, SalePriceAdjustmentLine     # per-line manual discount & price adjustments (Payments section)
 
 from .stock_movement import StockMovement
 from .payment import Payment

@@ -1,11 +1,12 @@
 # apps/product_management_app/features/profiling/dialogs/purchase_price_edit_dialog.py
 # -*- coding: utf-8 -*-
 """
-Edit the price of a purchase already recorded - one price per product.
+Edit the price of a purchase or sale already recorded - one price per product.
 
-Shows every product line of the purchase with the price it carries now. The user types a new price on the lines that
+Shows every product line of the purchase/sale with the price it carries now. The user types a new price on the lines that
 changed, sees the new line amounts and the change to the total, and confirms. The change is saved as an audited
-adjustment (the original purchase is never overwritten) - see PurchaseAdjustmentService.edit_prices.
+adjustment (the original document is never overwritten) - see PurchaseAdjustmentService.edit_prices /
+SaleAdjustmentService.edit_prices.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from PySide2.QtWidgets import (
 )
 
 from database.services.purchase_adjustment_service import PurchaseAdjustmentService
+from database.services.sale_adjustment_service import SaleAdjustmentService
 
 COLS = ["Product", "Quantity", "Price now", "New price", "New amount", "Change"]
 
@@ -27,16 +29,28 @@ def _money(v: float) -> str:
 
 
 class PurchasePriceEditDialog(QDialog):
-    def __init__(self, parent, *, purchase_id: int, ref: str, user_id: int):
+    def __init__(self, parent, *, purchase_id: int = 0, sale_id: int = 0, ref: str = "", user_id: int = 0, kind: str = ""):
         super().__init__(parent)
-        self.purchase_id, self.user_id = int(purchase_id), int(user_id)
+        resolved_kind = (kind or ("sale" if int(sale_id or 0) > 0 else "purchase")).strip().lower()
+        self.kind = "sale" if resolved_kind == "sale" else "purchase"
+        self.doc_id = int(sale_id if self.kind == "sale" and int(sale_id or 0) > 0 else purchase_id)
+        self.purchase_id = self.doc_id
+        self.sale_id = self.doc_id if self.kind == "sale" else 0
+        self.user_id = int(user_id or 0)
+        if not self.user_id:
+            from shared.auth.session import get_session as get_login_session
+            self.user_id = int(getattr(get_login_session(), "user_id", 0) or 1)
+        if not ref:
+            ref = f"{'SAL' if self.kind == 'sale' else 'PUR'}-{self.doc_id}"
+        self.ref = ref
         self.saved = False
-        self.lines: List[dict] = PurchaseAdjustmentService.line_prices(self.purchase_id)
+        svc = SaleAdjustmentService if self.kind == "sale" else PurchaseAdjustmentService
+        self.lines: List[dict] = svc.line_prices(self.doc_id)
         self.setWindowTitle(f"Edit prices - {ref}")
         self.setMinimumWidth(720)
         root = QVBoxLayout(self)
         intro = QLabel(f"<b>{ref}</b> - type the new price on the product(s) that changed, then confirm. "
-                       "The original purchase stays on record; the change is added to it and logged.")
+                       f"The original {self.kind} stays on record; the change is added to it and logged.")
         intro.setWordWrap(True)
         root.addWidget(intro)
 
@@ -65,7 +79,11 @@ class PurchasePriceEditDialog(QDialog):
         root.addWidget(self.table, 1)
 
         self.reason = QLineEdit()
-        self.reason.setPlaceholderText("Reason (optional) - e.g. supplier asked for more")
+        self.reason.setPlaceholderText(
+            "Reason (optional) - e.g. customer price agreed"
+            if self.kind == "sale"
+            else "Reason (optional) - e.g. supplier asked for more"
+        )
         root.addWidget(self.reason)
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("font-weight:600;")
@@ -113,15 +131,41 @@ class PurchasePriceEditDialog(QDialog):
             self.lbl.setText("No price changed yet.")
             self.lbl.setStyleSheet("font-weight:600;")
         else:
-            self.lbl.setText(f"The purchase total changes by {total:+,.2f}")
+            self.lbl.setText(f"The {self.kind} total changes by {total:+,.2f}")
             self.lbl.setStyleSheet("font-weight:600;")
         self.btn_save.setEnabled(not bad and abs(total) >= 0.005)
 
     def _save(self) -> None:
         try:
-            PurchaseAdjustmentService.edit_prices(self.purchase_id, self.new_rates(), self.user_id, self.reason.text())
+            if self.kind == "sale":
+                SaleAdjustmentService.edit_prices(self.doc_id, self.new_rates(), self.user_id, self.reason.text())
+            else:
+                PurchaseAdjustmentService.edit_prices(self.doc_id, self.new_rates(), self.user_id, self.reason.text())
         except Exception as e:
             QMessageBox.warning(self, "Edit prices", str(e))
             return
         self.saved = True
         self.accept()
+
+
+class SalePriceEditDialog(PurchasePriceEditDialog):
+    def __init__(self, parent, *, sale_id: int, ref: str = "", user_id: int = 0):
+        super().__init__(parent, sale_id=sale_id, ref=ref, user_id=user_id, kind="sale")
+
+
+def open_price_editor(parent, kind: str, doc_id: int, ref: str = "", user_id: int = 0) -> bool:
+    """Open the price edit dialog for a purchase or sale and return True if saved."""
+    kind = (kind or "purchase").strip().lower()
+    doc_id = int(doc_id or 0)
+    if doc_id <= 0 or kind not in ("purchase", "sale"):
+        return False
+    dlg = PurchasePriceEditDialog(
+        parent,
+        purchase_id=(doc_id if kind == "purchase" else 0),
+        sale_id=(doc_id if kind == "sale" else 0),
+        ref=ref or f"{'SAL' if kind == 'sale' else 'PUR'}-{doc_id}",
+        user_id=user_id,
+        kind=kind,
+    )
+    dlg.exec_()
+    return bool(dlg.saved)

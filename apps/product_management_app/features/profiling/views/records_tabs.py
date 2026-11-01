@@ -7,8 +7,8 @@ from typing import List
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
-    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QMenu, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton, QSplitter, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from database.services.customer_records_service import CustomerRecordsService as R
@@ -73,8 +73,8 @@ class DocumentsTab(QWidget):
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#374151; font-weight:600;")
         self.btn_edit = QPushButton("Edit prices")
-        self.btn_edit.setToolTip("Change the price of the products on the highlighted purchase (or right-click the row)")
-        self.btn_edit.setVisible(kind == "purchase")
+        self.btn_edit.setToolTip(f"Change the price of the products on the highlighted {kind} (or right-click the row)")
+        self.btn_edit.setVisible(kind in ("purchase", "sale"))
         self.btn_print = QPushButton("Print Receipt")
         self.btn_print.setToolTip("Prints the receipt of the highlighted row - nothing prints by itself")
         for b in (self.btn_all, self.btn_unpaid, self.btn_clear, self.btn_edit, self.btn_print):
@@ -91,7 +91,7 @@ class DocumentsTab(QWidget):
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
         lay.addWidget(self.table, 1)
         self.table.itemChanged.connect(self._ticked)
-        if kind == "purchase":
+        if kind in ("purchase", "sale"):
             self.table.setContextMenuPolicy(Qt.CustomContextMenu)
             self.table.customContextMenuRequested.connect(self._row_menu)
         self.btn_all.clicked.connect(lambda: self._tick_all(True))
@@ -103,7 +103,7 @@ class DocumentsTab(QWidget):
         self.reload()
 
     def _row_menu(self, pos) -> None:
-        """Right-click a purchase: edit its prices, or print its receipt."""
+        """Right-click a purchase or sale: edit its prices, or print its receipt."""
         row = self.table.rowAt(pos.y())
         if not 0 <= row < len(self.rows):
             return
@@ -117,19 +117,25 @@ class DocumentsTab(QWidget):
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def edit_prices(self, row: int = -1) -> bool:
-        """Open the price editor for the purchase on `row` (default: the highlighted one). True if it was saved."""
-        from PySide2.QtWidgets import QMessageBox
+        """Open the price editor for the purchase or sale on `row` (default: the highlighted one). True if saved."""
         from shared.auth.session import get_session as get_login_session
         from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
             PurchasePriceEditDialog,
         )
         r = self.table.currentRow() if row < 0 else row
         if not 0 <= r < len(self.rows):
-            QMessageBox.information(self, "Edit prices", "Click a purchase row first.")
+            QMessageBox.information(self, "Edit prices", f"Click a {self.kind} row first.")
             return False
         d = self.rows[r]
         uid = int(getattr(get_login_session(), "user_id", 0) or 0)
-        dlg = PurchasePriceEditDialog(self, purchase_id=int(d["id"]), ref=d["ref"], user_id=uid)
+        dlg = PurchasePriceEditDialog(
+            self,
+            purchase_id=int(d["id"]) if self.kind == "purchase" else 0,
+            sale_id=int(d["id"]) if self.kind == "sale" else 0,
+            ref=d["ref"],
+            user_id=uid,
+            kind=self.kind,
+        )
         if dlg.exec_() != dlg.Accepted or not dlg.saved:
             return False
         self.reload()
@@ -138,7 +144,6 @@ class DocumentsTab(QWidget):
 
     def print_selected(self) -> None:
         """The full receipt (then, if wanted, a delivery note) of the highlighted sale / purchase."""
-        from PySide2.QtWidgets import QMessageBox
         r = self.table.currentRow()
         if not 0 <= r < len(self.rows):
             QMessageBox.information(self, "Print Receipt", f"Click a {self.kind} row first.")
@@ -252,6 +257,7 @@ class SalesPurchasesTab(QWidget):
 
         self.btn_swap.clicked.connect(self.swap_requested.emit)
         self.purchases.changed.connect(self.changed.emit)
+        self.sales.changed.connect(self.changed.emit)
         self.purchases.selection_changed.connect(self._summarise)
         self.sales.selection_changed.connect(self._summarise)
         self._summarise()
@@ -285,12 +291,24 @@ class SalesPurchasesTab(QWidget):
 class ProductsTab(QWidget):
     """Per product: what we bought from him and what we sold him."""
 
+    changed = Signal()
+
     def __init__(self, party_id: int):
         super().__init__()
         self.party_id = int(party_id)
+        self.rows: List[dict] = []
         lay = QVBoxLayout(self)
+        bar = QHBoxLayout()
+        bar.addStretch(1)
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit.setToolTip("Edit the price on the purchase or sale for the selected product row")
+        bar.addWidget(self.btn_edit)
+        lay.addLayout(bar)
         self.table = _table(["Product", "Type", "Bought from him", "Value bought", "Sold to him", "Value sold",
                              "Difference"])
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
+        self.btn_edit.clicked.connect(lambda: self.edit_prices())
         lay.addWidget(self.table)
         self.reload()
 
@@ -298,11 +316,64 @@ class ProductsTab(QWidget):
     def _qty(bags, kg, crops) -> str:
         return f"{bags:g} bags" + (f" / {kg:,.0f} kg" if crops and kg else "") if bags or kg else "-"
 
+    def _row_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        if not 0 <= row < len(self.rows):
+            return
+        self.table.setCurrentCell(row, 0)
+        r = self.rows[row]
+        menu = QMenu(self)
+        if r.get("latest_purchase_id"):
+            act_p = menu.addAction(f"Edit purchase prices ({r['latest_purchase_ref']})…")
+            act_p.triggered.connect(lambda: self._open_editor("purchase", r["latest_purchase_id"], r["latest_purchase_ref"]))
+        if r.get("latest_sale_id"):
+            act_s = menu.addAction(f"Edit sale prices ({r['latest_sale_ref']})…")
+            act_s.triggered.connect(lambda: self._open_editor("sale", r["latest_sale_id"], r["latest_sale_ref"]))
+        if not menu.actions():
+            act = menu.addAction("Edit prices…")
+            act.setEnabled(False)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _open_editor(self, kind: str, doc_id: int, ref: str) -> bool:
+        from shared.auth.session import get_session as get_login_session
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        uid = int(getattr(get_login_session(), "user_id", 0) or 0)
+        dlg = PurchasePriceEditDialog(
+            self,
+            purchase_id=int(doc_id) if kind == "purchase" else 0,
+            sale_id=int(doc_id) if kind == "sale" else 0,
+            ref=ref,
+            user_id=uid,
+            kind=kind,
+        )
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.reload()
+        self.changed.emit()
+        return True
+
+    def edit_prices(self, row: int = -1) -> bool:
+        r_idx = self.table.currentRow() if row < 0 else row
+        if not 0 <= r_idx < len(self.rows):
+            QMessageBox.information(self, "Edit prices", "Click a product row first.")
+            return False
+        r = self.rows[r_idx]
+        col = self.table.currentColumn()
+        if col in (4, 5) and r.get("latest_sale_id"):
+            return self._open_editor("sale", int(r["latest_sale_id"]), r["latest_sale_ref"])
+        if col in (2, 3) and r.get("latest_purchase_id"):
+            return self._open_editor("purchase", int(r["latest_purchase_id"]), r["latest_purchase_ref"])
+        if r.get("latest_doc_id") and r.get("latest_doc_kind"):
+            return self._open_editor(r["latest_doc_kind"], int(r["latest_doc_id"]), r["latest_doc_ref"])
+        return False
+
     def reload(self) -> None:
-        rows = R.products(self.party_id)
+        self.rows = R.products(self.party_id)
         t = self.table
-        t.setRowCount(len(rows))
-        for i, r in enumerate(rows):
+        t.setRowCount(len(self.rows))
+        for i, r in enumerate(self.rows):
             crops = r["type"] == "crops"
             t.setItem(i, 0, _item(r["name"], bold=True))
             t.setItem(i, 1, _item(r["type"].capitalize()))
@@ -316,22 +387,89 @@ class ProductsTab(QWidget):
 class HistoryTab(QWidget):
     """Everything in date order - sales, purchases, payments, returns, swaps - with the running position."""
 
+    changed = Signal()
+
     def __init__(self, party_id: int):
         super().__init__()
         self.party_id = int(party_id)
+        self.rows: List[dict] = []
         lay = QVBoxLayout(self)
+        top = QHBoxLayout()
         self.note = QLabel("Running position: positive = he owes us, negative = we owe him.")
         self.note.setStyleSheet("color:#6b7280;")
-        lay.addWidget(self.note)
+        self.btn_edit = QPushButton("Edit prices")
+        self.btn_edit.setToolTip("Edit the prices of the purchase or sale on the selected row")
+        top.addWidget(self.note)
+        top.addStretch(1)
+        top.addWidget(self.btn_edit)
+        lay.addLayout(top)
         self.table = _table(["Date", "Type", "Reference", "Details", "Amount", "Position"])
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
+        self.btn_edit.clicked.connect(lambda: self.edit_prices())
         lay.addWidget(self.table, 1)
         self.reload()
 
+    def _row_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        if not 0 <= row < len(self.rows):
+            return
+        self.table.setCurrentCell(row, 0)
+        e = self.rows[row]
+        menu = QMenu(self)
+        if e.get("purchase_id") and e.get("sale_id"):
+            p_id, s_id = int(e["purchase_id"]), int(e["sale_id"])
+            menu.addAction(f"Edit purchase prices (PUR-{p_id})…").triggered.connect(
+                lambda: self._open_editor("purchase", p_id, f"PUR-{p_id}")
+            )
+            menu.addAction(f"Edit sale prices (SAL-{s_id})…").triggered.connect(
+                lambda: self._open_editor("sale", s_id, f"SAL-{s_id}")
+            )
+        else:
+            act = menu.addAction("Edit prices…")
+            act.setEnabled(bool(e.get("doc_id") and e.get("doc_kind") in ("purchase", "sale")))
+            act.triggered.connect(lambda: self.edit_prices(row))
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _open_editor(self, kind: str, doc_id: int, ref: str) -> bool:
+        from shared.auth.session import get_session as get_login_session
+        from apps.product_management_app.features.profiling.dialogs.purchase_price_edit_dialog import (
+            PurchasePriceEditDialog,
+        )
+        uid = int(getattr(get_login_session(), "user_id", 0) or 0)
+        dlg = PurchasePriceEditDialog(
+            self,
+            purchase_id=int(doc_id) if kind == "purchase" else 0,
+            sale_id=int(doc_id) if kind == "sale" else 0,
+            ref=ref,
+            user_id=uid,
+            kind=kind,
+        )
+        if dlg.exec_() != dlg.Accepted or not dlg.saved:
+            return False
+        self.reload()
+        self.changed.emit()
+        return True
+
+    def edit_prices(self, row: int = -1) -> bool:
+        r = self.table.currentRow() if row < 0 else row
+        if not 0 <= r < len(self.rows):
+            QMessageBox.information(self, "Edit prices", "Click a row first.")
+            return False
+        e = self.rows[r]
+        kind = e.get("doc_kind") or ""
+        doc_id = int(e.get("doc_id") or 0)
+        if doc_id <= 0 or kind not in ("purchase", "sale"):
+            QMessageBox.information(self, "Edit prices", "Select a purchase, sale, or payment row to edit prices.")
+            return False
+        return self._open_editor(kind, doc_id, e.get("doc_ref") or f"{'SAL' if kind == 'sale' else 'PUR'}-{doc_id}")
+
     def reload(self) -> None:
         events = R.history(self.party_id)
+        self.rows = list(reversed(events))                         # newest first
         t = self.table
-        t.setRowCount(len(events))
-        for i, e in enumerate(reversed(events)):                   # newest first
+        t.setRowCount(len(self.rows))
+        for i, e in enumerate(self.rows):
             amount = e.get("amount", abs(e["delta"]))
             t.setItem(i, 0, _item(_when(e["date"])))
             t.setItem(i, 1, _item(e["type"], bold=True))
