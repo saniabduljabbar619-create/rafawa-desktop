@@ -97,7 +97,7 @@ class SalePaymentDialog(QDialog):
 
         self.table.setHorizontalHeaderLabels([
             "Sale ID",
-            "Date",
+            "Date Booked",
             "Total",
             "Paid",
             "Balance"
@@ -112,6 +112,10 @@ class SalePaymentDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         layout.addWidget(self.table)
+
+        self.lbl_selected_info = QLabel("")
+        self.lbl_selected_info.setStyleSheet("font-size:12px; color:#4b5563; font-weight:600; padding:2px;")
+        layout.addWidget(self.lbl_selected_info)
 
         # --------------------------------------------------
         # PAYMENT INPUT
@@ -159,6 +163,10 @@ class SalePaymentDialog(QDialog):
 
         btns.addWidget(self.btn_record)
         btns.addWidget(self.btn_print_receipt)
+        self.btn_print_balance = QPushButton("Print Balance...")
+        self.btn_print_balance.setToolTip("Print what is left (this sale and/or the total still pending), "
+                                          "in Hausa or English")
+        btns.addWidget(self.btn_print_balance)
         btns.addWidget(self.btn_counter_shortage)
         btns.addWidget(self.btn_edit)
         btns.addWidget(self.btn_close)
@@ -168,6 +176,7 @@ class SalePaymentDialog(QDialog):
         self.btn_close.clicked.connect(self.reject)
         self.btn_record.clicked.connect(self.record_payment)
         self.btn_print_receipt.clicked.connect(self._print_receipt)
+        self.btn_print_balance.clicked.connect(self._print_balance)
         self.btn_counter_shortage.clicked.connect(self._open_counter_shortage)
         self.btn_edit.clicked.connect(lambda: self.edit_prices())
 
@@ -242,22 +251,26 @@ class SalePaymentDialog(QDialog):
 
         if r < 0:
             self._selected_sale_id = 0
+            self.lbl_selected_info.setText("")
             return
 
         balance = self.table.item(r, 4).text()
-
-        # remove commas
         balance = balance.replace(",", "")
 
         self.amount_input.setText(balance)
 
-        # Selecting a row is enough to print that sale's current receipt -
-        # the operator doesn't need to record a brand new payment first
-        # just to print something. Selecting a (possibly different) row
-        # also takes priority over any earlier payment recorded this
-        # session, keeping "Print Receipt" predictable: it always acts on
-        # whatever was most recently selected or just paid.
-        self._selected_sale_id = int(self.table.item(r, 0).text())
+        sid = int(self.table.item(r, 0).text())
+        b_date = self.table.item(r, 1).text()
+        from datetime import datetime
+        try:
+            d_obj = datetime.fromisoformat(b_date).date()
+            days = (datetime.now().date() - d_obj).days
+            days_str = f" — {days} day(s) waiting"
+        except Exception:
+            days_str = ""
+        self.lbl_selected_info.setText(f"Selected: SAL-{sid} • Booked: {b_date}{days_str}")
+
+        self._selected_sale_id = sid
         self._last_payment_id = 0
         self.btn_print_receipt.setEnabled(True)
 
@@ -348,13 +361,24 @@ class SalePaymentDialog(QDialog):
             # RECORD PAYMENT
             # -----------------------------------------
 
+            # Track booked date in payment note
+            sale_note = ""
+            with get_session() as s:
+                s_obj = s.get(Sale, sale_id)
+                if s_obj and s_obj.completed_at:
+                    days = (datetime.now().date() - s_obj.completed_at.date()).days
+                    sale_note = f"[Booked: {s_obj.completed_at.strftime('%Y-%m-%d')}, {days}d ago] "
+
+            user_note = self.note_input.text().strip()
+            final_note = (sale_note + (user_note or "Manual payment from Payment Tab"))[:255]
+
             payment_id = PaymentService.record_sale_payment(
                 sale_id=sale_id,
                 party_id=self.party_id,
                 amount=amount,
                 created_by_user_id=self.user_id,
                 method="manual",
-                notes=self.note_input.text().strip() or "Manual payment from Payment Tab"
+                notes=final_note
             )
 
             # -----------------------------------------
@@ -515,6 +539,16 @@ class SalePaymentDialog(QDialog):
         )
         dlg.exec_()
         self.shortage_banner.refresh()
+
+    def _print_balance(self):
+        """Balance slip: the last payment's sale, else the selected row, else the customer's total."""
+        from apps.product_management_app.features.receipts_v2 import open_balance_slip, open_party_balance_slip
+        if self._last_payment_id > 0:
+            open_balance_slip(self, "payment", self._last_payment_id)
+        elif self._selected_sale_id > 0:
+            open_balance_slip(self, "sale", self._selected_sale_id)
+        else:
+            open_party_balance_slip(self, int(self.party.id), self.walkin_name or "")
 
     def _print_receipt(self):
         if self._last_payment_id > 0:

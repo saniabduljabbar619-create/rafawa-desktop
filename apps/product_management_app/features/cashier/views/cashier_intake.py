@@ -61,6 +61,10 @@ class CashierIntakeView(QWidget):
         self.btn_print_swap.setEnabled(False)
         self._last_swap = None
         row.addWidget(self.btn_print)
+        self.btn_balance = QPushButton("Print Balance...")
+        self.btn_balance.setToolTip("Print what is left on the selected intake and/or the total still pending, "
+                                    "in Hausa or English")
+        row.addWidget(self.btn_balance)
         row.addWidget(self.btn_print_swap)
         row.addWidget(self.btn_refresh)
 
@@ -79,6 +83,7 @@ class CashierIntakeView(QWidget):
         self.btn_swap.clicked.connect(self._swap)
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_print.clicked.connect(self._print_selected)
+        self.btn_balance.clicked.connect(self._print_selected_balance)
         self.btn_print_swap.clicked.connect(self._print_last_swap)
         self.search.textChanged.connect(self.refresh)
 
@@ -214,6 +219,18 @@ class CashierIntakeView(QWidget):
             print_full_then_optional_delivery(self, PURCHASE, int(digits))
         except Exception as e:
             QMessageBox.warning(self, "Receipt Error", f"The receipt could not be printed:\n{e}")
+
+    def _print_selected_balance(self):
+        """Balance slip (what is left, Hausa / English) of the selected intake."""
+        from PySide2.QtWidgets import QMessageBox
+        r = self.table.currentRow()
+        ref = self.table.item(r, 1).text() if r >= 0 and self.table.item(r, 1) else ""
+        digits = "".join(ch for ch in ref if ch.isdigit())
+        if not digits:
+            QMessageBox.information(self, "Print Balance", "Select an intake first.")
+            return
+        from apps.product_management_app.features.receipts_v2 import open_balance_slip
+        open_balance_slip(self, PURCHASE, int(digits))
 
     def _print_last_swap(self):
         from PySide2.QtWidgets import QMessageBox

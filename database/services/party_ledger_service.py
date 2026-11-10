@@ -485,6 +485,12 @@ class PartyLedgerService:
 
             pur_net_totals: Dict[int, float] = {}
             pur_creation_dt: Dict[int, object] = {}
+            weigh_tickets: Dict[int, Any] = {}
+            if purchase_ids:
+                from database.models.weigh_ticket import WeighTicket
+                for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.in_(purchase_ids)).all():
+                    weigh_tickets[int(wt.purchase_id)] = wt
+
             for p in purchases:
                 pid = int(p.id)
                 is_void = (p.status == "voided")
@@ -501,12 +507,19 @@ class PartyLedgerService:
                 settled = pur_paid.get(pid, 0.0) + pur_alloc.get(pid, 0.0)
                 balance = max(net_total - settled, 0.0)
 
+                wt = weigh_tickets.get(pid)
+                weighed_at = wt.created_at if wt else None
+                ticket_no = wt.ticket_no or (f"WT-{wt.id:05d}" if wt else "")
+                weighed_tag = f" • Weighed: {wt.created_at.strftime('%Y-%m-%d')} ({ticket_no})" if wt else ""
+
                 rows.append({
                     "dt": p.completed_at,
+                    "weighed_at": weighed_at,
+                    "ticket_no": ticket_no,
                     "ledger": pur_ledger.get(pid, "crops"),
                     "type": "purchase",
                     "reference": f"PUR-{p.id}",
-                    "summary": "Purchase",
+                    "summary": f"Purchase{weighed_tag}",
                     "total": net_total,
                     "paid": min(settled, net_total),
                     "balance": balance,
@@ -928,14 +941,23 @@ class PartyLedgerService:
                 .group_by(PurchasePriceAdjustmentLine.purchase_item_id).all()
             } if p_item_ids else {}
 
+            from database.models.weigh_ticket import WeighTicket
+            weigh_crop_map = {
+                int(wt.purchase_id): wt
+                for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.in_([int(r[6]) for r in q])).all()
+            } if q else {}
+
             for r in q:
                 extra = p_deltas.get(int(r[8]), 0.0)
                 kg = float(r[3] or 0)
                 orig_rate = float(r[4] or 0)
                 rate = round(orig_rate + (extra / kg if kg else 0.0), 2)
                 amt = round(float(r[5] or 0) + extra, 2)
+                wt = weigh_crop_map.get(int(r[6]))
                 rows.append({
                     "dt": r[0],
+                    "weighed_at": wt.created_at if wt else None,
+                    "ticket_no": wt.ticket_no or (f"WT-{wt.id:05d}" if wt else ""),
                     "product": r[1],
                     "type": "purchase",
                     "reference": f"PUR-{r[6]}",

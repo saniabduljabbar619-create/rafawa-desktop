@@ -542,7 +542,8 @@ class WeighService:
                 "line_prices": PurchaseAdjustmentService.line_prices_many(s, pids)}
 
     @staticmethod
-    def _ticket_dict(s, t: WeighTicket, *, with_prices: bool, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _ticket_dict(s, t: WeighTicket, *, with_prices: bool, ctx: Optional[Dict[str, Any]] = None,
+                     for_weigher: Optional[bool] = None) -> Dict[str, Any]:
         """One ticket as a dict. `ctx` (from _prefetch) lets a list of tickets share its lookups."""
         users = ctx["users"] if ctx else {}          # shared across a list, so a missing user is looked up once
 
@@ -595,7 +596,8 @@ class WeighService:
         confirmed_total = round(total_amt, 2) if with_prices else None
         for d in lines:
             d["confirmed_price"], d["confirmed_amount"] = d["unit_price"], d["amount"]
-        if with_prices and _is_weigher():
+        is_w = for_weigher if for_weigher is not None else _is_weigher()
+        if with_prices and is_w:
             for d in lines:
                 if d["weigher_price"] is not None:
                     d["unit_price"], d["amount"] = d["weigher_price"], d["weigher_amount"]
@@ -636,21 +638,23 @@ class WeighService:
 
     @staticmethod
     @require_role(*ANY_STAFF)
-    def get_ticket(ticket_id: int) -> Dict[str, Any]:
+    def get_ticket(ticket_id: int, for_weigher: Optional[bool] = None) -> Dict[str, Any]:
         with get_session() as s:
             t = WeighService._eager(s.query(WeighTicket).filter(WeighTicket.id == int(ticket_id))).first()
             if t is None:
                 raise ValueError("Ticket not found.")
             if _is_weigher() and int(t.weigher_user_id) != _uid():
                 raise PermissionDenied("This is another weigher's ticket.")
-            return WeighService._ticket_dict(s, t, with_prices=True, ctx=WeighService._prefetch(s, [t]))
+            return WeighService._ticket_dict(s, t, with_prices=True, ctx=WeighService._prefetch(s, [t]),
+                                             for_weigher=for_weigher)
 
     @staticmethod
     @require_role(*ANY_STAFF)
     def list_tickets(status: Optional[Iterable[str]] = None, mine_only: bool = False,
                      limit: int = 300, since: Optional[datetime] = None, search: str = "",
                      date_from: Optional[datetime] = None, date_to: Optional[datetime] = None,
-                     walkins: Optional[bool] = None) -> List[Dict[str, Any]]:
+                     walkins: Optional[bool] = None,
+                     for_weigher: Optional[bool] = None) -> List[Dict[str, Any]]:
         """Summaries, newest first (with amounts). A weigher only ever sees their own tickets.
         `since` keeps only tickets started at or after that moment (the weigher's screen passes today's midnight).
         `search` matches the ticket number, the person's name / phone / walk-in code, or a product on it;
@@ -691,7 +695,7 @@ class WeighService:
             ctx = WeighService._prefetch(s, tickets)
             out = []
             for t in tickets:
-                d = WeighService._ticket_dict(s, t, with_prices=True, ctx=ctx)
+                d = WeighService._ticket_dict(s, t, with_prices=True, ctx=ctx, for_weigher=for_weigher)
                 d.pop("lines", None)
                 d["products"] = ", ".join(sorted({ln.product.name for ln in t.lines if ln.product}))
                 out.append(d)
@@ -705,13 +709,13 @@ class WeighService:
 
     # ------------------------------------------------------------------ admin / cashier: price + finalize
     @staticmethod
-    def _price_line(s, line: WeighTicketLine, price: float) -> None:
+    def _price_line(s, line: WeighTicketLine, price: float, for_weigher: Optional[bool] = None) -> None:
         t = WeighService._load_ticket(s, line.ticket_id)
         if t.status in ("finalized", "cancelled"):
             raise ValueError(f"This ticket is {t.status}.")
-        if _is_weigher():
+        weigher = for_weigher if for_weigher is not None else _is_weigher()
+        if weigher:
             WeighService._assert_can_edit(t)               # their own ticket only
-        weigher = _is_weigher()
         if _f(line.unit_price) != price:
             AuditService.record("weigh.price", "weigh_ticket", int(t.id),
                                 f"{t.ticket_no}: {line.product.name if line.product else 'line'} "
@@ -720,7 +724,8 @@ class WeighService:
                                    else f" (weigher's price {_f(line.weigher_price):,.2f})"), session=s)
         if weigher:
             line.weigher_price = price                    # their own price - and the one intake starts from
-            line.unit_price = price
+            if line.unit_price is None:
+                line.unit_price = price
         else:
             if line.weigher_price is None:
                 line.weigher_price = line.unit_price      # freeze what the weigher had set before it changes
@@ -728,7 +733,7 @@ class WeighService:
 
     @staticmethod
     @require_role(*ANY_STAFF)
-    def set_line_price(line_id: int, unit_price: float) -> None:
+    def set_line_price(line_id: int, unit_price: float, for_weigher: Optional[bool] = None) -> None:
         """Price per kg for one line: the weigher after weighing (own ticket), or admin/cashier at review."""
         price = _f(unit_price)
         if price <= 0:
@@ -737,12 +742,12 @@ class WeighService:
             line = s.get(WeighTicketLine, int(line_id))
             if line is None:
                 raise ValueError("Line not found.")
-            WeighService._price_line(s, line, price)
+            WeighService._price_line(s, line, price, for_weigher=for_weigher)
             s.commit()
 
     @staticmethod
     @require_role(*ANY_STAFF)
-    def set_ticket_prices(ticket_id: int, prices: Dict[int, float]) -> None:
+    def set_ticket_prices(ticket_id: int, prices: Dict[int, float], for_weigher: Optional[bool] = None) -> None:
         """Price every line of a ticket at once ({line_id: price per kg}); nothing is saved unless all are valid."""
         prices = {int(k): _f(v) for k, v in (prices or {}).items()}
         with get_session() as s:
@@ -753,7 +758,7 @@ class WeighService:
             if missing:
                 raise ValueError("Enter a price per kg for: " + ", ".join(missing) + ".")
             for ln in lines:
-                WeighService._price_line(s, ln, prices[int(ln.id)])
+                WeighService._price_line(s, ln, prices[int(ln.id)], for_weigher=for_weigher)
             s.commit()
 
     @staticmethod

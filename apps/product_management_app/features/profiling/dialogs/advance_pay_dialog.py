@@ -94,11 +94,17 @@ class AdvancePayDialog(QDialog):
         self.btn_print_receipt.setEnabled(False)
         self.btn_close = QPushButton("Close")
         btn_row.addWidget(self.btn_print_receipt)
+        self.btn_print_balance = QPushButton("Print Balance...")
+        self.btn_print_balance.setToolTip("Print what is left on this advance and/or the total still pending, "
+                                          "in Hausa or English")
+        self.btn_print_balance.setEnabled(False)
+        btn_row.addWidget(self.btn_print_balance)
         btn_row.addWidget(self.btn_close)
         layout.addLayout(btn_row)
 
         self.btn_record.clicked.connect(self.record_advance)
         self.btn_print_receipt.clicked.connect(self._print_receipt)
+        self.btn_print_balance.clicked.connect(self._print_balance)
         self.btn_close.clicked.connect(self.accept)
 
     # -------------------------------------------------
@@ -158,6 +164,7 @@ class AdvancePayDialog(QDialog):
             self.amount.setEnabled(False)
             self.notes.setEnabled(False)
             self.btn_print_receipt.setEnabled(self._last_advance_id > 0)
+            self.btn_print_balance.setEnabled(self._last_advance_id > 0)
 
             # -----------------------------------------
             # OFFER TO SETTLE AGAINST EXISTING BALANCE
@@ -206,6 +213,12 @@ class AdvancePayDialog(QDialog):
     # -------------------------------------------------
     # PRINT RECEIPT (manual, on demand - no auto-print)
     # -------------------------------------------------
+
+    def _print_balance(self):
+        if self._last_advance_id <= 0:
+            return
+        from apps.product_management_app.features.receipts_v2 import open_balance_slip
+        open_balance_slip(self, "advance", self._last_advance_id)
 
     def _print_receipt(self):
         if self._last_advance_id <= 0:

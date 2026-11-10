@@ -704,11 +704,26 @@ class CustomerProfileView(QWidget):
             row_color = type_color.get(str(a.get("type", "")).lower())
             detail = str(a.get("detail") or "")
             if not detail:
-                detail = "\n".join(x for x in (str(a.get("summary") or ""),
-                                              f"Items: {a['items']}" if a.get("items") else "") if x)
+                parts = [str(a.get("summary") or "")]
+                if a.get("weighed_at"):
+                    parts.append(f"Date Weighed: {a['weighed_at'].strftime('%Y-%m-%d %H:%M')} (Ticket: {a.get('ticket_no', '')})")
+                    if a.get("dt"):
+                        try:
+                            d1 = a["dt"].date() if hasattr(a["dt"], "date") else a["dt"]
+                            d0 = a["weighed_at"].date() if hasattr(a["weighed_at"], "date") else a["weighed_at"]
+                            gap = (d1 - d0).days
+                            if gap > 0:
+                                parts.append(f"Intake booked {gap} day(s) after weighing")
+                        except Exception:
+                            pass
+                if a.get("items"):
+                    parts.append(f"Items: {a['items']}")
+                detail = "\n".join(parts)
 
             for c, val in enumerate(cols):
                 it = QTableWidgetItem(str(val))
+                if w_tip and c in (0, 3):
+                    it.setToolTip(w_tip)
                 if detail and c in (0, 4):
                     it.setToolTip(detail)
                 if c == 0:
@@ -763,6 +778,7 @@ class CustomerProfileView(QWidget):
                 operator,  
                 a.get("status","")
             ]
+            w_tip = f"Weighed: {a['weighed_at'].strftime('%Y-%m-%d %H:%M')} ({a.get('ticket_no', '')})" if a.get("weighed_at") else ""
 
             for c, val in enumerate(cols):
                 it = QTableWidgetItem(str(val))
@@ -1334,7 +1350,10 @@ class CustomerProfileView(QWidget):
             QMessageBox.critical(self, "Revert Failed", str(e))
             return
 
-        events.money_changed.emit()
+        try:
+            events.money_changed.emit()
+        except Exception:
+            pass
         QMessageBox.information(self, "Reverted", "Done - every balance has been updated.")
         self.refresh_all()
 
@@ -1389,7 +1408,10 @@ class CustomerProfileView(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Revert Failed", str(e))
             return
-        events.money_changed.emit()
+        try:
+            events.money_changed.emit()
+        except Exception:
+            pass
         QMessageBox.information(self, "Reverted", done + "\n\nEvery balance has been updated.")
         self.refresh_all()
 

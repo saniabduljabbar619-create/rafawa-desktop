@@ -223,7 +223,10 @@ class WeighTicketReviewDialog(QDialog):
             spin.setDecimals(2)
             spin.setRange(0, 10_000_000)
             spin.setPrefix("₦")
-            spin.setValue(typed.get(int(ln["id"])) or float(ln["unit_price"] or 0))
+            val = typed.get(int(ln["id"]))
+            if val is None:
+                val = float((ln.get("weigher_price") if self.mode == "weigher" and ln.get("weigher_price") is not None else ln.get("unit_price")) or 0)
+            spin.setValue(val)
             spin.setEnabled(self.editable)
             spin.valueChanged.connect(self._recalc_amounts)
             self.lines_table.setCellWidget(r, 4, spin)
@@ -368,7 +371,7 @@ class WeighTicketReviewDialog(QDialog):
             QMessageBox.warning(self, "Price", "Enter the price per kg for: " + ", ".join(missing))
             return
         try:
-            WeighService.set_ticket_prices(self.ticket_id, prices)
+            WeighService.set_ticket_prices(self.ticket_id, prices, for_weigher=True)
         except Exception as e:
             QMessageBox.warning(self, "Save Changes", str(e))
             self.reload(self._active_line)

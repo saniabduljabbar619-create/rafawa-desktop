@@ -40,9 +40,12 @@ class PurchasePreviewDialog(QDialog):
         with get_session() as s:
             p = s.query(Purchase).get(self.purchase_id)
             if p:
+                from database.models.weigh_ticket import WeighTicket
+                wt = s.query(WeighTicket).filter(WeighTicket.purchase_id == self.purchase_id).first()
+                weighed_txt = f" | Weighed: {wt.created_at.strftime('%Y-%m-%d %H:%M')} ({wt.ticket_no})" if wt and wt.created_at else ""
                 nums = PurchaseAdjustmentService._purchase_balance(s, p)
                 self.header.setText(
-                    f"Date: {p.completed_at} | Status: {p.status} | Total: \u20a6{nums['net_total']:,.2f} | Balance: \u20a6{nums['balance']:,.2f}"
+                    f"Booked: {p.completed_at}{weighed_txt} | Status: {p.status} | Total: \u20a6{nums['net_total']:,.2f} | Balance: \u20a6{nums['balance']:,.2f}"
                 )
             lines = PurchaseAdjustmentService._line_prices(s, self.purchase_id)
 

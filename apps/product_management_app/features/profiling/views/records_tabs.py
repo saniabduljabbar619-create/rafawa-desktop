@@ -84,11 +84,20 @@ class DocumentsTab(QWidget):
         bar.addWidget(self.chk_voided)
         lay.addLayout(bar)
         word = "Sale" if kind == "sale" else "Purchase"
-        self.table = _table(["", f"{word}", "Date", "Products", "Total", "Paid / set off", "Balance", "Status", "Flag"])
-        self.table.setColumnWidth(0, 34)
-        hh = self.table.horizontalHeader()
-        hh.setStretchLastSection(False)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        if kind == "purchase":
+            cols = ["", "Purchase", "Booked Date", "Date Weighed", "Ticket", "Products", "Total", "Paid / set off", "Balance", "Status", "Flag"]
+            self.table = _table(cols)
+            self.table.setColumnWidth(0, 34)
+            hh = self.table.horizontalHeader()
+            hh.setStretchLastSection(False)
+            hh.setSectionResizeMode(5, QHeaderView.Stretch)
+        else:
+            cols = ["", "Sale", "Date", "Products", "Total", "Paid / set off", "Balance", "Status", "Flag"]
+            self.table = _table(cols)
+            self.table.setColumnWidth(0, 34)
+            hh = self.table.horizontalHeader()
+            hh.setStretchLastSection(False)
+            hh.setSectionResizeMode(3, QHeaderView.Stretch)
         lay.addWidget(self.table, 1)
         self.table.itemChanged.connect(self._ticked)
         if kind in ("purchase", "sale"):
@@ -172,18 +181,41 @@ class DocumentsTab(QWidget):
             box.setData(Qt.UserRole, d["id"])
             t.setItem(i, 0, box)
             t.setItem(i, 1, _item(d["ref"], bold=True))
-            t.setItem(i, 2, _item(_when(d["date"])))
-            t.setItem(i, 3, _item(d["summary"]))
-            t.setItem(i, 4, _item(_money(d["total"]), RIGHT, bold=True))
-            t.setItem(i, 5, _item(_money(d["paid"]), RIGHT))
-            t.setItem(i, 6, _item(_money(d["balance"]), RIGHT, "#c83c3c" if d["balance"] > 0.005 else None))
-            t.setItem(i, 7, _item(d["status"].capitalize(), color=STATUS_TONE.get(d["status"])))
-            flag = _item(("⚠ " + d["flag"]) if d["flag"] else "", color="#b8792e")
-            flag.setToolTip(d["flag"])
-            t.setItem(i, 8, flag)
+            if self.kind == "purchase":
+                t.setItem(i, 2, _item(_when(d["date"])))
+                w_str = _when(d.get("weighed_at")) if d.get("weighed_at") else "-"
+                w_item = _item(w_str)
+                if d.get("weighed_at"):
+                    gap = (d["date"].date() - d["weighed_at"].date()).days if d.get("date") else 0
+                    w_item.setToolTip(f"Weighed at scale on {_when(d['weighed_at'])}\nTicket: {d.get('ticket_no', '')}\nGap to booking: {gap} day(s)")
+                t.setItem(i, 3, w_item)
+                t.setItem(i, 4, _item(d.get("ticket_no") or "-"))
+                t.setItem(i, 5, _item(d["summary"]))
+                t.setItem(i, 6, _item(_money(d["total"]), RIGHT, bold=True))
+                t.setItem(i, 7, _item(_money(d["paid"]), RIGHT))
+                t.setItem(i, 8, _item(_money(d["balance"]), RIGHT, "#c83c3c" if d["balance"] > 0.005 else None))
+                t.setItem(i, 9, _item(d["status"].capitalize(), color=STATUS_TONE.get(d["status"])))
+                flag = _item(("⚠ " + d["flag"]) if d["flag"] else "", color="#b8792e")
+                flag.setToolTip(d["flag"])
+                t.setItem(i, 10, flag)
+            else:
+                t.setItem(i, 2, _item(_when(d["date"])))
+                t.setItem(i, 3, _item(d["summary"]))
+                t.setItem(i, 4, _item(_money(d["total"]), RIGHT, bold=True))
+                t.setItem(i, 5, _item(_money(d["paid"]), RIGHT))
+                t.setItem(i, 6, _item(_money(d["balance"]), RIGHT, "#c83c3c" if d["balance"] > 0.005 else None))
+                t.setItem(i, 7, _item(d["status"].capitalize(), color=STATUS_TONE.get(d["status"])))
+                flag = _item(("⚠ " + d["flag"]) if d["flag"] else "", color="#b8792e")
+                flag.setToolTip(d["flag"])
+                t.setItem(i, 8, flag)
         t.resizeColumnToContents(1)
         t.resizeColumnToContents(2)
-        t.resizeColumnToContents(8)
+        if self.kind == "purchase":
+            t.resizeColumnToContents(3)
+            t.resizeColumnToContents(4)
+            t.resizeColumnToContents(10)
+        else:
+            t.resizeColumnToContents(8)
         t.blockSignals(False)
         self._ticked()
 

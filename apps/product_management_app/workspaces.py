@@ -58,6 +58,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.weigher.views.weigher_tickets import WeigherTicketsView
     from apps.product_management_app.features.weigher.views.weigh_tickets_admin import WeighTicketsAdminView
     from apps.product_management_app.features.debt_center.views.debt_center import DebtCenterView
+    from apps.product_management_app.features.reminders.views.debtor_reminders import DebtorRemindersView
 
     # 👑 THE ANCHOR BLUEPRINTS: Import the completed executive analytics and valuation dashboards
     from apps.product_management_app.features.catalog.views.product_profit_view import ProductProfitView
@@ -86,6 +87,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
                 SidebarItem(label="Profits", route="catalog.profits"),
             ]),
             SidebarItem(label="Debt Center", route="admin.debt_center"),
+            SidebarItem(label="Debt Reminders", route="admin.debt_reminders"),
             SidebarItem(label="Weigh Tickets", route="admin.weigh_tickets"),
             SidebarItem(label="Quick Purchases", route="admin.quick_purchases"),
             SidebarItem(label="Returns", route="admin.returns"),
@@ -107,6 +109,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.capital": lambda: ProductCapitalView(),
             "catalog.live_valuation": lambda: ProductInventoryCapitalView(),
             "admin.debt_center": lambda: DebtCenterView(),
+            "admin.debt_reminders": lambda: DebtorRemindersView(),
             "admin.weigh_tickets": lambda: WeighTicketsAdminView(mode="admin"),
             "admin.quick_purchases": lambda: QuickPurchasesView(),
             "admin.returns": lambda: AdminReturnsView(),
@@ -125,6 +128,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.sales": "Catalog • Sales",
             "catalog.profits": "Catalog • Realized Profit & Margins",
             "admin.debt_center": "Debt Center",
+            "admin.debt_reminders": "Debt Reminders",
             "admin.weigh_tickets": "Weigh Tickets",
             "admin.quick_purchases": "Quick Purchases",
             "admin.returns": "Returns",
@@ -145,6 +149,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             SidebarItem(label="Cashier Purchase", route="cashier.intake"),
             SidebarItem(label="Quick Purchases", route="cashier.quick_purchases"),
             SidebarItem(label="Payments", route="cashier.payments"),
+            SidebarItem(label="Debt Reminders", route="cashier.debt_reminders"),
             SidebarItem(label="Profiles", children=[
                 SidebarItem(label="Customers", route="cashier.customers"),
                 SidebarItem(label="Suppliers", route="cashier.suppliers"),
@@ -161,6 +166,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.intake": lambda: CashierIntakeView(),
             "cashier.quick_purchases": lambda: QuickPurchasesView(),
             "cashier.payments": lambda: CashierPaymentsView(),
+            "cashier.debt_reminders": lambda: DebtorRemindersView(),
             "cashier.customers": lambda: CustomersListView(mode="cashier"),
             "cashier.suppliers": lambda: SuppliersListPage(),
             "cashier.walkins": lambda: WalkinsListView(mode="cashier"),
@@ -175,6 +181,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "cashier.intake": "Cashier Purchase",
             "cashier.quick_purchases": "Quick Purchases",
             "cashier.payments": "Payments",
+            "cashier.debt_reminders": "Debt Reminders",
             "cashier.customers": "Customers",
             "cashier.suppliers": "Suppliers",
             "cashier.walkins": "Walk-ins",

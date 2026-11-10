@@ -119,6 +119,11 @@ class ProductManagementMainWindow(QMainWindow):
         # Connect launcher
         self.launcher.workspace_selected.connect(self.open_workspace)
 
+        # Daily "who still owes us" reminder (admin / cashier; once a day, see features/reminders)
+        from apps.product_management_app.features.reminders.scheduler import DailyReminderScheduler
+        self.reminders = DailyReminderScheduler(self)
+        self.reminders.start()
+
         # Sidebar navigation
         self.shell.sidebar.route_selected.connect(self.navigate)
 
@@ -167,6 +172,9 @@ class ProductManagementMainWindow(QMainWindow):
 
         # Navigate to default route
         self.navigate(spec.default_route)
+
+        # Just logged in and in: this is the moment the day's reminder is due, if it has not been shown yet
+        QTimer.singleShot(1500, self.reminders.check)
 
 
     def navigate(self, route: str):

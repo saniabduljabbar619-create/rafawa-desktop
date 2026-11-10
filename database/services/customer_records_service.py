@@ -53,6 +53,10 @@ def _qty(item, kind: str) -> str:
     return f"{bags:g} bags" + (f"/{kg:,.0f}kg" if crops and kg else "")
 
 
+def _when(d) -> str:
+    return d.strftime("%d/%m/%Y %H:%M") if d else ""
+
+
 def _summary(doc, kind: str) -> str:
     return ", ".join(f"{i.product.name if i.product else '?'} {_qty(i, kind)}" for i in doc.items)
 
@@ -73,12 +77,24 @@ class CustomerRecordsService:
             docs = (s.query(model).filter(col == int(party_id)).filter(model.status != "draft")
                     .order_by(model.completed_at.desc(), model.id.desc()).all())
             bal = document_balances(s, kind, [d.id for d in docs])
+            weigh_map = {}
+            if kind == "purchase" and docs:
+                from database.models.weigh_ticket import WeighTicket
+                for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.in_([d.id for d in docs])).all():
+                    weigh_map[int(wt.purchase_id)] = {
+                        "ticket_no": wt.ticket_no or f"WT-{wt.id:05d}",
+                        "weighed_at": wt.created_at,
+                    }
             out = []
             for d in docs:
                 b = bal.get(int(d.id))
                 no = getattr(d, "sale_no" if kind == "sale" else "purchase_no", None) or f"{prefix}-{d.id}"
+                w_info = weigh_map.get(int(d.id))
                 out.append({
                     "id": int(d.id), "ref": no, "kind": kind, "date": d.completed_at or d.created_at,
+                    "booked_at": d.completed_at or d.created_at,
+                    "weighed_at": w_info["weighed_at"] if w_info else None,
+                    "ticket_no": w_info["ticket_no"] if w_info else "",
                     "summary": _summary(d, kind), "total": b.net_total if b else _f(d.total_amount),
                     "paid": b.settled if b else 0.0, "balance": b.balance if b else 0.0,
                     "status": b.status if b else "", "voided": bool(b and b.voided),
@@ -182,9 +198,15 @@ class CustomerRecordsService:
                                "delta": d["total"], "doc_kind": "sale", "doc_id": int(d["id"]), "doc_ref": d["ref"]})
         for d in CustomerRecordsService.documents(pid, "purchase"):
             if not d["voided"]:
-                events.append({"date": d["date"], "type": "Purchase", "ref": d["ref"], "detail": d["summary"],
+                w_str = f" [Weighed: {_when(d['weighed_at'])} ({d['ticket_no']})]" if d.get("weighed_at") else ""
+                events.append({"date": d["date"], "type": "Purchase", "ref": d["ref"], "detail": f"{d['summary']}{w_str}",
                                "delta": -d["total"], "doc_kind": "purchase", "doc_id": int(d["id"]), "doc_ref": d["ref"]})
         with get_session() as s:
+            from database.models.weigh_ticket import WeighTicket
+            weigh_lookup = {
+                int(wt.purchase_id): wt
+                for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.isnot(None)).all()
+            }
             for p in (s.query(Payment).filter(Payment.party_id == pid, Payment.status != "voided",
                                               Payment.entity_type.in_(["sale", "purchase"]))
                       .filter(Payment.method != "advance").all()):
@@ -192,8 +214,14 @@ class CustomerRecordsService:
                 if str(p.notes or "").startswith("Advance settlement"):
                     continue
                 ref = f"{'SAL' if p.entity_type == 'sale' else 'PUR'}-{p.entity_id}"
+                w_tag = ""
+                if p.entity_type == "purchase":
+                    wt = weigh_lookup.get(int(p.entity_id or 0))
+                    if wt and wt.created_at:
+                        gap = (p.created_at.date() - wt.created_at.date()).days
+                        w_tag = f" (Weighed {_when(wt.created_at)}, {gap}d gap)"
                 events.append({"date": p.created_at, "type": "Payment in" if inbound else "Payment out",
-                               "ref": ref, "detail": (p.method or "").title(),
+                               "ref": ref, "detail": f"{(p.method or '').title()}{w_tag}",
                                "delta": -_f(p.amount) if inbound else _f(p.amount),
                                "doc_kind": p.entity_type, "doc_id": int(p.entity_id or 0), "doc_ref": ref})
             for r in s.query(SaleReturn).filter(SaleReturn.party_id == pid).all():

@@ -77,6 +77,16 @@ class GlobalDocumentPreviewer:
                             lambda: print_receipt(dlg, entity_type, int(entity_id), MODE_DELIVERY)
                         )
                         lay.addWidget(dbtn)
+
+                    # What is left, in Hausa or English: this document's balance and/or the total still pending.
+                    if entity_type in ("sale", "purchase", "advance", "payment"):
+                        from apps.product_management_app.features.receipts_v2 import open_balance_slip
+                        bbtn = QPushButton("Print Balance...")
+                        bbtn.setMinimumHeight(34)
+                        bbtn.setToolTip("Print what is left on this document and/or the total still pending "
+                                        "(Hausa or English)")
+                        bbtn.clicked.connect(lambda: open_balance_slip(dlg, entity_type, int(entity_id)))
+                        lay.addWidget(bbtn)
             except Exception:
                 pass
 

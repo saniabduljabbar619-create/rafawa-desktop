@@ -88,11 +88,13 @@ class PurchasePaymentDialog(QDialog):
         # PURCHASE TABLE
         # --------------------------------------------------
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 7)
 
         self.table.setHorizontalHeaderLabels([
             "Purchase ID",
-            "Date",
+            "Booked Date",
+            "Date Weighed",
+            "Ticket",
             "Total",
             "Paid",
             "Balance"
@@ -107,6 +109,10 @@ class PurchasePaymentDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         layout.addWidget(self.table)
+
+        self.lbl_selected_info = QLabel("")
+        self.lbl_selected_info.setStyleSheet("font-size:12px; color:#4b5563; font-weight:600; padding:2px;")
+        layout.addWidget(self.lbl_selected_info)
 
         # --------------------------------------------------
         # PAYMENT INPUT
@@ -147,6 +153,10 @@ class PurchasePaymentDialog(QDialog):
         self.btn_print_receipt = QPushButton("Print Receipt")
         self.btn_print_receipt.setEnabled(False)
         btns.addWidget(self.btn_print_receipt)
+        self.btn_print_balance = QPushButton("Print Balance...")
+        self.btn_print_balance.setToolTip("Print what is left (this purchase and/or the total still pending), "
+                                          "in Hausa or English")
+        btns.addWidget(self.btn_print_balance)
         self.btn_counter_shortage = QPushButton("Counter Shortage")
         btns.addWidget(self.btn_counter_shortage)
         self.btn_edit = QPushButton("Edit prices")
@@ -161,6 +171,7 @@ class PurchasePaymentDialog(QDialog):
         self.btn_close.clicked.connect(self.reject)
         self.btn_record.clicked.connect(self.record_payment)
         self.btn_print_receipt.clicked.connect(self._print_receipt)
+        self.btn_print_balance.clicked.connect(self._print_balance)
         self.btn_counter_shortage.clicked.connect(self._open_counter_shortage)
         self.btn_edit.clicked.connect(lambda: self.edit_prices())
         self.btn_price_adjustment.clicked.connect(self._open_price_adjustment)
@@ -187,6 +198,12 @@ class PurchasePaymentDialog(QDialog):
                 .all()
             )
 
+            from database.models.weigh_ticket import WeighTicket
+            weigh_tickets = {
+                int(wt.purchase_id): wt
+                for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.in_([p.id for p in purchases])).all()
+            } if purchases else {}
+
             self.table.setRowCount(0)
             total_outstanding = 0.0
 
@@ -205,9 +222,16 @@ class PurchasePaymentDialog(QDialog):
                 r = self.table.rowCount()
                 self.table.insertRow(r)
 
+                wt = weigh_tickets.get(int(p.id))
+                weighed_str = wt.created_at.strftime("%Y-%m-%d %H:%M") if wt and wt.created_at else "-"
+                ticket_str = wt.ticket_no or (f"WT-{wt.id:05d}" if wt else "") or "-"
+                booked_str = str(p.completed_at)[:19] if p.completed_at else "-"
+
                 cols = [
                     str(p.id),
-                    str(p.completed_at)[:19],
+                    booked_str,
+                    weighed_str,
+                    ticket_str,
                     f"{net_total:,.2f}",
                     f"{total_paid:,.2f}",
                     f"{balance:,.2f}"
@@ -232,18 +256,24 @@ class PurchasePaymentDialog(QDialog):
 
         if r < 0:
             self._selected_purchase_id = 0
+            self.lbl_selected_info.setText("")
             return
 
-        balance = self.table.item(r, 4).text()
+        balance = self.table.item(r, 6).text()
         balance = balance.replace(",", "")
 
         self.amount_input.setText(balance)
 
-        # Selecting a row is enough to print that purchase's current
-        # receipt - takes priority over any earlier payment recorded this
-        # session, so Print Receipt always acts on whatever was most
-        # recently selected or just paid.
-        self._selected_purchase_id = int(self.table.item(r, 0).text())
+        pid = int(self.table.item(r, 0).text())
+        b_date = self.table.item(r, 1).text()
+        w_date = self.table.item(r, 2).text()
+        t_no = self.table.item(r, 3).text()
+        if w_date and w_date != "-":
+            self.lbl_selected_info.setText(f"Selected: PUR-{pid} • Weighed on {w_date} (Ticket: {t_no}) • Booked: {b_date}")
+        else:
+            self.lbl_selected_info.setText(f"Selected: PUR-{pid} • Booked: {b_date}")
+
+        self._selected_purchase_id = pid
         self._last_payment_id = 0
         self.btn_print_receipt.setEnabled(True)
 
@@ -330,13 +360,30 @@ class PurchasePaymentDialog(QDialog):
             # RECORD PAYMENT
             # -----------------------------------------
 
+            # Track date weighed / booked in payment metadata note
+            wt_note = ""
+            with get_session() as s:
+                from database.models.weigh_ticket import WeighTicket
+                wt = s.query(WeighTicket).filter(WeighTicket.purchase_id == purchase_id).first()
+                if wt and wt.created_at:
+                    days = (datetime.now().date() - wt.created_at.date()).days
+                    wt_note = f"[Weighed: {wt.created_at.strftime('%Y-%m-%d')}, {wt.ticket_no or f'WT-{wt.id:05d}'}, {days}d ago] "
+                else:
+                    pur = s.get(Purchase, purchase_id)
+                    if pur and pur.completed_at:
+                        days = (datetime.now().date() - pur.completed_at.date()).days
+                        wt_note = f"[Booked: {pur.completed_at.strftime('%Y-%m-%d')}, {days}d ago] "
+
+            user_note = self.note_input.text().strip()
+            final_note = (wt_note + (user_note or "Manual supplier payment from Payment Tab"))[:255]
+
             payment_id = PaymentService.record_purchase_payment(
                 purchase_id=purchase_id,
                 party_id=int(self.party.id),
                 amount=amount,
                 created_by_user_id=self.user_id,
                 method="manual",
-                notes=self.note_input.text().strip() or "Manual supplier payment from Payment Tab"
+                notes=final_note
             )
 
             # -----------------------------------------
@@ -512,6 +559,16 @@ class PurchasePaymentDialog(QDialog):
         # immediately, without closing this dialog or requiring the
         # operator to reopen it as a second action.
         self.load_purchases()
+
+    def _print_balance(self):
+        """Balance slip: the last payment's purchase, else the selected row, else the supplier's total."""
+        from apps.product_management_app.features.receipts_v2 import open_balance_slip, open_party_balance_slip
+        if self._last_payment_id > 0:
+            open_balance_slip(self, "payment", self._last_payment_id)
+        elif self._selected_purchase_id > 0:
+            open_balance_slip(self, "purchase", self._selected_purchase_id)
+        else:
+            open_party_balance_slip(self, int(self.party.id), self.walkin_name or "")
 
     def _print_receipt(self):
         if self._last_payment_id > 0:

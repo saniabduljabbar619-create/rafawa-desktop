@@ -104,7 +104,7 @@ class WeigherTicketsView(QWidget):
             # a typed search or a chosen date range looks across days; otherwise the list starts from zero each day
             wide = self.chk_earlier.isChecked() or self.filters.has_range() or bool(f["search"])
             allrows = WeighService.list_tickets(since=None if wide else day_start(), search=f["search"],
-                                                date_from=f["date_from"], date_to=f["date_to"])
+                                                date_from=f["date_from"], date_to=f["date_to"], for_weigher=True)
         except Exception as e:
             QMessageBox.warning(self, "Finalize List", str(e))
             return
@@ -128,9 +128,8 @@ class WeigherTicketsView(QWidget):
     def _buttons(self):
         _tid, t = self._selected()
         ok = bool(t and t["status"] in EDITABLE)
-        priceable = bool(t and t["status"] == "finalized" and t.get("purchase_id"))
-        self.btn_edit.setEnabled(ok or priceable)
-        self.btn_edit.setText("Edit prices" if priceable else "Edit")
+        self.btn_edit.setEnabled(ok)
+        self.btn_edit.setText("Edit")
         self.btn_remove.setEnabled(ok)
         self.btn_move.setEnabled(ok)
         printable = bool(t and t["status"] != "open")
@@ -139,7 +138,7 @@ class WeigherTicketsView(QWidget):
         self.btn_print_pay.setEnabled(printable)
 
     def _row_menu(self, pos) -> None:
-        """Right-click a weighing: edit it (a finalized one: edit the price of each product), or print its receipts."""
+        """Right-click a weighing: edit it or print its receipts."""
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
@@ -150,22 +149,24 @@ class WeigherTicketsView(QWidget):
         menu = QMenu(self)
         if t["status"] in EDITABLE:
             menu.addAction("Edit weighing and prices…").triggered.connect(self.edit_selected)
-        elif t["status"] == "finalized" and t.get("purchase_id"):
-            menu.addAction("Edit prices…").triggered.connect(self.edit_selected)
         if t["status"] != "open":
             menu.addAction("Print weighing receipt").triggered.connect(lambda: self.print_selected("weighing"))
+            menu.addAction("Print value receipt").triggered.connect(lambda: self.print_selected("value"))
         if not menu.isEmpty():
             menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def edit_selected(self):
-        """Correct a weighing: its rounds and prices. A finalized one (already a purchase) has its prices edited."""
+        """Correct a weighing: its rounds and prices."""
         tid, t = self._selected()
         if not tid:
             QMessageBox.information(self, "Edit", "Select a weighing first.")
             return
-        if t["status"] == "finalized":
-            if edit_finalized_prices(self, t):
-                self.refresh()
+        if t["status"] not in EDITABLE:
+            QMessageBox.information(
+                self, "Finalized Weighing",
+                f"Weighing {t['ticket_no']} is {t['status']}.\n\n"
+                f"Weigher price and amounts are historically preserved on this screen."
+            )
             return
         from apps.product_management_app.features.weigher.dialogs.weigh_ticket_review_dialog import (
             WeighTicketReviewDialog)

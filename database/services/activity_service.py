@@ -65,9 +65,17 @@ def list_customer_activities_db(
             .limit(limit)
             .all()
         )
+        weigh_map = {}
+        if purchases:
+            from database.models.weigh_ticket import WeighTicket
+            for wt in s.query(WeighTicket).filter(WeighTicket.purchase_id.in_([p.id for p in purchases])).all():
+                weigh_map[int(wt.purchase_id)] = wt
+
         for p in purchases:
             ledger = _guess_ledger_from_notes(p.notes or "")
             created_by_id = int(getattr(p, "created_by_user_id", 0) or 0)
+            wt = weigh_map.get(int(p.id))
+            w_str = f" • Weighed: {wt.created_at.strftime('%Y-%m-%d')} ({wt.ticket_no or f'WT-{wt.id:05d}'})" if wt else ""
             
             out.append({
                 "dt": (p.created_at.isoformat(sep="T", timespec="seconds") if p.created_at else ""),
@@ -75,12 +83,16 @@ def list_customer_activities_db(
                 "ledger": ledger,
                 "type": "intake",
                 "amount": float(p.total_amount or 0.0),
-                "summary": "Intake (Purchase)",
+                "summary": f"Intake (Purchase){w_str}",
                 "status": str(p.status or ""),
                 "processed_by": user_map.get(created_by_id, "System"),  # 🚀 Live Cashier Mapping
                 "entity_type": "purchase",
                 "entity_id": int(p.id),
-                "meta": {"source": "purchase"},
+                "meta": {
+                    "source": "purchase",
+                    "weighed_at": wt.created_at.isoformat() if wt else None,
+                    "ticket_no": wt.ticket_no if wt else "",
+                },
             })
 
         # ------------

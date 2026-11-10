@@ -14,9 +14,34 @@ from database.models.purchase_item import PurchaseItem
 from database.models.stock_movement import StockMovement
 from sqlalchemy import desc
 
-from PySide2.QtCore import QObject, Signal
+class _Signal:
+    """Pure-Python signal so module-level event buses never depend on a C++ QObject lifetime."""
 
-class AppEvents(QObject):
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        if slot not in self._slots:
+            self._slots.append(slot)
+
+    def disconnect(self, slot=None):
+        if slot is None:
+            self._slots.clear()
+        elif slot in self._slots:
+            self._slots.remove(slot)
+
+    def emit(self, *args, **kwargs):
+        dead = []
+        for slot in list(self._slots):
+            try:
+                slot(*args, **kwargs)
+            except RuntimeError:
+                dead.append(slot)
+        for slot in dead:
+            if slot in self._slots:
+                self._slots.remove(slot)
+
+class AppEvents:
     """
     Tiny process-wide event bus, separate from AppState itself because
     AppState is a plain object (not a QObject) and can't host Signals
@@ -29,7 +54,8 @@ class AppEvents(QObject):
     volume a redundant recompute is cheap, and a scoped signal is one
     more thing every future money-mutating call site has to get right.
     """
-    money_changed = Signal()
+    def __init__(self):
+        self.money_changed = _Signal()
 
 
 @dataclass

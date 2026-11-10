@@ -273,6 +273,10 @@ class CashierSalesView(QWidget):
         btn_row.addWidget(self.btn_delivery)
         btn_row.addWidget(self.btn_print_qp)
         btn_row.addWidget(self.btn_receipt)
+        self.btn_balance = QPushButton("Print Balance...")
+        self.btn_balance.setToolTip(
+            "Print what the customer still owes - this sale and/or everything pending - in Hausa or English")
+        btn_row.addWidget(self.btn_balance)
         btn_row.addStretch(1)
 
         splitter.addWidget(right)
@@ -295,6 +299,7 @@ class CashierSalesView(QWidget):
         self.btn_delivery.clicked.connect(self._print_last_delivery)
         self.btn_print_qp.clicked.connect(self._print_last_qp_receipts)
         self.btn_receipt.clicked.connect(self._print_last_receipt)
+        self.btn_balance.clicked.connect(self._print_last_balance)
         self.btn_checkout.clicked.connect(self._checkout)
 
         # Wire customer selection listener to manage modifier component properties dynamically
@@ -1253,6 +1258,14 @@ class CashierSalesView(QWidget):
             self._delivery_note_printed = True
         except Exception as e:
             QMessageBox.warning(self, "Print Error", f"Could not print delivery note:\n{e}")
+
+    def _print_last_balance(self):
+        """Balance slip (what is left, Hausa / English) for the most recent sale."""
+        if self._last_sale_id <= 0:
+            QMessageBox.information(self, "Print Balance", "No recent sale to print a balance for.")
+            return
+        from apps.product_management_app.features.receipts_v2 import open_balance_slip
+        open_balance_slip(self, SALE, self._last_sale_id)
 
     def _print_last_receipt(self):
         """Print the full receipt (amounts + payment) for the most recent
