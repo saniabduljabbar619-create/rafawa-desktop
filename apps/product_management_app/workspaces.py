@@ -59,6 +59,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
     from apps.product_management_app.features.weigher.views.weigh_tickets_admin import WeighTicketsAdminView
     from apps.product_management_app.features.debt_center.views.debt_center import DebtCenterView
     from apps.product_management_app.features.reminders.views.debtor_reminders import DebtorRemindersView
+    from apps.product_management_app.features.closings.views.customer_closings_view import CustomerClosingsView
 
     # 👑 THE ANCHOR BLUEPRINTS: Import the completed executive analytics and valuation dashboards
     from apps.product_management_app.features.catalog.views.product_profit_view import ProductProfitView
@@ -88,6 +89,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             ]),
             SidebarItem(label="Debt Center", route="admin.debt_center"),
             SidebarItem(label="Debt Reminders", route="admin.debt_reminders"),
+            SidebarItem(label="Customer Closings", route="admin.customer_closings"),
             SidebarItem(label="Weigh Tickets", route="admin.weigh_tickets"),
             SidebarItem(label="Quick Purchases", route="admin.quick_purchases"),
             SidebarItem(label="Returns", route="admin.returns"),
@@ -110,6 +112,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.live_valuation": lambda: ProductInventoryCapitalView(),
             "admin.debt_center": lambda: DebtCenterView(),
             "admin.debt_reminders": lambda: DebtorRemindersView(),
+            "admin.customer_closings": lambda: CustomerClosingsView(session_user_id=_current_admin_user_id() or 1),
             "admin.weigh_tickets": lambda: WeighTicketsAdminView(mode="admin"),
             "admin.quick_purchases": lambda: QuickPurchasesView(),
             "admin.returns": lambda: AdminReturnsView(),
@@ -129,6 +132,7 @@ def build_workspaces() -> Dict[str, WorkspaceSpec]:
             "catalog.profits": "Catalog • Realized Profit & Margins",
             "admin.debt_center": "Debt Center",
             "admin.debt_reminders": "Debt Reminders",
+            "admin.customer_closings": "Customer Closings • Rufe Lissafin Abokan Ciniki",
             "admin.weigh_tickets": "Weigh Tickets",
             "admin.quick_purchases": "Quick Purchases",
             "admin.returns": "Returns",

@@ -21,6 +21,7 @@ from .receipt_models import (          # pure, always safe to import
 )
 from .receipt_render import render_receipt
 from .balance_slip import render_balance_slip, LANGUAGES as BALANCE_LANGUAGES
+from .closing_slip import render_closing_slip, LANGUAGES as CLOSING_LANGUAGES
 from .shop import get_shop
 from .weigh_slip import render_weigh_slip, render_weigh_receipt, RECEIPT_TITLES as WEIGH_RECEIPT_TITLES
 
@@ -39,14 +40,17 @@ except Exception:  # pragma: no cover
 
 try:
     from .balance_slip_dialog import open_balance_slip, open_party_balance_slip
+    from .closing_slip_dialog import open_closing_slip
 except Exception:  # pragma: no cover
     open_balance_slip = None
     open_party_balance_slip = None
+    open_closing_slip = None
 
 __all__ = [
     "print_receipt", "print_delivery_and_full",
     "print_full_then_optional_delivery", "preview_and_print",
     "render_receipt", "render_balance_slip", "BALANCE_LANGUAGES", "open_balance_slip", "open_party_balance_slip",
+    "render_closing_slip", "CLOSING_LANGUAGES", "open_closing_slip",
     "get_shop", "render_weigh_slip", "render_weigh_receipt", "WEIGH_RECEIPT_TITLES",
     "MODE_DELIVERY", "MODE_FULL",
     "SALE", "PURCHASE", "ADVANCE", "PAYMENT", "SALE_RETURN", "PURCHASE_RETURN",

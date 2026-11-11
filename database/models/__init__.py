@@ -47,3 +47,5 @@ from .document_offset import DocumentOffset           # purchase <-> sale offset
 from .expenditure import Expenditure                  # Debt Center: larger outlays, separate from Expenses
 from .debt import DebtPerson, DebtEntry, DebtPayment               # Debt Center: standalone creditor/debtor book
 from .order_review import OrderReview                 # order review notes and post-delivery corrections
+from .customer_closing import CustomerClosing         # Customer closing periods & balance calculations
+

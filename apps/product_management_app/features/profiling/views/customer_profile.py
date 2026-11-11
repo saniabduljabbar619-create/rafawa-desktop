@@ -284,18 +284,21 @@ class CustomerProfileView(QWidget):
             self._build_revert_tab(tabs)
 
         # Record-by-record tabs (registered customers only): Sales/Purchases (two sides, tick to swap),
-        # Products, Transaction history
-        self.tab_docs = self.tab_sales = self.tab_purchases = self.tab_products = self.tab_history = None
+        # Products, Transaction history, Closings
+        self.tab_docs = self.tab_sales = self.tab_purchases = self.tab_products = self.tab_history = self.tab_closings = None
         if self.customer:
             from apps.product_management_app.features.profiling.views.records_tabs import (
                 HistoryTab, ProductsTab, SalesPurchasesTab)
+            from apps.product_management_app.features.closings.views.closings_tab import ClosingsTab
             pid = int(self.customer.id)
             self.tab_docs = SalesPurchasesTab(pid)
             self.tab_purchases, self.tab_sales = self.tab_docs.purchases, self.tab_docs.sales
             self.tab_products, self.tab_history = ProductsTab(pid), HistoryTab(pid)
+            self.tab_closings = ClosingsTab(pid, self.session_user_id)
             tabs.setElideMode(Qt.ElideNone)
             for i, (w, label) in enumerate(((self.tab_docs, "Sales/Purchases"), (self.tab_products, "Products"),
-                                            (self.tab_history, "Transaction history")), start=1):
+                                            (self.tab_history, "Transaction history"),
+                                            (self.tab_closings, "Closings")), start=1):
                 tabs.insertTab(i, w, label)
             self.tab_docs.swap_requested.connect(self.open_swap)
             self.tab_docs.changed.connect(self.refresh_all)      # a price was edited: every tab follows
@@ -1623,6 +1626,8 @@ class CustomerProfileView(QWidget):
         for tab in (self.tab_docs, self.tab_products, self.tab_history):
             if tab is not None:
                 tab.reload()
+        if hasattr(self, "tab_closings") and self.tab_closings is not None:
+            self.tab_closings.refresh_data()
 
     def open_swap(self):
         """Swap page: starts from the rows ticked on the Sales and Purchases tabs."""

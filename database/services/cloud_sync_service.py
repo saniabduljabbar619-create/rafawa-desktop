@@ -40,6 +40,7 @@ def _sync_table_specs():
     from database.models.advance import Advance
     from database.models.advance_allocations import AdvanceAllocation
     from database.models.cashier_settlement import CashierSettlement
+    from database.models.customer_closing import CustomerClosing
 
     return [
         (Party, "parties"),
@@ -52,6 +53,7 @@ def _sync_table_specs():
         (Advance, "advances"),
         (AdvanceAllocation, "advance_allocations"),
         (CashierSettlement, "cashier_settlements"),
+        (CustomerClosing, "customer_closings"),
     ]
 
 
@@ -154,9 +156,31 @@ class CloudSyncEngine:
             ))
 
         mirror = Table(table_name, cls._cloud_metadata, *columns)
-        mirror.create(bind=cls._get_cloud_engine(), checkfirst=True)
+        engine = cls._get_cloud_engine()
+        mirror.create(bind=engine, checkfirst=True)
+        cls._ensure_mirror_columns(engine, table_name, model_class)
         cls._mirror_tables[table_name] = mirror
         return mirror
+
+    @classmethod
+    def _ensure_mirror_columns(cls, engine: Engine, table_name: str, model_class: Type) -> None:
+        """
+        Dynamically detects any newly added columns from migrations that exist locally
+        but are missing from the cloud mirror table, and automatically adds them.
+        """
+        try:
+            insp = sa.inspect(engine)
+            if table_name not in insp.get_table_names():
+                return
+            existing_cols = {c["name"].lower() for c in insp.get_columns(table_name)}
+            for col in model_class.__table__.columns:
+                if col.name.lower() not in existing_cols:
+                    col_type_str = str(col.type.compile(engine.dialect))
+                    with engine.begin() as conn:
+                        conn.execute(sa.text(f"ALTER TABLE `{table_name}` ADD COLUMN `{col.name}` {col_type_str} NULL"))
+                    log.info("Auto-migrated cloud mirror column: %s.%s (%s)", table_name, col.name, col_type_str)
+        except Exception as e:
+            log.warning("Could not check/add columns for %s on cloud mirror: %s", table_name, e)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -199,7 +223,11 @@ class CloudSyncEngine:
             mirror = cls._get_mirror_table(model_class, table_name)
             cls._upsert_rows(mirror, rows)
 
-            new_cursor = max(r["updated_at"] for r in rows if r.get("updated_at") is not None)
+            new_cursor = max(
+                (r.get("updated_at") or r.get("created_at"))
+                for r in rows
+                if r.get("updated_at") is not None or r.get("created_at") is not None
+            )
             new_row_id = max(r["id"] for r in rows if r.get("id") is not None)
             cls._advance_cursor(table_name, new_cursor, new_row_id)
             cls._write_log(table_name, started_at, len(rows), True, None)
@@ -227,22 +255,23 @@ class CloudSyncEngine:
 
     @staticmethod
     def _fetch_dirty_rows(model_class: Type, cursor, cursor_row_id) -> List[Dict]:
+        ts_col = getattr(model_class, "updated_at", getattr(model_class, "created_at", None))
         with get_session() as s:
             q = s.query(model_class)
-            if cursor is not None:
-                # Tie-break on id when updated_at is equal (e.g. a burst
-                # of rows in the same second) - otherwise a row sharing
-                # the exact cursor timestamp could be skipped forever.
+            if cursor is not None and ts_col is not None:
                 if cursor_row_id is not None:
                     q = q.filter(
                         sa.or_(
-                            model_class.updated_at > cursor,
-                            sa.and_(model_class.updated_at == cursor, model_class.id > cursor_row_id),
+                            ts_col > cursor,
+                            sa.and_(ts_col == cursor, model_class.id > cursor_row_id),
                         )
                     )
                 else:
-                    q = q.filter(model_class.updated_at > cursor)
-            q = q.order_by(model_class.updated_at.asc(), model_class.id.asc())
+                    q = q.filter(ts_col > cursor)
+            if ts_col is not None:
+                q = q.order_by(ts_col.asc(), model_class.id.asc())
+            else:
+                q = q.order_by(model_class.id.asc())
             q = q.limit(settings.CLOUD_SYNC_BATCH_SIZE)
 
             out = []
