@@ -159,7 +159,7 @@ class OrdersBoard(QWidget):
     def _open_selected(self) -> None:
         r = self._selected()
         if r is not None:
-            self.hub.open_order(r["kind"], r["partner_id"], r["id"])
+            self.hub.open_profile(r["kind"], r["partner_id"])
 
     def _track(self) -> None:
         r = self._selected()
@@ -284,11 +284,11 @@ class OrdersHubView(QWidget):
 
     # ---------------------------------------------------------------- starting an order
     def new_order(self, kind: str) -> None:
-        """Ask which company / supplier, then open a blank order sheet for them."""
+        """Ask which company / supplier, then open their profile where new activities are started."""
         from apps.product_management_app.features.orders.dialogs.partner_pick_dialog import PartnerPickDialog
         dlg = PartnerPickDialog(kind, self, can_add=self.is_admin)
         if dlg.exec_() == dlg.Accepted and dlg.partner_id:
-            self.open_order(kind, int(dlg.partner_id), None)
+            self.open_profile(kind, int(dlg.partner_id))
 
     # ---------------------------------------------------------------- deeper pages (profile, order sheet)
     def _push(self, page) -> None:

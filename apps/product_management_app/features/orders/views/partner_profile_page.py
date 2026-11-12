@@ -1,33 +1,59 @@
 # apps/product_management_app/features/orders/views/partner_profile_page.py
-"""A company's / supplier's profile: all their orders in one sheet-style list, and where a new order starts."""
+"""
+Dedicated Company / Supplier Profile:
+  - All orders & activities in a single-row sheet.
+  - Advance recordings (IN for Sale Orders, OUT for Purchase Orders) held safely.
+  - "New Activity" button to create Sale Order or Purchase Order.
+  - Single-row order tracking & finalization (Company Price, Company Weight, etc.).
+  - "Use Advance" action on finalization and on rows with balance.
+"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, date
+from typing import Any, Dict, List, Optional
 
 from PySide2.QtCore import Qt, Signal
-from PySide2.QtGui import QColor
+from PySide2.QtGui import QColor, QFont
 from PySide2.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QPushButton, QStackedWidget,
-    QTabBar, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QStackedWidget, QTabBar, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QFrame,
 )
 
-from database.services.order_money_service import OrderMoneyService
-from database.services.order_sheet_service import OrderSheetService
-from shared.auth.permissions import PermissionDenied
-from shared.uix.widgets.cards import avatar, chip, money
 from apps.product_management_app.features.debt_center.sheet_style import STYLE
 from apps.product_management_app.features.debt_center.views.people_page import kpi
-from apps.product_management_app.features.debt_center.views.sheet_grid import SheetGrid
-from apps.product_management_app.features.orders.views.order_sheet_page import (
-    EXPENSE_CHARGE, METHOD_OPTIONS, MONEY_WAYS, STATUS_TEXT, _num,
-)
+from apps.product_management_app.features.orders.dialogs.apply_advance_dialog import ApplyAdvanceDialog
+from apps.product_management_app.features.orders.dialogs.finalize_order_dialog import FinalizeOrderDialog
+from apps.product_management_app.features.orders.dialogs.new_activity_dialog import NewActivityDialog
+from apps.product_management_app.features.orders.dialogs.order_slip_dialog import OrderSlipDialog
+from apps.product_management_app.features.orders.dialogs.record_advance_dialog import RecordAdvanceDialog
+from database.services.order_money_service import OrderMoneyService
+from database.services.order_profile_service import OrderProfileService
+from database.services.order_sheet_service import OrderSheetService
+from shared.uix.widgets.cards import avatar, chip, money
 
-COLS = ["Order", "Status", "Created", "Dispatched", "Expected", "Value", "Payment", "Still to settle"]
-_COLOR = {"draft": "#8a8578", "in_transit": "#2f6f9f", "confirmed": "#3f6b4a", "cancelled": "#a23b34"}
+COLS = [
+    "Order #", "Date", "Activity", "Product & Quality",
+    "Initial / Ordered", "Company Verified", "Final Amount",
+    "Status", "Settlement", "Actions"
+]
+
+ADV_COLS = ["ID", "Date", "Direction", "Amount", "Method", "Notes / Ref", "Status", "Recorded By"]
+
+STATUS_COLOR = {
+    "draft": "#64748b",
+    "in_transit": "#2563eb",
+    "confirmed": "#059669",
+    "cancelled": "#dc2626",
+}
 
 
 def _day(dt) -> str:
-    return dt.strftime("%d/%m/%Y") if dt else "-"
+    if not dt:
+        return "-"
+    if hasattr(dt, "strftime"):
+        return dt.strftime("%d/%m/%Y")
+    return str(dt)[:10]
 
 
 class PartnerProfilePage(QWidget):
@@ -37,101 +63,134 @@ class PartnerProfilePage(QWidget):
 
     def __init__(self, kind: str, partner_id: int, is_admin: bool = True):
         super().__init__()
-        self.kind, self.partner_id, self.is_admin = kind, int(partner_id), is_admin
-        self._rows = []
-        self.partner = OrderSheetService.partner(kind, partner_id) or {"name": "?", "phone": "", "address": "",
-                                                                         "contact_person": ""}
+        self.kind = "sales" if str(kind).lower() in ("sales", "company") else "purchase"
+        self.partner_id = int(partner_id)
+        self.is_admin = is_admin
+
+        # Resolve partner across counterparties
+        self.info = OrderProfileService.resolve_partner(self.partner_id, self.kind)
+        self.partner_name = self.info["name"]
+        self.company_id = self.info["company_id"]
+        self.supplier_id = self.info["supplier_id"]
+
+        self._orders: List[Dict[str, Any]] = []
+        self._advances: List[Dict[str, Any]] = []
+
         self.setObjectName("dcRoot")
         self.setStyleSheet(STYLE)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        self._build_ui()
+        self.reload()
 
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(10)
+
+        # Header Bar
         head = QHBoxLayout()
-        self.btn_back = QPushButton("<  Back to " + ("companies" if kind == "sales" else "suppliers"))
+        self.btn_back = QPushButton("<  Back to Orders")
         self.btn_back.setObjectName("dcBack")
         self.btn_back.clicked.connect(self.back.emit)
         head.addWidget(self.btn_back)
-        head.addWidget(avatar(self.partner["name"], 44))
+
+        head.addWidget(avatar(self.partner_name, 44))
+
         box = QVBoxLayout()
-        box.setSpacing(0)
-        name = QLabel(self.partner["name"])
-        name.setStyleSheet("font-size:19px; font-weight:800; color:#1c2333;")
-        bits = [self.partner.get("contact_person") and f"Contact: {self.partner['contact_person']}",
-                self.partner.get("phone"), self.partner.get("address")]
-        sub = QLabel("  -  ".join(b for b in bits if b) or "No contact details")
+        box.setSpacing(1)
+        name = QLabel(self.partner_name)
+        name.setStyleSheet("font-size: 19px; font-weight: 800; color: #0f172a;")
+        bits = [
+            self.info.get("contact_person") and f"Contact: {self.info['contact_person']}",
+            self.info.get("phone"),
+            self.info.get("address"),
+        ]
+        sub = QLabel("  •  ".join(b for b in bits if b) or "Company / Supplier Profile")
         sub.setObjectName("dcSub")
         box.addWidget(name)
         box.addWidget(sub)
+
         holder = QWidget()
         holder.setLayout(box)
         head.addWidget(holder)
-        c = chip("Sales Orders" if kind == "sales" else "Purchase Orders", "blue" if kind == "sales" else "amber")
-        c.setFixedHeight(22)
-        head.addWidget(c, 0, Qt.AlignVCenter)
         head.addStretch(1)
-        self.btn_new = QPushButton("+ New " + ("Sales" if kind == "sales" else "Purchase") + " Order")
-        self.btn_new.setObjectName("msBig")
-        self.btn_new.setVisible(is_admin)
-        head.addWidget(self.btn_new)
+
+        # Action Buttons
+        self.btn_new_activity = QPushButton("+  New Activity")
+        self.btn_new_activity.setStyleSheet(
+            "background-color: #059669; color: white; font-weight: bold; font-size: 13px; "
+            "padding: 8px 18px; border-radius: 5px;"
+        )
+        self.btn_new_activity.clicked.connect(self._open_new_activity)
+        head.addWidget(self.btn_new_activity)
+
+        self.btn_record_adv = QPushButton("+  Record Advance")
+        self.btn_record_adv.setStyleSheet(
+            "background-color: #0284c7; color: white; font-weight: bold; font-size: 13px; "
+            "padding: 8px 16px; border-radius: 5px;"
+        )
+        self.btn_record_adv.clicked.connect(self._open_record_advance)
+        head.addWidget(self.btn_record_adv)
+
         root.addLayout(head)
 
+        # KPI Summary Cards
         kp = QHBoxLayout()
         kp.setSpacing(10)
-        self.k_out = kpi("They still owe us (orders)" if kind == "sales" else "We still owe them (orders)", dark=True)
-        self.k_orders = kpi("Total orders")
-        self.k_active = kpi("Open orders (not yet delivered)")
-        self.k_value = kpi("Value of delivered orders")
-        for k in (self.k_out, self.k_orders, self.k_active, self.k_value):
+        self.k_adv_in = kpi("Available Advance (IN) • Sales", dark=True)
+        self.k_adv_out = kpi("Available Advance (OUT) • Purchases", dark=True)
+        self.k_active = kpi("Active Orders (In Progress)")
+        self.k_value = kpi("Delivered & Finalized Value")
+        self.k_bal = kpi("Outstanding Balance Due")
+
+        for k in (self.k_adv_in, self.k_adv_out, self.k_active, self.k_value, self.k_bal):
             kp.addWidget(k, 1)
         root.addLayout(kp)
 
-        # where we stand beyond the orders themselves (positive net: they owe us; negative: we owe them)
-        self.statement_box = QWidget()                 # shown only when there is other money / an expense to talk about
-        sbl = QVBoxLayout(self.statement_box)
-        sbl.setContentsMargins(0, 0, 0, 0)
-        sbl.setSpacing(6)
-        st = QHBoxLayout()
-        st.setSpacing(10)
-        self.k_money = kpi("Other money received")
-        self.k_recover = kpi("Expenses to get back")
-        self.k_net = kpi("Overall position", dark=True)
-        for k in (self.k_money, self.k_recover, self.k_net):
-            st.addWidget(k, 1)
-        sbl.addLayout(st)
-        how = QLabel("Overall position = orders + other money + expenses we are owed. It tells you in one line who owes whom.")
-        how.setObjectName("msHint")
-        how.setWordWrap(True)
-        sbl.addWidget(how)
-        root.addWidget(self.statement_box)
-        self.msg = QLabel("")
-        self.msg.setWordWrap(True)
-        self.msg.setVisible(False)
-        root.addWidget(self.msg)
-
+        # Tab Bar
         self.tabs = QTabBar()
         self.tabs.setObjectName("msSheets")
         self.tabs.setExpanding(False)
         self.tabs.setDrawBase(False)
-        for text in ("Orders", "Other money", "Expenses"):
-            self.tabs.addTab(text)
+        self.tabs.addTab("Orders & Activities")
+        self.tabs.addTab("Advances Ledger")
         root.addWidget(self.tabs)
+
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
+
+        # Page 1: Orders Table
         orders_page = QWidget()
         ol = QVBoxLayout(orders_page)
         ol.setContentsMargins(0, 0, 0, 0)
         ol.setSpacing(8)
-        self.slot_money = QWidget()
-        self.slot_money.setLayout(QVBoxLayout())
-        self.slot_money.layout().setContentsMargins(0, 0, 0, 0)
-        self.slot_exp = QWidget()
-        self.slot_exp.setLayout(QVBoxLayout())
-        self.slot_exp.layout().setContentsMargins(0, 0, 0, 0)
-        for pg in (orders_page, self.slot_money, self.slot_exp):
-            self.stack.addWidget(pg)
-        self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
-        self.money_grid = self.exp_grid = None
+
+        # Filter bar
+        filter_bar = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by order #, product, or quality...")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumHeight(32)
+        self.search.textChanged.connect(self._apply_filter)
+        filter_bar.addWidget(self.search, 1)
+
+        self.btn_filter_all = QPushButton("All Activities")
+        self.btn_filter_active = QPushButton("Pending / In Transit")
+        self.btn_filter_done = QPushButton("Finalized")
+        self.btn_refresh = QPushButton("Refresh")
+
+        for b in (self.btn_filter_all, self.btn_filter_active, self.btn_filter_done, self.btn_filter_refresh):
+            pass
+        filter_bar.addWidget(self.btn_filter_all)
+        filter_bar.addWidget(self.btn_filter_active)
+        filter_bar.addWidget(self.btn_filter_done)
+        filter_bar.addWidget(self.btn_refresh)
+        ol.addLayout(filter_bar)
+
+        self.btn_filter_all.clicked.connect(lambda: self._set_status_filter("all"))
+        self.btn_filter_active.clicked.connect(lambda: self._set_status_filter("active"))
+        self.btn_filter_done.clicked.connect(lambda: self._set_status_filter("done"))
+        self.btn_refresh.clicked.connect(self.reload)
+        self._current_filter = "all"
 
         self.table = QTableWidget(0, len(COLS))
         self.table.setObjectName("dcList")
@@ -140,280 +199,333 @@ class PartnerProfilePage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(44)
+        self.table.verticalHeader().setDefaultSectionSize(48)
         self.table.setShowGrid(False)
+
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.Stretch)
-        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)  # Product & Quality stretches
+        hh.setSectionResizeMode(9, QHeaderView.ResizeToContents)  # Actions
         ol.addWidget(self.table, 1)
 
-        foot = QHBoxLayout()
-        self.btn_open = QPushButton("Open order")
-        self.btn_open.setObjectName("msBig")
-        foot.addWidget(self.btn_open)
-        self.btn_delete = QPushButton("Delete order")
-        self.btn_delete.setProperty("role", "danger")
-        self.btn_delete.setVisible(is_admin)
-        foot.addWidget(self.btn_delete)
-        foot.addStretch(1)
-        h = QLabel("Double-click an order to open it.  Only draft or cancelled orders can be deleted.")
-        h.setObjectName("msHint")
-        foot.addWidget(h)
-        ol.addLayout(foot)
+        # Page 2: Advances Ledger
+        adv_page = QWidget()
+        al = QVBoxLayout(adv_page)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(8)
 
-        self.btn_new.clicked.connect(self.new_order.emit)
-        self.btn_open.clicked.connect(self._open_selected)
-        self.btn_delete.clicked.connect(self._delete_selected)
-        self.table.cellDoubleClicked.connect(lambda r, _c: self._open_row(r))
+        adv_notice = QLabel(
+            "<b>Notice:</b> Advances recorded here will <b>NEVER</b> be used automatically. "
+            "They remain safely held in this profile until you explicitly click <b>Use Advance</b> during or after finalization."
+        )
+        adv_notice.setStyleSheet("background: #f0fdf4; border: 1px solid #86efac; border-radius: 4px; padding: 8px; color: #166534;")
+        adv_notice.setWordWrap(True)
+        al.addWidget(adv_notice)
+
+        self.adv_table = QTableWidget(0, len(ADV_COLS))
+        self.adv_table.setObjectName("dcList")
+        self.adv_table.setHorizontalHeaderLabels(ADV_COLS)
+        self.adv_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.adv_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.adv_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.adv_table.verticalHeader().setVisible(False)
+        self.adv_table.verticalHeader().setDefaultSectionSize(40)
+        self.adv_table.setShowGrid(False)
+        self.adv_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        al.addWidget(self.adv_table, 1)
+
+        adv_foot = QHBoxLayout()
+        btn_adv_new = QPushButton("+ Record Advance")
+        btn_adv_new.setStyleSheet("background: #0284c7; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;")
+        btn_adv_new.clicked.connect(self._open_record_advance)
+        adv_foot.addWidget(btn_adv_new)
+        adv_foot.addStretch()
+        al.addLayout(adv_foot)
+
+        self.stack.addWidget(orders_page)
+        self.stack.addWidget(adv_page)
+        self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
+
+    def _set_status_filter(self, flt: str):
+        self._current_filter = flt
+        self._apply_filter()
+
+    def _open_new_activity(self):
+        dlg = NewActivityDialog(
+            partner_name=self.partner_name,
+            company_id=self.company_id,
+            supplier_id=self.supplier_id,
+            default_activity=self.kind,
+            parent=self,
+        )
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _open_record_advance(self):
+        dlg = RecordAdvanceDialog(
+            partner_name=self.partner_name,
+            company_id=self.company_id,
+            supplier_id=self.supplier_id,
+            default_direction="in" if self.kind == "sales" else "out",
+            parent=self,
+        )
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def refresh(self):
         self.reload()
 
-    def reload(self) -> None:
-        self._rows = OrderSheetService.orders_of(self.kind, self.partner_id)
-        done = [r for r in self._rows if r["status"] == "confirmed"]
-        self.k_out.val.setText(money(sum(r["balance"] or 0 for r in self._rows)))
-        self.k_orders.val.setText(str(len(self._rows)))
-        self.k_active.val.setText(str(sum(1 for r in self._rows if r["status"] in ("draft", "in_transit"))))
-        self.k_value.val.setText(money(sum(r["final"] or 0 for r in done)))
-        self._render_statement()
-        self._build_money_tab()
-        self._build_expense_tab()
-        self.table.setRowCount(len(self._rows))
-        for i, r in enumerate(self._rows):
-            pay = (r["payment_status"] or "-").replace("_", " ").title()
-            vals = [r["order_no"], STATUS_TEXT.get(r["status"], r["status"]), _day(r["created_at"]),
-                    _day(r["dispatched_at"]), _day(r["expected"]),
-                    money(r["final"]) if r["final"] is not None else "-", pay,
-                    money(r["balance"]) if r["balance"] is not None else "-"]
+    def reload(self):
+        # Refresh partner info
+        self.info = OrderProfileService.resolve_partner(self.partner_id, self.kind)
+        self.company_id = self.info["company_id"]
+        self.supplier_id = self.info["supplier_id"]
+
+        # Advance balances
+        adv_bals = OrderProfileService.get_advance_balances(self.company_id, self.supplier_id)
+        adv_in = adv_bals["advance_in"]
+        adv_out = adv_bals["advance_out"]
+        self.k_adv_in.val.setText(money(adv_in))
+        self.k_adv_out.val.setText(money(adv_out))
+
+        # Orders list
+        self._orders = OrderProfileService.list_partner_orders(self.company_id, self.supplier_id)
+
+        # KPIs
+        active_cnt = sum(1 for o in self._orders if o["status"] in ("draft", "in_transit"))
+        final_val = sum((o["final_total_amount"] or 0) for o in self._orders if o["status"] == "confirmed")
+        tot_bal = sum((o["balance"] or 0) for o in self._orders if o["balance"] is not None)
+
+        self.k_active.val.setText(str(active_cnt))
+        self.k_value.val.setText(money(final_val))
+        self.k_bal.val.setText(money(tot_bal))
+
+        self._apply_filter()
+        self._reload_advances()
+
+    def _reload_advances(self):
+        adv_list = []
+        if self.company_id:
+            adv_list.extend(OrderMoneyService.list_money("sales", partner_id=self.company_id))
+        if self.supplier_id:
+            adv_list.extend(OrderMoneyService.list_money("purchase", partner_id=self.supplier_id))
+
+        self._advances = adv_list
+        self.adv_table.setRowCount(len(adv_list))
+
+        for i, a in enumerate(adv_list):
+            dir_label = "IN (Sale Order Advance)" if a["direction"] == "in" else "OUT (Purchase Order Advance)"
+            status_str = "Available" if a["status"] == "completed" else a["status"].title()
+            if a.get("order_no"):
+                status_str = f"Applied to {a['order_no']}"
+
+            vals = [
+                str(a["id"]),
+                _day(a["date"]),
+                dir_label,
+                money(a["amount"]),
+                (a.get("method") or "-").title(),
+                a.get("note") or "-",
+                status_str,
+                a.get("by") or "-",
+            ]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                it.setData(Qt.UserRole, r["id"])
-                if c >= 5 and c != 6:
+                if c == 3:
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if c == 1:
-                    it.setForeground(QColor(_COLOR.get(r["status"], "#1c2333")))
-                    f = it.font()
-                    f.setBold(True)
-                    it.setFont(f)
-                self.table.setItem(i, c, it)
+                if c == 6:
+                    if a["status"] == "completed":
+                        it.setForeground(QColor("#059669"))
+                    elif a["status"] == "applied":
+                        it.setForeground(QColor("#2563eb"))
+                    elif a["status"] == "voided":
+                        it.setForeground(QColor("#dc2626"))
+                self.adv_table.setItem(i, c, it)
 
-    def _open_row(self, row: int) -> None:
-        if 0 <= row < len(self._rows):
-            self.open_order.emit(self._rows[row]["id"])
+    def _apply_filter(self):
+        term = self.search.text().strip().lower()
+        filtered = []
 
-    def _open_selected(self) -> None:
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Orders", "Select an order first.")
-            return
-        self._open_row(row)
+        for o in self._orders:
+            # Status filter
+            if self._current_filter == "active" and o["status"] not in ("draft", "in_transit"):
+                continue
+            if self._current_filter == "done" and o["status"] != "confirmed":
+                continue
 
-    def _delete_selected(self) -> None:
-        row = self.table.currentRow()
-        if not (0 <= row < len(self._rows)):
-            QMessageBox.information(self, "Delete order", "Select an order first.")
-            return
-        r = self._rows[row]
-        ok = QMessageBox.question(self, "Delete order", f"Delete order {r['order_no']} for good?",
-                                  QMessageBox.Yes | QMessageBox.No)
-        if ok != QMessageBox.Yes:
-            return
-        try:
-            OrderSheetService.delete_order(self.kind, int(r["id"]))
-        except Exception as e:
-            QMessageBox.warning(self, "Delete order", str(e))
-            return
-        self.reload()
+            # Search filter
+            if term:
+                text_blob = f"{o['order_no']} {o['product_name']} {o['quality']} {o['notes']}".lower()
+                if term not in text_blob:
+                    continue
 
-    # ------------------------------------------------------------------ the money statement
-    def say(self, text: str, bad: bool = True) -> None:
-        self.msg.setText(text)
-        self.msg.setVisible(bool(text))
-        self.msg.setStyleSheet(f"color:{'#a23b34' if bad else '#3f6b4a'}; font-size:12.5px; font-weight:600;")
+            filtered.append(o)
 
-    def _render_statement(self) -> None:
-        st = OrderMoneyService.statement(self.kind, self.partner_id)
-        self.k_money.val.setText(money(st["money_net"]))
-        self.k_money.cap.setText("Other money they gave us" if st["money_net"] >= 0
-                                 else "Other money we gave them")
-        if st["money_net"] < 0:
-            self.k_money.val.setText(money(-st["money_net"]))
-        self.k_recover.val.setText(money(st["to_recover"]))
-        self.k_recover.cap.setText("Expenses to get back" + (f"  (our own cost: {money(st['our_cost'])})"
-                                                                      if st["our_cost"] else ""))
-        net = st["net"]
-        self.k_net.val.setText(money(abs(net)))
-        self.k_net.cap.setText("Overall: THEY owe us" if net > 0.005 else
-                               ("Overall: WE owe them" if net < -0.005 else "Overall: all square"))
-        self.statement = st
-        self.statement_box.setVisible(abs(st["money_net"]) > 0.005 or st["to_recover"] > 0.005 or abs(net) > 0.005
-                                      or bool(st["our_cost"]))
+        self._render_orders_table(filtered)
 
-    # ------------------------------------------------------------------ money sheet (all orders + on account)
-    def _order_choices(self):
-        live = [r for r in self._rows if r["status"] != "cancelled"]
-        return {r["order_no"]: r["id"] for r in live}
+    def _render_orders_table(self, rows: List[Dict[str, Any]]):
+        self.table.setRowCount(len(rows))
 
-    def _build_money_tab(self) -> None:
-        ids = self._order_choices()
-        cols = [
-            {"key": "date", "label": "Date", "type": "date", "width": 110, "readonly": True},
-            {"key": "order", "label": "Order", "type": "choice", "options": ["On account"] + list(ids), "width": 140},
-            {"key": "direction", "label": "Direction", "type": "choice", "options": MONEY_WAYS, "width": 150},
-            {"key": "amount", "label": "Amount (₦)", "type": "money", "width": 150},
-            {"key": "method", "label": "How", "type": "choice", "options": METHOD_OPTIONS, "width": 110},
-            {"key": "note", "label": "Note", "type": "text", "width": 280, "stretch": True},
-            {"key": "by", "label": "By", "type": "text", "width": 110, "readonly": True},
-        ]
-        entries = OrderMoneyService.list_money(self.kind, partner_id=self.partner_id)
-        rows = []
-        for m in entries:
-            voided = m["status"] == "voided"
-            rows.append({"id": m["id"], "removed": voided, "locked": True,
-                         "cells": {"date": m["date"].isoformat() if m["date"] else "",
-                                   "order": m["order_no"] or "On account",
-                                   "direction": MONEY_WAYS[0] if m["direction"] == "in" else MONEY_WAYS[1],
-                                   "amount": m["amount"], "method": m["method"].title(), "note": m["note"],
-                                   "by": m["by"]},
-                         "computed": {"state": "Applied to an order" if m["status"] == "applied" else ""},
-                         "tip": ("Voided: " + m["void_reason"]) if voided else ""})
-        live = [m for m in entries if m["status"] != "voided"]
-        net = sum(m["amount"] if m["direction"] == "in" else -m["amount"] for m in live)
-        grid = SheetGrid(
-            columns=cols, computed=[{"key": "state", "label": "Status", "width": 170}], first_edit_key="amount",
-            placeholder_key="amount",
-            defaults={"date": date.today().isoformat(), "order": "On account", "direction": MONEY_WAYS[0],
-                      "method": "Cash"},
-            ready=lambda v: "" if (_safe_num(v.get("amount")) or 0) > 0 else "Now type the amount.",
-            on_add=lambda v: self._add_money(v, ids), on_edit=None,
-            on_remove=lambda mid, reason: OrderMoneyService.void_money(mid, reason), reload=self.reload,
-            hint="Money that is NOT an order price: an advance, a loan, a refund. Choose 'On account' or one order. "
-                 "Not part of the cash drawer. To cancel a row, right-click it (give a reason).",
-            allow_add=True, notify=self.say)
-        grid.set_rows(rows, {"amount": f"net {money(net)}"})
-        self.btn_apply = QPushButton("Use the selected row as a payment for an order…")
-        self.btn_apply.clicked.connect(lambda: self._apply_money(ids))
-        self._swap(self.slot_money, self._with_buttons(grid, self.btn_apply))
-        self.money_grid = grid
+        # Check available advance pools
+        adv_bals = OrderProfileService.get_advance_balances(self.company_id, self.supplier_id)
+        has_adv_in = adv_bals["advance_in"] > 0.005
+        has_adv_out = adv_bals["advance_out"] > 0.005
 
-    def _add_money(self, v, ids) -> None:
-        way = "in" if (v.get("direction") or MONEY_WAYS[0]) == MONEY_WAYS[0] else "out"
-        order = ids.get(v.get("order") or "On account")
-        OrderMoneyService.add_money(self.kind, self.partner_id, way, _num(v.get("amount")), order_id=order,
-                                    method=(v.get("method") or "Cash").lower(), note=v.get("note", ""))
+        for i, o in enumerate(rows):
+            is_sale = o["kind"] == "sales"
+            is_fert = str(o["product_type"]).lower() in ("fertilizer", "fertilizers")
 
-    def _apply_money(self, ids) -> None:
-        tbl = self.money_grid.table
-        r = tbl.currentRow()
-        if r < 0 and tbl.selectedItems():
-            r = tbl.selectedItems()[0].row()
-        row = self.money_grid.rows[r] if 0 <= r < len(self.money_grid.rows) else None
-        if row is None or row.get("removed"):
-            self.say("Click the money row you want to apply first.")
-            return
-        names = list(ids)
-        if not names:
-            self.say("There is no order to apply it to.")
-            return
-        pick, ok = QInputDialog.getItem(self, "Apply to an order", "Count it as a payment on which order?", names, 0,
-                                        False)
-        if not ok:
-            return
-        try:
-            OrderMoneyService.apply_to_order(row["id"], ids[pick])
-        except (ValueError, PermissionDenied) as e:
-            self.say(str(e))
-            return
-        self.say("Done - it now counts as a payment on that order.", bad=False)
-        self.reload()
+            # 1. Order #
+            it_no = QTableWidgetItem(o["order_no"])
+            f = it_no.font()
+            f.setBold(True)
+            it_no.setFont(f)
+            self.table.setItem(i, 0, it_no)
 
-    # ------------------------------------------------------------------ expenses of every order
-    def _build_expense_tab(self) -> None:
-        cols = [
-            {"key": "date", "label": "Date", "type": "date", "width": 110, "readonly": True},
-            {"key": "order", "label": "Order", "type": "text", "width": 120, "readonly": True},
-            {"key": "category", "label": "What for", "type": "text", "width": 150, "readonly": True},
-            {"key": "description", "label": "Details", "type": "text", "width": 240, "readonly": True, "stretch": True},
-            {"key": "amount", "label": "Amount (₦)", "type": "money", "width": 140, "readonly": True},
-            {"key": "charge", "label": "Charge", "type": "text", "width": 160, "readonly": True},
-        ]
-        exps = OrderMoneyService.list_expenses(self.kind, partner_id=self.partner_id)
-        rows = []
-        for e in exps:
-            voided = e["status"] == "voided"
-            rows.append({"id": e["id"], "removed": voided, "locked": True,
-                         "cells": {"date": e["date"].isoformat() if e["date"] else "", "order": e["order_no"],
-                                   "category": e["category"], "description": e["description"], "amount": e["amount"],
-                                   "charge": EXPENSE_CHARGE[0] if e["recoverable"] else EXPENSE_CHARGE[1]},
-                         "computed": {"back": money(e["recovered"]) if e["recoverable"] and not voided else "",
-                                      "left": money(e["left"]) if e["recoverable"] and not voided else
-                                      ("" if voided else "our cost"),
-                                      "state": e["state"].title()},
-                         "tip": ("Voided: " + e["void_reason"]) if voided else e["no"]})
-        live = [e for e in exps if e["status"] != "voided"]
-        totals = {"amount": money(sum(e["amount"] for e in live)), "back": money(sum(e["recovered"] for e in live)),
-                  "left": money(sum(e["left"] for e in live))}
-        grid = SheetGrid(
-            columns=cols, computed=[{"key": "back", "label": "Paid back", "width": 120},
-                                    {"key": "left", "label": "Still owed", "width": 120},
-                                    {"key": "state", "label": "State", "width": 140}],
-            first_edit_key="amount", allow_add=False, on_remove=lambda eid, reason: OrderMoneyService.void_expense(eid, reason),
-            reload=self.reload, notify=self.say,
-            hint="All expenses on this "+("company" if self.kind == "sales" else "supplier")+"'s orders. To add one, open the order and use its Expenses tab. "
-                 "When they pay some back, press the button above - it clears the oldest first.")
-        grid.set_rows(rows, totals)
-        self.btn_repay = QPushButton("They paid some back…")
-        self.btn_repay.clicked.connect(self._repay)
-        self._swap(self.slot_exp, self._with_buttons(grid, self.btn_repay))
-        self.exp_grid = grid
+            # 2. Date
+            self.table.setItem(i, 1, QTableWidgetItem(_day(o["created_at"])))
 
-    def _repay(self) -> None:
-        from apps.product_management_app.features.orders.dialogs.repayment_dialog import RepaymentDialog
-        owed = self.statement["to_recover"] if getattr(self, "statement", None) else 0.0
-        if owed <= 0.005:
-            self.say("Nothing is owed back to us - no expense is waiting to be repaid.", bad=False)
-            return
-        dlg = RepaymentDialog(owed, self, who=self.partner.get("name", "They"))
-        if dlg.exec_() != dlg.Accepted or not dlg.values:
-            return
-        try:
-            OrderMoneyService.record_recovery(dlg.values["amount"], kind=self.kind, partner_id=self.partner_id,
-                                              method=dlg.values["method"], note=dlg.values["note"])
-        except (ValueError, PermissionDenied) as e:
-            self.say(str(e))
-            return
-        self.say("Repayment recorded.", bad=False)
-        self.reload()
+            # 3. Activity
+            act_str = "Sale Order" if is_sale else "Purchase Order"
+            it_act = QTableWidgetItem(act_str)
+            it_act.setForeground(QColor("#059669" if is_sale else "#2563eb"))
+            self.table.setItem(i, 2, it_act)
 
-    # ------------------------------------------------------------------ small helpers
-    @staticmethod
-    def _with_buttons(grid: SheetGrid, *buttons: QPushButton) -> QWidget:
-        holder = QWidget()
-        lay = QVBoxLayout(holder)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
-        row = QHBoxLayout()
-        for b in buttons:
-            row.addWidget(b)
-        row.addStretch(1)
-        lay.addLayout(row)
-        grid.setMinimumHeight(260)
-        lay.addWidget(grid, 1)
-        return holder
+            # 4. Product & Quality
+            q_str = f" ({o['quality']})" if o.get("quality") else ""
+            self.table.setItem(i, 3, QTableWidgetItem(f"{o['product_name']}{q_str}"))
 
-    @staticmethod
-    def _swap(slot: QWidget, widget: QWidget) -> None:
-        lay = slot.layout()
-        while lay.count():
-            old = lay.takeAt(0).widget()
-            if old is not None:
-                old.hide()
-                old.setParent(None)
-                old.deleteLater()
-        lay.addWidget(widget)
+            # 5. Initial / Ordered
+            if is_fert:
+                init_str = f"{o['initial_qty_bags']:,.0f} bags @ {money(o['initial_price'])}/bag"
+            else:
+                init_str = f"{o['initial_weight_kg']:,.0f} kg ({o['initial_qty_bags']:,.0f} bags) @ {money(o['initial_price'])}/kg"
+            self.table.setItem(i, 4, QTableWidgetItem(init_str))
 
+            # 6. Company Verified
+            comp_p = o.get("company_price")
+            comp_w = o.get("company_weight_kg")
+            comp_b = o.get("company_qty_bags")
+            if comp_p is not None:
+                if is_fert:
+                    comp_str = f"{comp_b:,.0f} bags @ {money(comp_p)}/bag"
+                else:
+                    comp_str = f"{comp_w:,.0f} kg @ {money(comp_p)}/kg"
+            else:
+                comp_str = "— Awaiting —"
+            it_comp = QTableWidgetItem(comp_str)
+            if comp_p is None:
+                it_comp.setForeground(QColor("#94a3b8"))
+            self.table.setItem(i, 5, it_comp)
 
-def _safe_num(raw):
-    try:
-        return _num(raw)
-    except ValueError:
-        return None
+            # 7. Final Amount
+            amt_val = o.get("final_total_amount")
+            if amt_val is not None:
+                amt_str = money(amt_val)
+            else:
+                amt_str = f"{money(o.get('estimated_total', 0))} (est.)"
+            it_amt = QTableWidgetItem(amt_str)
+            it_amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(i, 6, it_amt)
+
+            # 8. Status
+            status_str = "Delivered" if o["status"] == "confirmed" else o["status"].replace("_", " ").title()
+            it_st = QTableWidgetItem(status_str)
+            it_st.setForeground(QColor(STATUS_COLOR.get(o["status"], "#0f172a")))
+            f_st = it_st.font()
+            f_st.setBold(True)
+            it_st.setFont(f_st)
+            self.table.setItem(i, 7, it_st)
+
+            # 9. Settlement
+            bal = o.get("balance")
+            paid = o.get("paid_amount", 0)
+            if o["status"] == "confirmed":
+                if bal is not None and bal <= 0.005:
+                    settle_str = "✓ Fully Paid"
+                    color_settle = "#059669"
+                elif paid > 0:
+                    settle_str = f"Part: {money(paid)} • Bal: {money(bal)}"
+                    color_settle = "#b45309"
+                else:
+                    settle_str = f"Unpaid: {money(bal)}"
+                    color_settle = "#dc2626"
+            else:
+                settle_str = f"Advance: {money(paid)}" if paid > 0 else "—"
+                color_settle = "#64748b"
+
+            it_settle = QTableWidgetItem(settle_str)
+            it_settle.setForeground(QColor(color_settle))
+            self.table.setItem(i, 8, it_settle)
+
+            # 10. Actions (CellWidget with row buttons)
+            cell = QWidget()
+            cell_lay = QHBoxLayout(cell)
+            cell_lay.setContentsMargins(4, 2, 4, 2)
+            cell_lay.setSpacing(6)
+
+            # Finalize / Edit button
+            btn_fin = QPushButton("Finalize / Edit")
+            btn_fin.setStyleSheet(
+                "background-color: #0f766e; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px;"
+            )
+            btn_fin.clicked.connect(lambda *_, row_data=o: self._on_finalize_clicked(row_data))
+            cell_lay.addWidget(btn_fin)
+
+            # Use Advance button (Point 9: only if system knows/detects there is recorded advance in profile)
+            has_adv_for_kind = has_adv_in if is_sale else has_adv_out
+            has_bal = bal is not None and bal > 0.005
+
+            if has_adv_for_kind and has_bal and o["status"] == "confirmed":
+                btn_adv = QPushButton("Use Advance")
+                btn_adv.setStyleSheet(
+                    "background-color: #0284c7; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 11px;"
+                )
+                btn_adv.clicked.connect(lambda *_, row_data=o: self._on_use_advance_clicked(row_data))
+                cell_lay.addWidget(btn_adv)
+
+            # Slip button
+            btn_slip = QPushButton("Slip")
+            btn_slip.setStyleSheet(
+                "background-color: #475569; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px;"
+            )
+            btn_slip.clicked.connect(lambda *_, row_data=o: self._on_slip_clicked(row_data))
+            cell_lay.addWidget(btn_slip)
+
+            # Delete button (for draft or cancelled orders)
+            if self.is_admin and o["status"] in ("draft", "cancelled"):
+                btn_del = QPushButton("Delete")
+                btn_del.setStyleSheet(
+                    "background-color: #ef4444; color: white; padding: 4px 6px; border-radius: 4px; font-size: 11px;"
+                )
+                btn_del.clicked.connect(lambda *_, row_data=o: self._on_delete_clicked(row_data))
+                cell_lay.addWidget(btn_del)
+
+            self.table.setCellWidget(i, 9, cell)
+
+    def _on_finalize_clicked(self, order_data: Dict[str, Any]):
+        dlg = FinalizeOrderDialog(order_data, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _on_use_advance_clicked(self, order_data: Dict[str, Any]):
+        dlg = ApplyAdvanceDialog(order_data, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _on_slip_clicked(self, order_data: Dict[str, Any]):
+        dlg = OrderSlipDialog(order_data, self.partner_name, parent=self)
+        dlg.exec_()
+
+    def _on_delete_clicked(self, order_data: Dict[str, Any]):
+        ok = QMessageBox.question(
+            self, "Delete Order",
+            f"Are you sure you want to permanently delete order {order_data['order_no']}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if ok == QMessageBox.Yes:
+            try:
+                OrderSheetService.delete_order(order_data["kind"], order_data["id"])
+                self.reload()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))

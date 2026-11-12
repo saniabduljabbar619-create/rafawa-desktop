@@ -16,7 +16,9 @@ from shared.auth.session import require_user_id
 from shared.uix.widgets.cards import avatar, money
 from apps.product_management_app.features.debt_center.sheet_style import FAINT, MUTED, RED, STYLE
 
-COLS = ["", "Name", "Contact person", "Phone", "Orders", "Open", "Last order", "Still owed"]
+from database.services.order_profile_service import OrderProfileService
+
+COLS = ["", "Name", "Contact person", "Phone", "Advance (IN)", "Advance (OUT)", "Orders", "Open", "Still owed"]
 
 
 class PartnerDialog(QDialog):
@@ -139,14 +141,36 @@ class PartnersPage(QWidget):
             lay.setContentsMargins(12, 0, 0, 0)
             lay.addWidget(avatar(r["name"], 34))
             self.table.setCellWidget(i, 0, holder)
-            vals = [r["name"], r["contact_person"], r["phone"], str(r["orders"]), str(r["active"]),
-                    r["last"].strftime("%d/%m/%Y") if r["last"] else "-", money(r["outstanding"])]
+
+            # Get advance balances for this partner
+            partner_info = OrderProfileService.resolve_partner(r["id"], self.kind)
+            adv_bals = OrderProfileService.get_advance_balances(partner_info["company_id"], partner_info["supplier_id"])
+            adv_in_str = money(adv_bals["advance_in"]) if adv_bals["advance_in"] > 0.005 else "—"
+            adv_out_str = money(adv_bals["advance_out"]) if adv_bals["advance_out"] > 0.005 else "—"
+
+            vals = [
+                r["name"],
+                r["contact_person"] or "—",
+                r["phone"] or "—",
+                adv_in_str,
+                adv_out_str,
+                str(r["orders"]),
+                str(r["active"]),
+                money(r["outstanding"]),
+            ]
             for c, v in enumerate(vals, start=1):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, r["id"])
-                if c >= 4:
+                if c in (4, 5):
+                    if v != "—":
+                        it.setForeground(QColor("#059669" if c == 4 else "#2563eb"))
+                        f = it.font()
+                        f.setBold(True)
+                        it.setFont(f)
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if c == 7:
+                elif c in (6, 7, 8):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if c == 8:
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)

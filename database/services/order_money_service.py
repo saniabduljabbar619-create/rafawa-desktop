@@ -141,8 +141,11 @@ class OrderMoneyService:
 
     @staticmethod
     @require_role(*INTAKE_ROLES)
-    def apply_to_order(money_id: int, order_id: int) -> int:
-        """Turn a money entry into a real payment on an order. Sales: money they gave us. Purchase: money we gave them."""
+    def apply_to_order(money_id: int, order_id: int, amount: Optional[float] = None) -> int:
+        """Turn a money entry into a real payment on an order. Sales: money they gave us. Purchase: money we gave them.
+        If amount is specified and less than the entry amount, splits the entry:
+        the applied portion becomes 'applied', and a new entry with the remainder stays 'completed'.
+        """
         with get_session() as s:
             r = s.get(OrderMoney, int(money_id))
             if r is None:
@@ -156,17 +159,92 @@ class OrderMoneyService:
             _o, owner = _order(s, r.kind, order_id)
             if owner != int(r.partner_id):
                 raise ValueError("That order belongs to someone else.")
-            amount, kind, partner = _f(r.amount), r.kind, int(r.partner_id)
+
+            entry_amount = _f(r.amount)
+            if amount is not None:
+                apply_amt = round(_f(amount), 2)
+                if apply_amt <= 0:
+                    raise ValueError("Amount to apply must be greater than zero.")
+                if apply_amt > entry_amount:
+                    raise ValueError(f"Cannot apply {apply_amt:,.2f}: only {entry_amount:,.2f} available in this advance.")
+            else:
+                apply_amt = entry_amount
+
+            remainder = round(entry_amount - apply_amt, 2)
+            kind, partner, method, note, entry_date = r.kind, int(r.partner_id), r.method, r.note, r.entry_date
+            uid = int(require_user_id())
+
         pid = OrderPaymentService.record_payment(
-            _pay_type(kind), int(order_id), amount, int(require_user_id()), method=r.method or "",
-            notes=f"From the money sheet (#{int(money_id)})", is_advance=True)
+            _pay_type(kind), int(order_id), apply_amt, uid, method=method or "",
+            notes=f"From advance (#{int(money_id)})" + (f" - {note}" if note else ""), is_advance=True)
+
         with get_session() as s:
             r = s.get(OrderMoney, int(money_id))
+            r.amount = apply_amt
             r.status, r.applied_payment_id, r.order_id = "applied", int(pid), int(order_id)
+
+            if remainder > 0.005:
+                rem_row = OrderMoney(
+                    kind=kind,
+                    partner_id=partner,
+                    order_id=None,
+                    direction=want,
+                    amount=remainder,
+                    method=method,
+                    note=f"Remaining advance balance from #{money_id}" + (f" ({note})" if note else ""),
+                    entry_date=entry_date,
+                    status="completed",
+                    created_by_user_id=uid
+                )
+                s.add(rem_row)
+                s.flush()
+                AuditService.record("order_money.split", "order_money", int(rem_row.id),
+                                    f"Remainder {remainder:,.2f} kept as available advance", session=s)
+
             AuditService.record("order_money.apply", "order_money", int(money_id),
-                                f"Applied {amount:,.2f} to order #{order_id}", session=s)
+                                f"Applied {apply_amt:,.2f} to order #{order_id}", session=s)
             s.commit()
         return int(pid)
+
+    @staticmethod
+    def get_available_advances(kind: str, partner_id: int, direction: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns all unapplied (status == 'completed') advances for this partner."""
+        _kind(kind)
+        with get_session() as s:
+            q = s.query(OrderMoney).filter(
+                OrderMoney.kind == kind,
+                OrderMoney.partner_id == int(partner_id),
+                OrderMoney.status == "completed"
+            )
+            if direction:
+                q = q.filter(OrderMoney.direction == direction.lower())
+            rows = q.order_by(OrderMoney.entry_date.asc(), OrderMoney.id.asc()).all()
+            return [
+                {
+                    "id": int(r.id),
+                    "kind": r.kind,
+                    "direction": r.direction,
+                    "amount": _f(r.amount),
+                    "method": r.method or "",
+                    "note": r.note or "",
+                    "entry_date": r.entry_date,
+                    "order_id": r.order_id,
+                }
+                for r in rows
+            ]
+
+    @staticmethod
+    def get_available_advance_balance(kind: str, partner_id: int, direction: str) -> float:
+        """Returns total sum of unapplied advances for this partner with given direction ('in' or 'out')."""
+        _kind(kind)
+        with get_session() as s:
+            total = s.query(func.coalesce(func.sum(OrderMoney.amount), 0)).filter(
+                OrderMoney.kind == kind,
+                OrderMoney.partner_id == int(partner_id),
+                OrderMoney.direction == direction.lower(),
+                OrderMoney.status == "completed"
+            ).scalar()
+            return float(total or 0.0)
 
     # ================================================================== expenses
     @staticmethod
