@@ -178,8 +178,6 @@ class PartnerProfilePage(QWidget):
         self.btn_filter_done = QPushButton("Finalized")
         self.btn_refresh = QPushButton("Refresh")
 
-        for b in (self.btn_filter_all, self.btn_filter_active, self.btn_filter_done, self.btn_filter_refresh):
-            pass
         filter_bar.addWidget(self.btn_filter_all)
         filter_bar.addWidget(self.btn_filter_active)
         filter_bar.addWidget(self.btn_filter_done)
