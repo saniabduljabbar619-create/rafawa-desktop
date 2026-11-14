@@ -46,7 +46,8 @@ class CustomerDirectoryService:
             balances = document_balances(s, "sale", [r[0] for r in sales])
 
             out: Dict[int, Dict[str, object]] = defaultdict(lambda: {
-                "receivable": 0.0, "deposit": 0.0, "sales_count": 0, "last_sale_at": None})
+                "receivable": 0.0, "deposit": 0.0, "advance_in": 0.0, "advance_out": 0.0,
+                "sales_count": 0, "last_sale_at": None})
             for sid, pid, created in sales:
                 row = out[int(pid)]
                 bal = balances.get(int(sid))
@@ -56,9 +57,8 @@ class CustomerDirectoryService:
                 if created and (row["last_sale_at"] is None or created > row["last_sale_at"]):
                     row["last_sale_at"] = created
 
-            # deposits: received money advances minus what has been paid back / applied
-            aq = s.query(Advance.id, Advance.party_id, Advance.amount).filter(
-                Advance.direction == "received", Advance.advance_type == "money",
+            # advances: received (IN) and given (OUT) minus what has been paid back / allocated
+            aq = s.query(Advance.id, Advance.party_id, Advance.direction, Advance.amount).filter(
                 Advance.status == "completed")
             if ids is not None:
                 aq = aq.filter(Advance.party_id.in_(ids))
@@ -77,13 +77,26 @@ class CustomerDirectoryService:
                                        .filter(AdvanceAllocation.advance_id.in_(chunk))
                                        .group_by(AdvanceAllocation.advance_id)):
                         used[int(aid)] += _f(total)
-                for aid, pid, amount in advances:
-                    out[int(pid)]["deposit"] += max(_f(amount) - used.get(int(aid), 0.0), 0.0)
+                for aid, pid, direction, amount in advances:
+                    rem = max(_f(amount) - used.get(int(aid), 0.0), 0.0)
+                    if rem > 0.005:
+                        if direction == "received":
+                            out[int(pid)]["advance_in"] += rem
+                            out[int(pid)]["deposit"] += rem
+                        elif direction == "given":
+                            out[int(pid)]["advance_out"] += rem
         return dict(out)
 
     @staticmethod
     def empty() -> Dict[str, object]:
-        return {"receivable": 0.0, "deposit": 0.0, "sales_count": 0, "last_sale_at": None}
+        return {
+            "receivable": 0.0,
+            "deposit": 0.0,
+            "advance_in": 0.0,
+            "advance_out": 0.0,
+            "sales_count": 0,
+            "last_sale_at": None,
+        }
 
     @staticmethod
     def days_since(when: Optional[datetime], now: Optional[datetime] = None) -> Optional[int]:

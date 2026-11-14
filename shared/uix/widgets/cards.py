@@ -17,6 +17,7 @@ TONES = {
     "red": ("#fef2f2", "#b91c1c", "#fecaca"),
     "amber": ("#fffbeb", "#b45309", "#fde68a"),
     "blue": ("#eff6ff", "#1d4ed8", "#bfdbfe"),
+    "purple": ("#f5f3ff", "#7c3aed", "#ddd6fe"),
     "grey": ("#f3f4f6", "#4b5563", "#e5e7eb"),
 }
 

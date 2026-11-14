@@ -14,8 +14,14 @@ from shared.uix.widgets.dialogs import CustomerFormDialog
 from apps.product_management_app.features.profiling.views.customer_profile import CustomerProfileView
 from shared.uix.layout.scrollable import make_scrollable_page
 
-COLS = ["ID", "Customer", "Phone", "Last Sale", "Owes Us", "Deposit Held", "Status"]
-FILTERS = [("all", "All"), ("owing", "Owing"), ("deposit", "Has Deposit"), ("inactive", "Inactive")]
+COLS = ["ID", "Customer", "Phone", "Last Sale", "Customer Debt", "Advance IN", "Advance OUT", "Status"]
+FILTERS = [
+    ("all", "All"),
+    ("debt", "Has Debt"),
+    ("adv_in", "Has Advance IN"),
+    ("adv_out", "Has Advance OUT"),
+    ("inactive", "Inactive"),
+]
 
 _TABLE_QSS = """
 QTableWidget#CustomerTable { background:#ffffff; border:1px solid #e5e7eb; border-radius:12px;
@@ -69,12 +75,18 @@ class CustomersListView(QWidget):
 
         # KPI cards
         kpis = QHBoxLayout()
-        kpis.setSpacing(12)
+        kpis.setSpacing(10)
         self.kpi_total = KpiCard("Customers", "0", "registered accounts", "blue")
-        self.kpi_owing = KpiCard("Owed to us", "0.00", "across 0 customers", "red")
-        self.kpi_deposit = KpiCard("Deposits held", "0.00", "customer advances", "green")
-        self.kpi_active = KpiCard("Active", "0", "traded in the last 30 days", "amber")
-        for k in (self.kpi_total, self.kpi_owing, self.kpi_deposit, self.kpi_active):
+        self.kpi_debt = KpiCard("Customer Debt", "0.00", "unpaid sales", "red")
+        self.kpi_adv_in = KpiCard("Advance IN", "0.00", "deposits held", "green")
+        self.kpi_adv_out = KpiCard("Advance OUT", "0.00", "advances given out", "purple")
+        self.kpi_active = KpiCard("Active", "0", "traded in last 30 days", "amber")
+
+        # Keep legacy aliases for any existing tests
+        self.kpi_owing = self.kpi_debt
+        self.kpi_deposit = self.kpi_adv_in
+
+        for k in (self.kpi_total, self.kpi_debt, self.kpi_adv_in, self.kpi_adv_out, self.kpi_active):
             kpis.addWidget(k, 1)
         layout.addLayout(kpis)
 
@@ -114,12 +126,12 @@ class CustomersListView(QWidget):
         self.table.setColumnWidth(0, 56)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
         # amounts and status size to their text, so no digit of a balance is ever cut off
-        for col in (4, 5, 6):
+        for col in (4, 5, 6, 7):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         hh.setMinimumSectionSize(90)
         self.table.setItemDelegateForColumn(1, NameDelegate(self.table))
         chips = ChipDelegate(self.table)
-        for col in (4, 5, 6):
+        for col in (4, 5, 6, 7):
             self.table.setItemDelegateForColumn(col, chips)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         layout.addWidget(self.table, 1)
@@ -196,20 +208,29 @@ class CustomersListView(QWidget):
             if q and q not in f"{c.full_name} {c.phone} {c.email}".lower():
                 return False
             sm = summary(c)
-            if mode == "owing":
+            if mode in ("debt", "owing"):
                 return sm["receivable"] > 0.005
-            if mode == "deposit":
-                return sm["deposit"] > 0.005
+            if mode in ("adv_in", "deposit"):
+                return sm.get("advance_in", sm.get("deposit", 0.0)) > 0.005
+            if mode == "adv_out":
+                return sm.get("advance_out", 0.0) > 0.005
             if mode == "inactive":
                 return str(c.status).lower() != "active"
             return True
 
         # headline numbers cover everyone, not just the filtered rows
-        owing_n = sum(1 for c in all_c if summary(c)["receivable"] > 0.005)
+        tot_debt = sum(summary(c)["receivable"] for c in all_c)
+        tot_adv_in = sum(summary(c).get("advance_in", summary(c).get("deposit", 0.0)) for c in all_c)
+        tot_adv_out = sum(summary(c).get("advance_out", 0.0) for c in all_c)
+
+        debt_n = sum(1 for c in all_c if summary(c)["receivable"] > 0.005)
+        adv_in_n = sum(1 for c in all_c if summary(c).get("advance_in", summary(c).get("deposit", 0.0)) > 0.005)
+        adv_out_n = sum(1 for c in all_c if summary(c).get("advance_out", 0.0) > 0.005)
+
         self.kpi_total.set(str(len(all_c)), f"{sum(1 for c in all_c if str(c.status).lower() == 'active')} marked active")
-        self.kpi_owing.set(money(sum(summary(c)["receivable"] for c in all_c)),
-                           f"across {owing_n} customer{'s' if owing_n != 1 else ''}")
-        self.kpi_deposit.set(money(sum(summary(c)["deposit"] for c in all_c)), "customer advances not yet used")
+        self.kpi_debt.set(money(tot_debt), f"across {debt_n} customer{'s' if debt_n != 1 else ''}")
+        self.kpi_adv_in.set(money(tot_adv_in), f"across {adv_in_n} customer{'s' if adv_in_n != 1 else ''}")
+        self.kpi_adv_out.set(money(tot_adv_out), f"across {adv_out_n} customer{'s' if adv_out_n != 1 else ''}")
         recent = 0
         for c in all_c:
             d = CustomerDirectoryService.days_since(summary(c)["last_sale_at"])
@@ -242,12 +263,15 @@ class CustomersListView(QWidget):
                     last.setForeground(Qt.gray)
                 self.table.setItem(row, 3, last)
 
-                owe, dep = sm["receivable"], sm["deposit"]
+                owe = sm["receivable"]
+                adv_in = sm.get("advance_in", sm.get("deposit", 0.0))
+                adv_out = sm.get("advance_out", 0.0)
                 active = str(c.status).lower() == "active"
                 for col, text, tone in (
                     (4, money(owe) if owe > 0.005 else "Settled", "red" if owe > 0.005 else "grey"),
-                    (5, money(dep) if dep > 0.005 else "-", "green" if dep > 0.005 else "grey"),
-                    (6, "Active" if active else str(c.status).title(), "green" if active else "amber"),
+                    (5, money(adv_in) if adv_in > 0.005 else "-", "green" if adv_in > 0.005 else "grey"),
+                    (6, money(adv_out) if adv_out > 0.005 else "-", "purple" if adv_out > 0.005 else "grey"),
+                    (7, "Active" if active else str(c.status).title(), "green" if active else "amber"),
                 ):
                     it = QTableWidgetItem(text)
                     it.setData(ROLE_TONE, tone)
