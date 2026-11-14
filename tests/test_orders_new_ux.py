@@ -181,3 +181,68 @@ def test_advance_split_and_purchase_order_flow():
         ).first()
         assert rem_adv is not None
         assert float(rem_adv.amount) == 300000.0
+
+
+def test_edit_activity_and_partner_directory_summary():
+    comp_id = CompanyService.create("Golden Sugar Co", ADMIN_ID, phone="08022334455")
+    so_id = OrderProfileService.create_activity(
+        kind="sales",
+        partner_id=comp_id,
+        product_id=CROP_ID,
+        quality="Standard Yellow Maize",
+        bags=100,
+        weight_kg=5000.0,
+        price=400.0,
+        dispatch_now=False,
+    )
+    assert so_id > 0
+
+    # 1. Edit initial specs: change price, bags, weight, quality
+    res = OrderProfileService.edit_activity(
+        kind="sales",
+        order_id=so_id,
+        product_id=CROP_ID,
+        quality="White Maize Grade 1",
+        initial_bags=120,
+        initial_weight_kg=6000.0,
+        initial_price=420.0,
+        notes="Updated order specification",
+    )
+    assert res["ok"] is True
+
+    orders = OrderProfileService.list_partner_orders(company_id=comp_id, supplier_id=None)
+    o = next(x for x in orders if x["id"] == so_id)
+    assert o["quality"] == "White Maize Grade 1"
+    assert o["initial_qty_bags"] == 120
+    assert o["initial_weight_kg"] == 6000.0
+    assert o["initial_price"] == 420.0
+
+    # 2. Finalize and edit verified specs
+    res_fin = OrderProfileService.edit_activity(
+        kind="sales",
+        order_id=so_id,
+        company_price=415.0,
+        company_weight_kg=6000.0,
+        company_qty_bags=120,
+        accepted_qty=5900.0,
+        rejected_qty=100.0,
+    )
+    assert res_fin["ok"] is True
+
+    orders2 = OrderProfileService.list_partner_orders(company_id=comp_id, supplier_id=None)
+    o2 = next(x for x in orders2 if x["id"] == so_id)
+    assert o2["company_price"] == 415.0
+    assert o2["accepted_weight_kg"] == 5900.0
+    assert o2["rejected_weight_kg"] == 100.0
+    assert o2["final_total_amount"] == round(5900.0 * 415.0, 2)
+
+    # 3. Test Partner Directory summary
+    summary = OrderProfileService.all_partners_summary(kind="all")
+    assert len(summary) > 0
+    p = next((x for x in summary if x["name"] == "Golden Sugar Co"), None)
+    assert p is not None
+    assert p["orders"] >= 1
+    assert "advance_in" in p
+    assert "advance_out" in p
+    assert "outstanding" in p
+

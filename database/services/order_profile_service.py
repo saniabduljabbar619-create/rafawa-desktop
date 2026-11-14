@@ -14,6 +14,7 @@ from database.models.purchase_order_supplier import PurchaseOrderSupplier
 from database.models.sales_order import SalesOrder
 from database.models.sales_order_item import SalesOrderItem
 from database.models.order_money import OrderMoney
+from database.models.stock_movement import StockMovement
 from database.services.audit_service import AuditService
 from database.services.company_service import CompanyService
 from database.services.order_hub_service import OrderHubService
@@ -172,6 +173,101 @@ class OrderProfileService:
             "advance_out": adv_out,
             "total_advance": adv_in + adv_out,
         }
+
+    @staticmethod
+    def all_partners_summary(kind: str = "all", search: str = "") -> List[Dict[str, Any]]:
+        """
+        Retrieves all partner summaries (Companies & Suppliers) in unified batch queries:
+        Includes orders count, active orders, outstanding debt/balance, Advance IN, and Advance OUT.
+        """
+        from collections import defaultdict
+        OrderHubService.sync_partners()
+        with get_session() as s:
+            companies = s.query(Company).filter(Company.is_active == True).order_by(Company.name).all()  # noqa: E712
+            suppliers = s.query(PurchaseOrderSupplier).filter(PurchaseOrderSupplier.is_active == True).order_by(PurchaseOrderSupplier.name).all()  # noqa: E712
+
+            supp_by_name = {p.name.strip().lower(): p for p in suppliers}
+            comp_by_name = {c.name.strip().lower(): c for c in companies}
+
+            adv_bals = defaultdict(float)
+            for m_kind, m_pid, m_dir, m_amt in s.query(
+                OrderMoney.kind, OrderMoney.partner_id, OrderMoney.direction,
+                func.coalesce(func.sum(OrderMoney.amount), 0)
+            ).filter(
+                OrderMoney.status == "completed"
+            ).group_by(OrderMoney.kind, OrderMoney.partner_id, OrderMoney.direction).all():
+                adv_bals[(m_kind, int(m_pid), m_dir)] = float(m_amt or 0.0)
+
+            rows = OrderHubService.board(limit=5000)
+            orders_by_partner = defaultdict(list)
+            for r in rows:
+                orders_by_partner[r["partner"].strip().lower()].append(r)
+
+            result = []
+            seen_names = set()
+
+            if kind == "sales":
+                partners_list = [
+                    ("sales", c.id, c.name, c.contact_person, c.phone, c.address, c.id,
+                     supp_by_name[c.name.strip().lower()].id if c.name.strip().lower() in supp_by_name else None)
+                    for c in companies
+                ]
+            elif kind == "purchase":
+                partners_list = [
+                    ("purchase", p.id, p.name, p.contact_person, p.phone, p.address,
+                     comp_by_name[p.name.strip().lower()].id if p.name.strip().lower() in comp_by_name else None,
+                     p.id)
+                    for p in suppliers
+                ]
+            else:
+                partners_list = []
+                for c in companies:
+                    c_name_k = c.name.strip().lower()
+                    seen_names.add(c_name_k)
+                    supp_id = supp_by_name[c_name_k].id if c_name_k in supp_by_name else None
+                    partners_list.append(("sales", c.id, c.name, c.contact_person, c.phone, c.address, c.id, supp_id))
+                for p in suppliers:
+                    p_name_k = p.name.strip().lower()
+                    if p_name_k not in seen_names:
+                        seen_names.add(p_name_k)
+                        partners_list.append(("purchase", p.id, p.name, p.contact_person, p.phone, p.address, None, p.id))
+
+            term = (search or "").strip().lower()
+            for p_kind, p_id, p_name, contact, phone, address, comp_id, supp_id in partners_list:
+                if term and term not in f"{p_name} {contact or ''} {phone or ''}".lower():
+                    continue
+
+                p_orders = orders_by_partner.get(p_name.strip().lower(), [])
+                tot_orders = len(p_orders)
+                active_orders = sum(1 for o in p_orders if o["status"] in ("draft", "in_transit"))
+                outstanding = round(sum(_f(o["balance"]) for o in p_orders if o.get("balance") is not None and _f(o["balance"]) > 0.005), 2)
+
+                adv_in = adv_bals.get(("sales", comp_id, "in"), 0.0) if comp_id else 0.0
+                adv_out = adv_bals.get(("purchase", supp_id, "out"), 0.0) if supp_id else 0.0
+
+                badge = "Company" if p_kind == "sales" and not supp_id else ("Supplier" if p_kind == "purchase" and not comp_id else "Partner")
+                if comp_id and supp_id:
+                    badge = "Company & Supplier"
+
+                result.append({
+                    "id": p_id,
+                    "kind": p_kind,
+                    "company_id": comp_id,
+                    "supplier_id": supp_id,
+                    "name": p_name,
+                    "badge": badge,
+                    "contact_person": contact or "",
+                    "phone": phone or "",
+                    "address": address or "",
+                    "orders": tot_orders,
+                    "active": active_orders,
+                    "outstanding": outstanding,
+                    "advance_in": adv_in,
+                    "advance_out": adv_out,
+                })
+
+            result.sort(key=lambda r: (-r["outstanding"], -r["active"], r["name"].lower()))
+            return result
 
     @staticmethod
     @require_role(*INTAKE_ROLES)
@@ -548,3 +644,176 @@ class OrderProfileService:
             note=note,
             entry_date=entry_date or date.today(),
         )
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def edit_activity(
+        kind: str,
+        order_id: int,
+        product_id: Optional[int] = None,
+        quality: Optional[str] = None,
+        initial_bags: Optional[float] = None,
+        initial_weight_kg: Optional[float] = None,
+        initial_price: Optional[float] = None,
+        expected_delivery=None,
+        notes: Optional[str] = None,
+        company_price: Optional[float] = None,
+        company_weight_kg: Optional[float] = None,
+        company_qty_bags: Optional[float] = None,
+        accepted_qty: Optional[float] = None,
+        rejected_qty: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Allows editing any order activity parameters:
+        - Product, Quality, Initial Quantity (Bags/Kg), Initial Price
+        - Expected delivery date & notes
+        - Company verified price, Company Weight/Bags, Accepted/Rejected quantities
+        - Recalculates line amount, order totals, and syncs StockMovement where applicable.
+        """
+        kind = "sales" if str(kind).lower() in ("sales", "sale") else "purchase"
+        uid = int(require_user_id())
+
+        with get_session() as s:
+            if kind == "sales":
+                order = s.get(SalesOrder, int(order_id))
+            else:
+                order = s.get(PurchaseOrder, int(order_id))
+
+            if not order:
+                raise ValueError("Order not found.")
+
+            if not order.items:
+                raise ValueError("Order has no product line to edit.")
+
+            item = order.items[0]
+
+            if expected_delivery is not None:
+                order.expected_delivery_date = expected_delivery
+            if notes is not None:
+                order.notes = (notes or "").strip()
+
+            if product_id is not None and int(product_id) > 0:
+                prod = s.get(Product, int(product_id))
+                if not prod:
+                    raise ValueError(f"Product #{product_id} not found.")
+                item.product_id = int(prod.id)
+                item.product_type_snapshot = "fertilizer" if _is_fert(prod.product_type) else "crops"
+
+            is_fert = _is_fert(item.product_type_snapshot)
+
+            if quality is not None:
+                item.notes = (quality or "").strip() or None
+
+            # Initial / Ordered specs
+            if initial_bags is not None:
+                b = _f(initial_bags)
+                if kind == "sales":
+                    item.dispatched_qty_bags = b
+                else:
+                    item.ordered_qty_bags = b
+
+            if initial_weight_kg is not None:
+                w = 0.0 if is_fert else _f(initial_weight_kg)
+                if kind == "sales":
+                    item.dispatched_weight_kg = w
+                else:
+                    item.ordered_weight_kg = w
+
+            if initial_price is not None:
+                p = _f(initial_price)
+                if kind == "sales":
+                    item.my_price = p
+                else:
+                    item.expected_price = p
+
+            # Sync StockMovement if dispatched in_transit
+            if kind == "sales":
+                movements = (
+                    s.query(StockMovement)
+                    .filter(
+                        StockMovement.reference_type == "sales_order_item",
+                        StockMovement.reference_id == item.id,
+                    )
+                    .all()
+                )
+                for sm in movements:
+                    sm.product_id = item.product_id
+                    sm.qty_bags = float(item.dispatched_qty_bags)
+                    sm.total_weight_kg = 0.0 if is_fert else float(item.dispatched_weight_kg)
+                    sm.unit_rate = float(item.my_price)
+
+            # Company / Confirmed specs
+            if company_price is not None:
+                cp = _f(company_price)
+                if kind == "sales":
+                    item.company_price = cp
+                else:
+                    item.received_price = cp
+
+            if company_qty_bags is not None:
+                cb = _f(company_qty_bags)
+                if kind == "sales":
+                    item.company_qty_bags = cb
+                else:
+                    item.received_qty_bags = cb
+
+            if company_weight_kg is not None:
+                cw = 0.0 if is_fert else _f(company_weight_kg)
+                if kind == "sales":
+                    item.company_weight_kg = cw
+                else:
+                    item.received_weight_kg = cw
+
+            if accepted_qty is not None:
+                aq = _f(accepted_qty)
+                if is_fert:
+                    item.accepted_qty_bags = aq
+                else:
+                    item.accepted_weight_kg = aq
+
+            if rejected_qty is not None:
+                rq = _f(rejected_qty)
+                if is_fert:
+                    item.rejected_qty_bags = rq
+                else:
+                    item.rejected_weight_kg = rq
+
+            # Recalculate totals if confirmed or if company fields are populated
+            cur_cp = item.company_price if kind == "sales" else item.received_price
+            cur_acc = item.accepted_qty_bags if is_fert else item.accepted_weight_kg
+
+            if order.status == "confirmed" or (cur_cp is not None and cur_acc is not None):
+                eff_p = cur_cp if (cur_cp is not None and cur_cp > 0) else (item.my_price if kind == "sales" else item.expected_price)
+                eff_q = cur_acc if cur_acc is not None else (item.dispatched_qty_bags if is_fert else item.dispatched_weight_kg if kind == "sales" else item.ordered_qty_bags if is_fert else item.ordered_weight_kg)
+                final_val = round(_f(eff_q) * _f(eff_p), 2)
+                item.final_line_amount = final_val
+                order.final_total_amount = final_val
+                order.payment_due = final_val
+
+                # If purchase order confirmed, sync stock movement for intake
+                if kind == "purchase" and order.status == "confirmed":
+                    po_movs = (
+                        s.query(StockMovement)
+                        .filter(
+                            StockMovement.reference_type == "purchase_order_item",
+                            StockMovement.reference_id == item.id,
+                        )
+                        .all()
+                    )
+                    for sm in po_movs:
+                        sm.product_id = item.product_id
+                        sm.qty_bags = float(item.accepted_qty_bags or 0.0) if is_fert else 0.0
+                        sm.total_weight_kg = 0.0 if is_fert else float(item.accepted_weight_kg or 0.0)
+                        sm.unit_rate = float(eff_p)
+
+            s.commit()
+
+            AuditService.record(
+                f"{kind}_order.edit",
+                f"{kind}_order",
+                int(order_id),
+                f"Edited {kind} order specs (Price/Qty/Bags/Kg)",
+                session=s,
+            )
+
+        return {"ok": True, "order_id": int(order_id)}

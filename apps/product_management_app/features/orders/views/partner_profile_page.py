@@ -21,6 +21,7 @@ from PySide2.QtWidgets import (
 )
 
 from apps.product_management_app.features.orders.dialogs.apply_advance_dialog import ApplyAdvanceDialog
+from apps.product_management_app.features.orders.dialogs.edit_activity_dialog import EditActivityDialog
 from apps.product_management_app.features.orders.dialogs.finalize_order_dialog import FinalizeOrderDialog
 from apps.product_management_app.features.orders.dialogs.new_activity_dialog import NewActivityDialog
 from apps.product_management_app.features.orders.dialogs.order_slip_dialog import OrderSlipDialog
@@ -272,6 +273,7 @@ class PartnerProfilePage(QWidget):
         )
         ol.addWidget(self.order_detail_box)
         self.table.currentCellChanged.connect(self._show_order_detail)
+        self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
 
         self.tabs.addTab(tab_orders, "Orders & Activities")
 
@@ -569,13 +571,22 @@ class PartnerProfilePage(QWidget):
             cell_lay.setContentsMargins(4, 2, 4, 2)
             cell_lay.setSpacing(6)
 
-            # Finalize / Edit button
-            btn_fin = QPushButton("Finalize / Edit")
-            btn_fin.setStyleSheet(
-                "background-color: #0f766e; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
+            # Edit button (always available to edit product, quality, price, bags, kg, expected date, notes)
+            btn_edit = QPushButton("Edit")
+            btn_edit.setStyleSheet(
+                "background-color: #334155; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
             )
-            btn_fin.clicked.connect(lambda *_, row_data=o: self._on_finalize_clicked(row_data))
-            cell_lay.addWidget(btn_fin)
+            btn_edit.clicked.connect(lambda *_, row_data=o: self._on_edit_clicked(row_data))
+            cell_lay.addWidget(btn_edit)
+
+            # Finalize button (for draft or in_transit orders awaiting company verification)
+            if o["status"] != "confirmed":
+                btn_fin = QPushButton("Finalize")
+                btn_fin.setStyleSheet(
+                    "background-color: #0f766e; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
+                )
+                btn_fin.clicked.connect(lambda *_, row_data=o: self._on_finalize_clicked(row_data))
+                cell_lay.addWidget(btn_fin)
 
             # Use Advance button (Point 9: only if system knows/detects there is recorded advance in profile)
             has_adv_for_kind = has_adv_in if is_sale else has_adv_out
@@ -641,6 +652,15 @@ class PartnerProfilePage(QWidget):
                 f"{res_s}  |  Paid: {money(o['paid_amount'])}  |  Balance: {money(o['balance']) if o['balance'] is not None else '-'}\n"
                 f"{notes_s}"
             )
+
+    def _on_table_double_clicked(self, row: int, _col: int):
+        if 0 <= row < len(self._orders):
+            self._on_edit_clicked(self._orders[row])
+
+    def _on_edit_clicked(self, order_data: Dict[str, Any]):
+        dlg = EditActivityDialog(order_data, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
 
     def _on_finalize_clicked(self, order_data: Dict[str, Any]):
         dlg = FinalizeOrderDialog(order_data, self.partner_name, parent=self)

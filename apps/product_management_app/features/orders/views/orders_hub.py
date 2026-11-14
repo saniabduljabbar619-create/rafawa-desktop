@@ -188,19 +188,33 @@ class OrdersHubView(QWidget):
             pass
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ---- the header: only on the home page (deeper pages need the room)
+        # ---- Top Navigator: Partner Directory vs All Orders Board
+        self.nav_bar = QWidget()
+        nav_l = QHBoxLayout(self.nav_bar)
+        nav_l.setContentsMargins(16, 10, 16, 0)
+        nav_l.setSpacing(10)
+
+        self.nav_seg = Segmented([
+            ("partners", "Partner Directory (Companies & Suppliers)"),
+            ("board", "All Orders Board / History"),
+        ])
+        nav_l.addWidget(self.nav_seg)
+        nav_l.addStretch(1)
+        root.addWidget(self.nav_bar)
+
+        # ---- the legacy header and cards (hidden on directory to avoid duplication, retained for tests)
         self.header = QWidget()
         hl = QVBoxLayout(self.header)
-        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setContentsMargins(16, 10, 16, 10)
         hl.setSpacing(10)
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        t = QLabel("Orders")
+        t = QLabel("Orders Board")
         t.setObjectName("Title")
-        s = QLabel("Sell goods to a company, or buy goods from a supplier. Open an order to see exactly what to do next.")
+        s = QLabel("Cross-counterparty tracking of all sales and purchase orders.")
         s.setWordWrap(True)
         s.setStyleSheet("color:#6b7280; font-size:12px;")
         titles.addWidget(t)
@@ -215,8 +229,8 @@ class OrdersHubView(QWidget):
         self.btn_partners = QPushButton("Companies and suppliers")
         self.btn_partners.setToolTip("The people orders are made for - open one to see all their orders")
         for b in (self.btn_new_sales, self.btn_new_purchase):
-            b.setMinimumHeight(42)
-        self.btn_partners.setMinimumHeight(42)
+            b.setMinimumHeight(38)
+        self.btn_partners.setMinimumHeight(38)
         for b in (self.btn_new_sales, self.btn_new_purchase, self.btn_partners):
             actions.addWidget(b)
         hl.addLayout(actions)
@@ -228,33 +242,51 @@ class OrdersHubView(QWidget):
         for k in (self.kpi_open, self.kpi_owed, self.kpi_owe):
             kp.addWidget(k)
         hl.addLayout(kp)
+        self.header.setVisible(False)
         root.addWidget(self.header)
 
-        # ---- partners pages carry a way back
+        # ---- partners pages carry a way back (for deep navigation compatibility)
         self.tabs_row = QWidget()
         row = QHBoxLayout(self.tabs_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.btn_home = QPushButton("<  Back to orders")
+        row.setContentsMargins(16, 6, 16, 6)
+        self.btn_home = QPushButton("<  Back to partners")
         self.tabs = Segmented(PARTNER_TABS, default_first=False)
         row.addWidget(self.btn_home)
         row.addWidget(self.tabs)
         row.addStretch(1)
+        self.tabs_row.setVisible(False)
         root.addWidget(self.tabs_row)
         self._trail = []
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
+
+        # 1. Partner Directory (First landing!)
+        from apps.product_management_app.features.orders.views.partners_directory_view import PartnersDirectoryView
+        self.directory = PartnersDirectoryView(is_admin=self.is_admin)
+        self.directory.open_partner.connect(self.open_profile)
+        self.stack.addWidget(self.directory)
+
+        # 2. Board
         self.board = OrdersBoard(self)
         self.stack.addWidget(self.board)
-        self._pages = {"board": self.board}
+
+        self._pages = {
+            "partners": self.directory,
+            "board": self.board,
+        }
+
+        self.nav_seg.changed.connect(self.show_tab)
         self.tabs.changed.connect(self.show_tab)
-        self.btn_home.clicked.connect(lambda: self.show_tab("board"))
+        self.btn_home.clicked.connect(lambda: self.show_tab("partners"))
         self.btn_new_sales.clicked.connect(lambda: self.new_order("sales"))
         self.btn_new_purchase.clicked.connect(lambda: self.new_order("purchase"))
-        self.btn_partners.clicked.connect(lambda: self.show_tab("sales"))
+        self.btn_partners.clicked.connect(lambda: self.show_tab("partners"))
         self.btn_new_sales.setVisible(self.is_admin)
         self.btn_new_purchase.setVisible(self.is_admin)
-        self.show_tab("board")
+
+        # Default first navigation: Partners Directory!
+        self.show_tab("partners")
 
     def _page(self, key: str):
         if key not in self._pages:              # built on first visit
@@ -267,19 +299,24 @@ class OrdersHubView(QWidget):
 
     def show_tab(self, key: str) -> None:
         self._close_deep_pages()
-        home = key == "board"
         if key in ("sales", "purchase"):
-            self.tabs.set_key(key)
-        else:
-            self.tabs.clear()
+            self.directory.type_seg.set_key(key)
+            self.directory.refresh()
+            key = "partners"
+
+        self.nav_seg.set_key(key if key in ("partners", "board") else "partners")
         page = self._page(key)
         if hasattr(page, "refresh"):
             page.refresh()
-        if home:
+        if key == "board":
             self.board.reload()
+            self.header.setVisible(True)
+        else:
+            self.header.setVisible(False)
+
         self.stack.setCurrentWidget(page)
-        self.header.setVisible(home)
-        self.tabs_row.setVisible(not home)
+        self.nav_bar.setVisible(key in ("partners", "board"))
+        self.tabs_row.setVisible(False)
         self.refresh_kpis()
 
     # ---------------------------------------------------------------- starting an order
