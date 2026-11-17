@@ -224,7 +224,7 @@ class PurchasePaymentDialog(QDialog):
 
                 wt = weigh_tickets.get(int(p.id))
                 weighed_str = wt.created_at.strftime("%Y-%m-%d %H:%M") if wt and wt.created_at else "-"
-                ticket_str = wt.ticket_no or (f"WT-{wt.id:05d}" if wt else "") or "-"
+                ticket_str = (wt.ticket_no or f"WT-{wt.id:05d}") if wt else "-"
                 booked_str = str(p.completed_at)[:19] if p.completed_at else "-"
 
                 cols = [

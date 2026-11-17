@@ -509,7 +509,7 @@ class PartyLedgerService:
 
                 wt = weigh_tickets.get(pid)
                 weighed_at = wt.created_at if wt else None
-                ticket_no = wt.ticket_no or (f"WT-{wt.id:05d}" if wt else "")
+                ticket_no = (wt.ticket_no or f"WT-{wt.id:05d}") if wt else ""
                 weighed_tag = f" • Weighed: {wt.created_at.strftime('%Y-%m-%d')} ({ticket_no})" if wt else ""
 
                 rows.append({
@@ -957,7 +957,7 @@ class PartyLedgerService:
                 rows.append({
                     "dt": r[0],
                     "weighed_at": wt.created_at if wt else None,
-                    "ticket_no": wt.ticket_no or (f"WT-{wt.id:05d}" if wt else ""),
+                    "ticket_no": (wt.ticket_no or f"WT-{wt.id:05d}") if wt else "",
                     "product": r[1],
                     "type": "purchase",
                     "reference": f"PUR-{r[6]}",
