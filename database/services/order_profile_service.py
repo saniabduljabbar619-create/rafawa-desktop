@@ -557,6 +557,7 @@ class OrderProfileService:
             item_id = int(item.id)
             is_fert = _is_fert(item.product_type_snapshot)
             partner_id = int(order.buyer_company_id if kind == "sales" else order.supplier_id)
+            extra_items = list(order.items[1:])
 
         company_price = _f(company_price)
         if company_price <= 0:
@@ -581,34 +582,61 @@ class OrderProfileService:
             acc_qty = max(0.0, rcv_qty - rej_qty)
 
         word = "company" if kind == "sales" else "received"
-        conf = {
+        confs = [{
             "item_id": item_id,
             f"{word}_price": company_price,
             f"{word}_qty_bags" if is_fert else f"{word}_weight_kg": rcv_qty,
             f"accepted_qty_bags" if is_fert else f"accepted_weight_kg": acc_qty,
             f"rejected_qty_bags" if is_fert else f"rejected_weight_kg": rej_qty,
-        }
+        }]
+
+        # If this order was originally created with multiple lines, include them so confirm() succeeds
+        for ex in extra_items:
+            ex_fert = _is_fert(ex.product_type_snapshot)
+            ex_price_attr = f"{word}_price"
+            ex_init_price_attr = "my_price" if kind == "sales" else "expected_price"
+            ex_p = _f(getattr(ex, ex_price_attr, None)) or _f(getattr(ex, ex_init_price_attr, 0))
+            if ex_fert:
+                ex_q = _f(getattr(ex, f"{word}_qty_bags", None)) or _f(
+                    ex.dispatched_qty_bags if kind == "sales" else ex.ordered_qty_bags
+                )
+                ex_rej = _f(getattr(ex, "rejected_qty_bags", None))
+            else:
+                ex_q = _f(getattr(ex, f"{word}_weight_kg", None)) or _f(
+                    ex.dispatched_weight_kg if kind == "sales" else ex.ordered_weight_kg
+                )
+                ex_rej = _f(getattr(ex, "rejected_weight_kg", None))
+            ex_acc = max(0.0, ex_q - ex_rej)
+            confs.append({
+                "item_id": int(ex.id),
+                f"{word}_price": ex_p,
+                f"{word}_qty_bags" if ex_fert else f"{word}_weight_kg": ex_q,
+                "accepted_qty_bags" if ex_fert else "accepted_weight_kg": ex_acc,
+                "rejected_qty_bags" if ex_fert else "rejected_weight_kg": ex_rej,
+            })
 
         if kind == "sales":
-            res = SalesOrderService.confirm(int(order_id), [conf], uid)
+            res = SalesOrderService.confirm(int(order_id), confs, uid)
         else:
-            res = PurchaseOrderService.confirm(int(order_id), [conf], uid)
+            res = PurchaseOrderService.confirm(int(order_id), confs, uid)
 
         final_total = _f(res.get("final_total_amount"))
 
         applied_payment_id = None
         if use_advance:
-            # Check for available advance
+            # Check for available advances and apply up to requested amount
             direction = "in" if kind == "sales" else "out"
             available_advances = OrderMoneyService.get_available_advances(kind, partner_id, direction=direction)
-            if available_advances:
-                first_adv = available_advances[0]
-                adv_id = first_adv["id"]
-                adv_amt = first_adv["amount"]
-                to_apply = min(final_total, adv_amt)
-                if advance_amount is not None and _f(advance_amount) > 0:
-                    to_apply = min(to_apply, _f(advance_amount))
-                applied_payment_id = OrderMoneyService.apply_to_order(adv_id, int(order_id), amount=to_apply)
+            needed = final_total
+            if advance_amount is not None and _f(advance_amount) > 0:
+                needed = min(final_total, _f(advance_amount))
+            for adv in available_advances:
+                if needed <= 0.005:
+                    break
+                take = min(needed, _f(adv["amount"]))
+                if take > 0.005:
+                    applied_payment_id = OrderMoneyService.apply_to_order(adv["id"], int(order_id), amount=take)
+                    needed = round(needed - take, 2)
 
         return {
             "ok": True,
