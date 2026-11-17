@@ -451,16 +451,19 @@ class ClosingService:
             if party_id:
                 q = q.filter(CustomerClosing.party_id == int(party_id))
             if date_from:
-                q = q.filter(CustomerClosing.period_end >= date_from)
+                df = datetime.combine(date_from, datetime.min.time()) if not isinstance(date_from, datetime) else date_from
+                q = q.filter(CustomerClosing.period_end >= df)
             if date_to:
-                q = q.filter(CustomerClosing.period_end <= date_to)
+                dt = datetime.combine(date_to, datetime.max.time()) if not isinstance(date_to, datetime) else date_to
+                q = q.filter(CustomerClosing.period_end <= dt)
             if search:
                 term = f"%{search.strip().lower()}%"
                 q = q.filter(
                     or_(
                         func.lower(CustomerClosing.closing_no).like(term),
                         func.lower(CustomerClosing.party_name).like(term),
-                        func.lower(CustomerClosing.party_phone).like(term),
+                        func.lower(func.coalesce(CustomerClosing.party_phone, "")).like(term),
+                        func.lower(func.coalesce(CustomerClosing.notes, "")).like(term),
                     )
                 )
             if limit:
@@ -524,3 +527,62 @@ class ClosingService:
                 continue
 
         return closed_list
+
+    @staticmethod
+    def preview_pending_closings(as_of: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """
+        Returns computed closing previews for all active customers who have
+        unclosed transactions (activity_count > 0) or an unclosed non-zero balance
+        not yet closed today, so the Admin can review and confirm.
+        """
+        now = as_of or datetime.now()
+        today_date = now.date()
+        with get_session() as s:
+            parties = (
+                s.query(Party)
+                .filter(Party.is_active == True)  # noqa: E712
+                .filter(or_(Party.is_customer == True, Party.party_type == "customer"))  # noqa: E712
+                .order_by(Party.display_name.asc())
+                .all()
+            )
+            party_ids = [int(p.id) for p in parties]
+
+        previews: List[Dict[str, Any]] = []
+        with get_session() as s:
+            for pid in party_ids:
+                try:
+                    last = ClosingService.get_last_closing(pid, session=s)
+                    already_closed_today = (
+                        last is not None
+                        and last.period_end is not None
+                        and last.period_end.date() == today_date
+                    )
+                    calc = ClosingService.compute_closing(pid, as_of=now, session=s)
+                    if calc["activity_count"] > 0 or (
+                        not already_closed_today and abs(calc["opening_balance"]) > 0.005
+                    ):
+                        previews.append(calc)
+                except Exception:
+                    continue
+        return previews
+
+    @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def confirm_selected_closings(
+        party_ids: List[int],
+        user_id: int,
+        notes: str = "Morning confirmed closing",
+        as_of: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Records official closing periods for the selected list of customer party IDs."""
+        now = as_of or datetime.now()
+        closed: List[Dict[str, Any]] = []
+        for pid in party_ids:
+            try:
+                rec = ClosingService.record_closing(
+                    int(pid), user_id=int(user_id), notes=notes, as_of=now
+                )
+                closed.append(rec)
+            except Exception:
+                continue
+        return closed

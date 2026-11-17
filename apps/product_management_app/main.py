@@ -124,6 +124,11 @@ class ProductManagementMainWindow(QMainWindow):
         self.reminders = DailyReminderScheduler(self)
         self.reminders.start()
 
+        # Daily Morning Customer Closings review & confirmation (admin only; once a day)
+        from apps.product_management_app.features.closings.scheduler import DailyClosingScheduler
+        self.closing_scheduler = DailyClosingScheduler(self)
+        self.closing_scheduler.start()
+
         # Sidebar navigation
         self.shell.sidebar.route_selected.connect(self.navigate)
 

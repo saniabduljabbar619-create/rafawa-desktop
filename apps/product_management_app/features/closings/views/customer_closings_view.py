@@ -7,15 +7,18 @@ and complete itemized audit history for all customer closing periods.
 """
 from __future__ import annotations
 
+import csv
+from datetime import date, timedelta
 from typing import Optional
-from PySide2.QtCore import Qt
+from PySide2.QtCore import Qt, QDate
 from PySide2.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QMessageBox,
+    QAbstractItemView, QComboBox, QDateEdit, QFileDialog, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QMessageBox,
 )
 
 from database.services.closing_service import ClosingService
 from apps.product_management_app.features.closings.closing_detail_dialog import ClosingDetailDialog
+from apps.product_management_app.features.closings.morning_closing_dialog import MorningClosingDialog
 from apps.product_management_app.features.receipts_v2.closing_slip_dialog import open_closing_slip
 
 
@@ -45,12 +48,24 @@ class CustomerClosingsView(QWidget):
         top_bar.addLayout(header_text)
         top_bar.addStretch()
 
+        self.btn_review_morning = QPushButton("Review Morning Closings")
+        self.btn_review_morning.setStyleSheet(
+            "background-color: #0284c7; color: white; font-weight: bold; padding: 8px 14px; border-radius: 4px;"
+        )
+        self.btn_review_morning.clicked.connect(self._on_review_morning)
+        top_bar.addWidget(self.btn_review_morning)
+
         self.btn_auto_close = QPushButton("Batch Close Active for Today (Round-up)")
         self.btn_auto_close.setStyleSheet(
             "background-color: #059669; color: white; font-weight: bold; padding: 8px 16px; border-radius: 4px;"
         )
         self.btn_auto_close.clicked.connect(self._on_batch_close)
         top_bar.addWidget(self.btn_auto_close)
+
+        btn_export = QPushButton("Export CSV")
+        btn_export.setStyleSheet("padding: 8px 14px; border-radius: 4px;")
+        btn_export.clicked.connect(self._on_export_csv)
+        top_bar.addWidget(btn_export)
 
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setStyleSheet("padding: 8px 14px; border-radius: 4px;")
@@ -73,32 +88,56 @@ class CustomerClosingsView(QWidget):
         cards_row.addWidget(self.card_net_sum)
         main_lay.addLayout(cards_row)
 
-        # Search bar
+        # Search + Date Range filter bar
         search_box = QHBoxLayout()
+        search_box.setSpacing(8)
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Search by customer name, phone number, or closing number (e.g. CLS-00001)...")
+        self.txt_search.setPlaceholderText("Search customer name, phone, closing # (CLS-00001), or notes...")
+        self.txt_search.setClearButtonEnabled(True)
         self.txt_search.setStyleSheet("padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 4px;")
         self.txt_search.textChanged.connect(self.load_data)
-        search_box.addWidget(self.txt_search)
+        search_box.addWidget(self.txt_search, 1)
+
+        search_box.addWidget(QLabel("Period:"))
+        self.cbo_period = QComboBox()
+        self.cbo_period.addItem("All Dates", "all")
+        self.cbo_period.addItem("Today", "today")
+        self.cbo_period.addItem("Yesterday", "yesterday")
+        self.cbo_period.addItem("Last 7 Days", "7d")
+        self.cbo_period.addItem("This Month", "month")
+        self.cbo_period.addItem("Custom Range", "custom")
+        self.cbo_period.currentIndexChanged.connect(self._on_period_changed)
+        search_box.addWidget(self.cbo_period)
+
+        self.lbl_from = QLabel("From:")
+        self.dt_from = QDateEdit(QDate.currentDate().addDays(-30))
+        self.dt_from.setCalendarPopup(True)
+        self.dt_from.dateChanged.connect(self.load_data)
+        self.lbl_to = QLabel("To:")
+        self.dt_to = QDateEdit(QDate.currentDate())
+        self.dt_to.setCalendarPopup(True)
+        self.dt_to.dateChanged.connect(self.load_data)
+        for w in (self.lbl_from, self.dt_from, self.lbl_to, self.dt_to):
+            w.setVisible(False)
+            search_box.addWidget(w)
+
         main_lay.addLayout(search_box)
 
         # Table
-        self.table = QTableWidget(0, 10)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels([
             "Closing #", "Customer Name", "Phone", "Closed Date", "Period",
             "Purchases", "Sales", "Advances (Out/In)", "Payments (In/Out)", "Closing Balance", "Actions"
         ])
-        self.table.setColumnCount(11)
-        self.table.setHorizontalHeaderLabels([
-            "Closing #", "Customer Name", "Phone", "Closed Date", "Period",
-            "Purchases", "Sales", "Advances (Out/In)", "Payments (In/Out)", "Closing Balance", "Actions"
-        ])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("QTableWidget { background-color: white; border: 1px solid #e2e8f0; }")
         self.table.cellDoubleClicked.connect(self._on_table_double_click)
         main_lay.addWidget(self.table, 1)
 
+        self._rows = []
         self.load_data()
 
     def _make_card(self, title: str, val: str, color: str, highlight: bool = False) -> QFrame:
@@ -120,9 +159,33 @@ class CustomerClosingsView(QWidget):
         card.v_lbl = v_lbl
         return card
 
+    def _on_period_changed(self):
+        custom = self.cbo_period.currentData() == "custom"
+        for w in (self.lbl_from, self.dt_from, self.lbl_to, self.dt_to):
+            w.setVisible(custom)
+        self.load_data()
+
+    def _date_range(self):
+        key = self.cbo_period.currentData()
+        today = date.today()
+        if key == "today":
+            return today, today
+        if key == "yesterday":
+            y = today - timedelta(days=1)
+            return y, y
+        if key == "7d":
+            return today - timedelta(days=6), today
+        if key == "month":
+            return today.replace(day=1), today
+        if key == "custom":
+            return self.dt_from.date().toPython(), self.dt_to.date().toPython()
+        return None, None
+
     def load_data(self):
         search = self.txt_search.text().strip()
-        rows = ClosingService.list_closings(search=search, limit=300)
+        d_from, d_to = self._date_range()
+        rows = ClosingService.list_closings(search=search, date_from=d_from, date_to=d_to, limit=500)
+        self._rows = rows
 
         # Update metrics
         tot_count = len(rows)
@@ -145,7 +208,7 @@ class CustomerClosingsView(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(c.get("party_name", "")))
             self.table.setItem(row, 2, QTableWidgetItem(c.get("party_phone", "")))
             self.table.setItem(row, 3, QTableWidgetItem(c.get("created_at", "")))
-            p_range = f"{c.get('period_start', '')[:10]} &rarr; {c.get('period_end', '')[:10]}"
+            p_range = f"{c.get('period_start', '')[:10]} -> {c.get('period_end', '')[:10]}"
             self.table.setItem(row, 4, QTableWidgetItem(p_range))
             self.table.setItem(row, 5, QTableWidgetItem(_money(c.get("total_purchases", 0))))
             self.table.setItem(row, 6, QTableWidgetItem(_money(c.get("total_sales", 0))))
@@ -226,3 +289,56 @@ class CustomerClosingsView(QWidget):
                 f"Successfully closed {len(closed)} active customer account(s) for today."
             )
             self.load_data()
+
+    def _on_review_morning(self):
+        previews = ClosingService.preview_pending_closings()
+        if not previews:
+            QMessageBox.information(
+                self,
+                "Morning Closings",
+                "All active customer accounts are already up to date with no unclosed activity.",
+            )
+            return
+        dlg = MorningClosingDialog(self.session_user_id, previews=previews, parent=self)
+        dlg.exec_()
+        if dlg.choice == "confirmed":
+            self.load_data()
+
+    def _on_export_csv(self):
+        if not self._rows:
+            QMessageBox.information(self, "Export CSV", "No closing records match your current search/filter.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Customer Closings", "customer_closings.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                w.writerow([
+                    "Closing #", "Customer Name", "Phone", "Closed Date",
+                    "Period Start", "Period End", "Opening Balance",
+                    "Purchases", "Sales", "Advance OUT", "Advance IN",
+                    "Payments IN", "Payments OUT", "Closing Balance", "Notes",
+                ])
+                for c in self._rows:
+                    w.writerow([
+                        c.get("closing_no", ""),
+                        c.get("party_name", ""),
+                        c.get("party_phone", ""),
+                        c.get("created_at", ""),
+                        c.get("period_start", ""),
+                        c.get("period_end", ""),
+                        f"{float(c.get('opening_balance') or 0):.2f}",
+                        f"{float(c.get('total_purchases') or 0):.2f}",
+                        f"{float(c.get('total_sales') or 0):.2f}",
+                        f"{float(c.get('total_advance_out') or 0):.2f}",
+                        f"{float(c.get('total_advance_in') or 0):.2f}",
+                        f"{float(c.get('total_payments_in') or 0):.2f}",
+                        f"{float(c.get('total_payments_out') or 0):.2f}",
+                        f"{float(c.get('closing_balance') or 0):.2f}",
+                        c.get("notes", ""),
+                    ])
+        except Exception as e:
+            QMessageBox.warning(self, "Export CSV", f"Could not save CSV:\n{e}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Saved {len(self._rows)} closing record(s) to:\n{path}")
