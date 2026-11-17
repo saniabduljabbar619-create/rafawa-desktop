@@ -723,6 +723,7 @@ class CustomerProfileView(QWidget):
                     parts.append(f"Items: {a['items']}")
                 detail = "\n".join(parts)
 
+            w_tip = f"Weighed: {a['weighed_at'].strftime('%Y-%m-%d %H:%M')} ({a.get('ticket_no', '')})" if a.get("weighed_at") else ""
             for c, val in enumerate(cols):
                 it = QTableWidgetItem(str(val))
                 if w_tip and c in (0, 3):

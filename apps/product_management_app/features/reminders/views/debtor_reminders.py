@@ -15,7 +15,7 @@ import logging
 from PySide2.QtCore import Qt
 from PySide2.QtGui import QBrush, QColor
 from PySide2.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
+    QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -23,7 +23,7 @@ from database.services.reminder_service import ReminderService
 
 log = logging.getLogger("rafawa.reminders")
 
-HEADERS = ["Customer", "Phone", "What", "Ref", "Given on", "Days ago", "Total", "Paid", "Balance", "Status"]
+HEADERS = ["Customer", "Phone", "Debts Breakdown", "Refs", "Oldest Since", "Days Waiting", "Total", "Paid", "Balance", "Status"]
 _WHAT = {"advance_out": "Advance OUT", "sale": "Sale"}
 _STATUS = {
     ("sale", "unpaid"): "Unpaid", ("sale", "partial"): "Part paid",
@@ -111,15 +111,46 @@ class DebtorRemindersPanel(QWidget):
         needle = self.search.text().strip().lower()
         rows = []
         for g in self._data.get("groups", []):
-            for it in g["items"]:
-                if kind != "all" and it["type"] != kind:
-                    continue
-                if it["days"] < min_days:
-                    continue
-                hay = f"{g['name']} {g['phone']} {it['ref']}".lower()
-                if needle and needle not in hay:
-                    continue
-                rows.append((g, it))
+            matching = [it for it in g["items"] if kind == "all" or it["type"] == kind]
+            if not matching:
+                continue
+            max_days = max(it["days"] for it in matching)
+            if max_days < min_days:
+                continue
+            refs_str = ", ".join(it["ref"] for it in matching)
+            hay = f"{g['name']} {g['phone']} {refs_str}".lower()
+            if needle and needle not in hay:
+                continue
+
+            sales_items = [it for it in matching if it["type"] == "sale"]
+            adv_items = [it for it in matching if it["type"] == "advance_out"]
+            parts = []
+            if sales_items:
+                s_bal = sum(it["balance"] for it in sales_items)
+                parts.append(f"{len(sales_items)} Sale(s): \u20a6{_money(s_bal)}")
+            if adv_items:
+                a_bal = sum(it["balance"] for it in adv_items)
+                parts.append(f"{len(adv_items)} Adv OUT: \u20a6{_money(a_bal)}")
+
+            dates = [it["given_at"] for it in matching if it.get("given_at")]
+            oldest_dt = min(dates) if dates else None
+            total_amt = round(sum(it["total"] for it in matching), 2)
+            paid_amt = round(sum(it["paid"] for it in matching), 2)
+            bal_amt = round(sum(it["balance"] for it in matching), 2)
+            status_str = "Part paid" if paid_amt > 0.005 else "Unpaid"
+
+            rows.append({
+                "group": g,
+                "items": matching,
+                "breakdown": "  |  ".join(parts),
+                "refs": refs_str,
+                "oldest_dt": oldest_dt,
+                "days": max_days,
+                "total": total_amt,
+                "paid": paid_amt,
+                "balance": bal_amt,
+                "status": status_str,
+            })
         return rows
 
     def _fill(self):
@@ -130,22 +161,31 @@ class DebtorRemindersPanel(QWidget):
             f"unpaid / part-paid sales \u20a6{_money(d.get('sales_total'))}.")
         rows = self._visible_rows()
         self.table.setRowCount(len(rows))
-        for r, (g, it) in enumerate(rows):
-            given = it["given_at"].strftime("%Y-%m-%d %H:%M") if it.get("given_at") else ""
-            cells = [g["name"], g["phone"], _WHAT.get(it["type"], it["type"]), it["ref"], given,
-                     str(it["days"]), _money(it["total"]), _money(it["paid"]), _money(it["balance"]),
-                     _STATUS.get((it["type"], it["status"]), it["status"])]
-            shade = _RED if it["days"] >= OVERDUE_DAYS else _AMBER if it["days"] >= STALE_DAYS else None
+        for r, u in enumerate(rows):
+            g = u["group"]
+            given = u["oldest_dt"].strftime("%Y-%m-%d %H:%M") if u.get("oldest_dt") else ""
+            refs_disp = u["refs"] if len(u["refs"]) <= 36 else u["refs"][:33] + "..."
+            cells = [
+                g["name"], g["phone"], u["breakdown"], refs_disp, given,
+                str(u["days"]), _money(u["total"]), _money(u["paid"]), _money(u["balance"]),
+                u["status"],
+            ]
+            shade = _RED if u["days"] >= OVERDUE_DAYS else _AMBER if u["days"] >= STALE_DAYS else None
             for c, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
+                if c == 3 and len(u["refs"]) > 36:
+                    cell.setToolTip(u["refs"])
                 if c in (5, 6, 7, 8):
                     cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if shade is not None:
                     cell.setBackground(QBrush(shade))
                     cell.setForeground(QBrush(QColor("#111827")))
                 if c == 0:
-                    cell.setData(Qt.UserRole, {"type": it["type"], "doc_id": it["doc_id"],
-                                               "party_id": g["party_id"], "walkin_name": g["walkin_name"]})
+                    cell.setData(Qt.UserRole, {
+                        "items": u["items"],
+                        "party_id": g["party_id"],
+                        "walkin_name": g["walkin_name"],
+                    })
                 self.table.setItem(r, c, cell)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -159,10 +199,25 @@ class DebtorRemindersPanel(QWidget):
     def _print_balance(self):
         meta = self._selected_meta()
         if not meta:
-            QMessageBox.information(self, "Print Balance", "Select a line first.")
+            QMessageBox.information(self, "Print Balance", "Select a customer row first.")
             return
+        items = meta.get("items") or []
+        if not items:
+            return
+        if len(items) == 1:
+            chosen = items[0]
+        else:
+            labels = [f"{it['ref']}  ({_WHAT.get(it['type'], it['type'])} - Bal: \u20a6{_money(it['balance'])})" for it in items]
+            label, ok = QInputDialog.getItem(
+                self, "Print Balance",
+                "This customer has multiple open items. Select one to print:",
+                labels, 0, False,
+            )
+            if not ok:
+                return
+            chosen = items[labels.index(label)]
         from apps.product_management_app.features.receipts_v2 import open_balance_slip
-        open_balance_slip(self, "advance" if meta["type"] == "advance_out" else "sale", meta["doc_id"])
+        open_balance_slip(self, "advance" if chosen["type"] == "advance_out" else "sale", chosen["doc_id"])
 
     def _export(self):
         rows = self._visible_rows()
@@ -176,11 +231,14 @@ class DebtorRemindersPanel(QWidget):
             with open(path, "w", newline="", encoding="utf-8-sig") as fh:
                 w = csv.writer(fh)
                 w.writerow(HEADERS)
-                for g, it in rows:
-                    w.writerow([g["name"], g["phone"], _WHAT.get(it["type"], it["type"]), it["ref"],
-                                it["given_at"].strftime("%Y-%m-%d %H:%M") if it.get("given_at") else "",
-                                it["days"], f"{it['total']:.2f}", f"{it['paid']:.2f}", f"{it['balance']:.2f}",
-                                _STATUS.get((it["type"], it["status"]), it["status"])])
+                for u in rows:
+                    g = u["group"]
+                    w.writerow([
+                        g["name"], g["phone"], u["breakdown"], u["refs"],
+                        u["oldest_dt"].strftime("%Y-%m-%d %H:%M") if u.get("oldest_dt") else "",
+                        u["days"], f"{u['total']:.2f}", f"{u['paid']:.2f}", f"{u['balance']:.2f}",
+                        u["status"],
+                    ])
         except Exception as e:
             QMessageBox.warning(self, "Export", f"Could not save the file:\n{e}")
             return

@@ -207,6 +207,81 @@ class OrderMoneyService:
         return int(pid)
 
     @staticmethod
+    @require_role(*INTAKE_ROLES)
+    def repay_advance(money_id: int, amount: Optional[float] = None,
+                      method: str = "cash", note: str = "", entry_date=None) -> Dict[str, Any]:
+        """
+        Record a direct cash/transfer repayment or refund against an available advance
+        (without applying it to an order) — e.g. a supplier paying back an Advance OUT
+        we gave them, or us refunding an Advance IN back to a company.
+        Supports partial repayment by splitting the remainder into a still-available entry.
+        """
+        with get_session() as s:
+            r = s.get(OrderMoney, int(money_id))
+            if r is None:
+                raise ValueError("Advance entry not found.")
+            if r.status != "completed":
+                raise ValueError("Only an available (completed) advance can be repaid or refunded.")
+
+            entry_amount = _f(r.amount)
+            if amount is not None:
+                repay_amt = round(_f(amount), 2)
+                if repay_amt <= 0:
+                    raise ValueError("Repayment amount must be greater than zero.")
+                if repay_amt > entry_amount + EPS:
+                    raise ValueError(
+                        f"Cannot repay {repay_amt:,.2f}: only {entry_amount:,.2f} available in this advance."
+                    )
+                repay_amt = min(repay_amt, entry_amount)
+            else:
+                repay_amt = entry_amount
+
+            remainder = round(entry_amount - repay_amt, 2)
+            kind, partner, direction = r.kind, int(r.partner_id), r.direction
+            orig_method, orig_note, orig_date = r.method, r.note, r.entry_date
+            uid = int(require_user_id())
+            repay_day = _day(entry_date)
+            clean_method = (method or "").strip().lower() or "cash"
+            clean_note = (note or "").strip()
+
+            tag = "[REPAID]" if direction == "out" else "[REFUNDED]"
+            r.amount = repay_amt
+            r.status = "applied"
+            r.order_id = None
+            r.applied_payment_id = None
+            r.method = clean_method
+            r.note = f"{tag} {repay_day.isoformat()}" + (f" - {clean_note}" if clean_note else "") + (f" (orig: {orig_note})" if orig_note else "")
+
+            rem_id = None
+            if remainder > EPS:
+                rem_row = OrderMoney(
+                    kind=kind,
+                    partner_id=partner,
+                    order_id=None,
+                    direction=direction,
+                    amount=remainder,
+                    method=orig_method,
+                    note=f"Remaining advance balance from #{money_id}" + (f" ({orig_note})" if orig_note else ""),
+                    entry_date=orig_date,
+                    status="completed",
+                    created_by_user_id=uid,
+                )
+                s.add(rem_row)
+                s.flush()
+                rem_id = int(rem_row.id)
+                AuditService.record("order_money.split", "order_money", rem_id,
+                                    f"Remainder {remainder:,.2f} kept as available advance after repayment", session=s)
+
+            AuditService.record(
+                "order_money.repay", "order_money", int(money_id),
+                f"{'Supplier repaid' if direction == 'out' else 'Refunded to company'} {repay_amt:,.2f} ({clean_method})",
+                session=s,
+            )
+            s.commit()
+
+        return {"ok": True, "money_id": int(money_id), "repaid": repay_amt, "remainder": remainder, "remainder_id": rem_id}
+
+    @staticmethod
     def get_available_advances(kind: str, partner_id: int, direction: Optional[str] = None) -> List[Dict[str, Any]]:
         """Returns all unapplied (status == 'completed') advances for this partner."""
         _kind(kind)

@@ -24,8 +24,10 @@ from apps.product_management_app.features.orders.dialogs.apply_advance_dialog im
 from apps.product_management_app.features.orders.dialogs.edit_activity_dialog import EditActivityDialog
 from apps.product_management_app.features.orders.dialogs.finalize_order_dialog import FinalizeOrderDialog
 from apps.product_management_app.features.orders.dialogs.new_activity_dialog import NewActivityDialog
+from apps.product_management_app.features.orders.dialogs.order_pay_dialog import OrderPayDialog
 from apps.product_management_app.features.orders.dialogs.order_slip_dialog import OrderSlipDialog
 from apps.product_management_app.features.orders.dialogs.record_advance_dialog import RecordAdvanceDialog
+from apps.product_management_app.features.orders.dialogs.repay_advance_dialog import RepayAdvanceDialog
 from database.services.order_money_service import OrderMoneyService
 from database.services.order_profile_service import OrderProfileService
 from database.services.order_sheet_service import OrderSheetService
@@ -60,7 +62,7 @@ COLS = [
     "Status", "Settlement", "Actions"
 ]
 
-ADV_COLS = ["ID", "Date", "Direction", "Amount", "Method", "Notes / Ref", "Status", "Recorded By"]
+ADV_COLS = ["ID", "Date", "Direction", "Amount", "Method", "Notes / Ref", "Status", "Recorded By", "Actions"]
 
 STATUS_COLOR = {
     "draft": "#64748b",
@@ -311,6 +313,14 @@ class PartnerProfilePage(QWidget):
         )
         btn_adv_new.clicked.connect(self._open_record_advance)
         adv_foot.addWidget(btn_adv_new)
+
+        self.btn_adv_repay = QPushButton("Advance Payment / Repay")
+        self.btn_adv_repay.setStyleSheet(
+            "background: #0f766e; color: white; font-weight: bold; padding: 7px 16px; border-radius: 5px; border: none;"
+        )
+        self.btn_adv_repay.clicked.connect(lambda: self._open_repay_advance(0))
+        adv_foot.addWidget(self.btn_adv_repay)
+
         adv_foot.addStretch()
         al.addLayout(adv_foot)
 
@@ -422,12 +432,20 @@ class PartnerProfilePage(QWidget):
 
         self._advances = adv_list
         self.adv_table.setRowCount(len(adv_list))
+        has_available = any(a["status"] == "completed" for a in adv_list)
+        if hasattr(self, "btn_adv_repay"):
+            self.btn_adv_repay.setEnabled(has_available)
 
         for i, a in enumerate(adv_list):
             dir_label = "IN (Sale Order Advance)" if a["direction"] == "in" else "OUT (Purchase Order Advance)"
-            status_str = "Available" if a["status"] == "completed" else a["status"].title()
-            if a.get("order_no"):
+            if a["status"] == "completed":
+                status_str = "Available"
+            elif a["status"] == "applied" and a.get("order_no"):
                 status_str = f"Applied to {a['order_no']}"
+            elif a["status"] == "applied":
+                status_str = "Repaid" if a["direction"] == "out" else "Refunded"
+            else:
+                status_str = a["status"].title()
 
             vals = [
                 str(a["id"]),
@@ -451,6 +469,21 @@ class PartnerProfilePage(QWidget):
                     elif a["status"] == "voided":
                         it.setForeground(QColor("#dc2626"))
                 self.adv_table.setItem(i, c, it)
+
+            # Column 8: Actions
+            if a["status"] == "completed":
+                cell = QWidget()
+                cl = QHBoxLayout(cell)
+                cl.setContentsMargins(4, 2, 4, 2)
+                btn_rep = QPushButton("Repay" if a["direction"] == "out" else "Refund")
+                btn_rep.setStyleSheet(
+                    "background-color: #0284c7; color: white; font-weight: 600; padding: 3px 10px; border-radius: 4px; font-size: 11px; border: none;"
+                )
+                btn_rep.clicked.connect(lambda *_, aid=a["id"]: self._open_repay_advance(aid))
+                cl.addWidget(btn_rep)
+                self.adv_table.setCellWidget(i, 8, cell)
+            else:
+                self.adv_table.setItem(i, 8, QTableWidgetItem("—"))
 
     def _apply_filter(self):
         term = self.search.text().strip().lower()
@@ -592,6 +625,14 @@ class PartnerProfilePage(QWidget):
             has_adv_for_kind = has_adv_in if is_sale else has_adv_out
             has_bal = bal is not None and bal > 0.005
 
+            if o["status"] != "cancelled" and (bal is None or bal > 0.005):
+                btn_pay = QPushButton("Pay")
+                btn_pay.setStyleSheet(
+                    "background-color: #059669; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
+                )
+                btn_pay.clicked.connect(lambda *_, row_data=o: self._on_pay_clicked(row_data))
+                cell_lay.addWidget(btn_pay)
+
             if has_adv_for_kind and has_bal and o["status"] == "confirmed":
                 btn_adv = QPushButton("Use Advance")
                 btn_adv.setStyleSheet(
@@ -669,6 +710,20 @@ class PartnerProfilePage(QWidget):
 
     def _on_use_advance_clicked(self, order_data: Dict[str, Any]):
         dlg = ApplyAdvanceDialog(order_data, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _on_pay_clicked(self, order_data: Dict[str, Any]):
+        dlg = OrderPayDialog(order_data, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _open_repay_advance(self, advance_id: int = 0):
+        avail = [a for a in self._advances if a.get("status") == "completed"]
+        if not avail:
+            QMessageBox.information(self, "Advance Payment", "No available (unapplied) advances to repay or refund.")
+            return
+        dlg = RepayAdvanceDialog(avail, self.partner_name, selected_id=advance_id, parent=self)
         if dlg.exec_() == dlg.Accepted:
             self.reload()
 

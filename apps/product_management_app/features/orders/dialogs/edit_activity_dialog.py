@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from PySide2.QtCore import Qt, QDate
 from PySide2.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from database.models.product import Product
@@ -64,7 +64,15 @@ class EditActivityDialog(QDialog):
                 })
 
     def _build_ui(self):
-        main_lay = QVBoxLayout(self)
+        outer_lay = QVBoxLayout(self)
+        outer_lay.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        main_lay = QVBoxLayout(body)
+        main_lay.setContentsMargins(4, 4, 4, 4)
         main_lay.setSpacing(12)
 
         # Header Info Box
@@ -75,7 +83,6 @@ class EditActivityDialog(QDialog):
                 background: #f8fafc;
                 border: 1px solid #cbd5e1;
                 border-radius: 6px;
-                padding: 10px;
             }
             QFrame#info_box QLabel {
                 border: none;
@@ -84,6 +91,7 @@ class EditActivityDialog(QDialog):
             }
         """)
         ib_lay = QVBoxLayout(info_box)
+        ib_lay.setContentsMargins(12, 10, 12, 10)
         ib_lay.setSpacing(4)
 
         t_lbl = QLabel(f"<b>Edit Order {self.order.get('order_no', '')}</b> • {self.partner_name}")
@@ -96,7 +104,7 @@ class EditActivityDialog(QDialog):
         ib_lay.addWidget(sub_lbl)
         main_lay.addWidget(info_box)
 
-        # Form
+        # Form 1: Initial / Ordered specs
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(8)
@@ -140,7 +148,9 @@ class EditActivityDialog(QDialog):
         self.row_weight_lbl = QLabel("Weight (Kg):")
         form.addRow(self.row_weight_lbl, self.txt_weight)
 
-        # Section: Company Verified (if applicable or confirmed)
+        main_lay.addLayout(form)
+
+        # Section: Company Verified (standalone box in main_lay so rows never squish)
         self.comp_box = QFrame()
         self.comp_box.setObjectName("comp_box")
         self.comp_box.setStyleSheet("""
@@ -148,20 +158,23 @@ class EditActivityDialog(QDialog):
                 background: #f1f5f9;
                 border: 1px solid #cbd5e1;
                 border-radius: 6px;
-                padding: 6px;
             }
             QFrame#comp_box QLabel {
                 background: transparent;
                 border: none;
             }
         """)
-        c_form = QFormLayout(self.comp_box)
-        c_form.setLabelAlignment(Qt.AlignRight)
-        c_form.setSpacing(6)
+        c_lay = QVBoxLayout(self.comp_box)
+        c_lay.setContentsMargins(12, 10, 12, 10)
+        c_lay.setSpacing(8)
 
         hdr_comp = QLabel("<b>Company / Supplier Verified Specifications (Finalization):</b>")
         hdr_comp.setStyleSheet("color: #0f766e; font-size: 12px;")
-        c_form.addRow(hdr_comp)
+        c_lay.addWidget(hdr_comp)
+
+        c_form = QFormLayout()
+        c_form.setLabelAlignment(Qt.AlignRight)
+        c_form.setSpacing(8)
 
         comp_p = self.order.get("company_price")
         self.txt_comp_price = QLineEdit(f"{comp_p:,.2f}" if comp_p is not None else "")
@@ -191,9 +204,14 @@ class EditActivityDialog(QDialog):
         c_form.addRow(self.lbl_acc, self.txt_accepted)
         c_form.addRow(self.lbl_rej, self.txt_rejected)
 
-        form.addRow(self.comp_box)
+        c_lay.addLayout(c_form)
+        main_lay.addWidget(self.comp_box)
 
-        # Expected Delivery
+        # Form 2: Expected Delivery & Notes
+        form2 = QFormLayout()
+        form2.setLabelAlignment(Qt.AlignRight)
+        form2.setSpacing(8)
+
         self.dt_expected = QDateEdit()
         self.dt_expected.setCalendarPopup(True)
         exp = self.order.get("expected_delivery_date")
@@ -201,14 +219,16 @@ class EditActivityDialog(QDialog):
             self.dt_expected.setDate(QDate(exp.year, exp.month, exp.day))
         else:
             self.dt_expected.setDate(QDate.currentDate())
-        form.addRow("Expected Date:", self.dt_expected)
+        form2.addRow("Expected Date:", self.dt_expected)
 
-        # Notes
         self.txt_notes = QLineEdit(self.order.get("notes") or "")
         self.txt_notes.setPlaceholderText("Order notes, truck plate, driver name, etc.")
-        form.addRow("Notes:", self.txt_notes)
+        form2.addRow("Notes:", self.txt_notes)
 
-        main_lay.addLayout(form)
+        main_lay.addLayout(form2)
+
+        scroll.setWidget(body)
+        outer_lay.addWidget(scroll, 1)
 
         # Live calculation box
         self.calc_box = QFrame()
@@ -218,7 +238,6 @@ class EditActivityDialog(QDialog):
                 background: #f8fafc;
                 border: 1.5px solid #cbd5e1;
                 border-radius: 6px;
-                padding: 10px;
             }
             QFrame#calc_box QLabel {
                 border: none;
@@ -227,6 +246,7 @@ class EditActivityDialog(QDialog):
             }
         """)
         cb_lay = QHBoxLayout(self.calc_box)
+        cb_lay.setContentsMargins(12, 10, 12, 10)
         self.lbl_calc_desc = QLabel("Total Calculation:")
         self.lbl_calc_desc.setStyleSheet("font-weight: bold; color: #475569;")
         self.lbl_calc_val = QLabel("₦0.00")
@@ -234,7 +254,7 @@ class EditActivityDialog(QDialog):
         cb_lay.addWidget(self.lbl_calc_desc)
         cb_lay.addStretch()
         cb_lay.addWidget(self.lbl_calc_val)
-        main_lay.addWidget(self.calc_box)
+        outer_lay.addWidget(self.calc_box)
 
         # Buttons
         btn_box = QHBoxLayout()
@@ -248,8 +268,9 @@ class EditActivityDialog(QDialog):
         self.btn_save.clicked.connect(self._save)
         btn_box.addWidget(btn_cancel)
         btn_box.addWidget(self.btn_save)
-        main_lay.addLayout(btn_box)
+        outer_lay.addLayout(btn_box)
 
+        self.resize(600, 680)
         self._on_product_changed()
 
     def _selected_product(self) -> Optional[Dict[str, Any]]:
