@@ -2,20 +2,24 @@
 """
 Dedicated Company / Supplier Profile:
   - Exact design match with Customer Profile (_PROFILE_QSS, #ProfileBanner, #SumGroup, #ProfileTabs).
-  - Advance recordings (IN for Sale Orders, OUT for Purchase Orders) held safely.
-  - "New Activity" button to create Sale Order or Purchase Order.
-  - Single-row order tracking & finalization (Company Price, Company Weight, etc.).
-  - "Use Advance" action on finalization and on rows with balance.
+  - 8 simple, dedicated tabs:
+      1. Activity   (all Sale & Purchase Orders with single-row tracking & actions)
+      2. Products   (itemized product & quality breakdown across orders)
+      3. Sales      (Sale Orders, when partner is a company)
+      4. Orders     (Purchase Orders, when partner is a supplier)
+      5. Advances   (Advance IN / OUT ledger — NEVER used automatically)
+      6. Payments   (OrderPayment history + manual Record Order Payment)
+      7. Balances   (At-a-glance receivables/payables & open order balances)
+      8. History    (Chronological audit & milestone log)
 """
 from __future__ import annotations
 
-from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QColor, QFont
 from PySide2.QtWidgets import (
-    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -62,7 +66,15 @@ COLS = [
     "Status", "Settlement", "Actions"
 ]
 
+PROD_COLS = [
+    "Order #", "Date", "Type", "Product", "Quality / Spec",
+    "Initial Qty", "Initial Price", "Verified Qty", "Verified Price", "Final Amount", "Status"
+]
+
 ADV_COLS = ["ID", "Date", "Direction", "Amount", "Method", "Notes / Ref", "Status", "Recorded By", "Actions"]
+PAY_COLS = ["Payment #", "Date", "Order #", "Type", "Direction", "Amount", "Method", "Source", "Notes", "Status", "By"]
+BAL_COLS = ["Order #", "Date", "Activity", "Final Total", "Paid", "Remaining Balance", "Status", "Actions"]
+HIST_COLS = ["Date & Time", "Order / Ref", "Event", "Details", "Operator"]
 
 STATUS_COLOR = {
     "draft": "#64748b",
@@ -80,6 +92,14 @@ def _day(dt) -> str:
     return str(dt)[:10]
 
 
+def _dt_full(dt) -> str:
+    if not dt:
+        return "-"
+    if hasattr(dt, "strftime"):
+        return dt.strftime("%d/%m/%Y %H:%M") if hasattr(dt, "hour") else dt.strftime("%d/%m/%Y")
+    return str(dt)[:16]
+
+
 class PartnerProfilePage(QWidget):
     back = Signal()
     open_order = Signal(int)
@@ -91,14 +111,18 @@ class PartnerProfilePage(QWidget):
         self.partner_id = int(partner_id)
         self.is_admin = is_admin
 
-        # Resolve partner across counterparties
         self.info = OrderProfileService.resolve_partner(self.partner_id, self.kind)
         self.partner_name = self.info["name"]
         self.company_id = self.info["company_id"]
         self.supplier_id = self.info["supplier_id"]
 
         self._orders: List[Dict[str, Any]] = []
+        self._filtered_orders: List[Dict[str, Any]] = []
+        self._sales_orders: List[Dict[str, Any]] = []
+        self._purchase_orders: List[Dict[str, Any]] = []
         self._advances: List[Dict[str, Any]] = []
+        self._payments: List[Dict[str, Any]] = []
+        self._history: List[Dict[str, Any]] = []
         self._current_filter = "all"
 
         self.setObjectName("ProfileRoot")
@@ -111,9 +135,7 @@ class PartnerProfilePage(QWidget):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
 
-        # ---------------------------------------------------------
-        # BACK BUTTON
-        # ---------------------------------------------------------
+        # Back Button
         top_nav = QHBoxLayout()
         self.btn_back = QPushButton("<  Back to Orders")
         self.btn_back.setStyleSheet(
@@ -125,9 +147,7 @@ class PartnerProfilePage(QWidget):
         top_nav.addStretch(1)
         root.addLayout(top_nav)
 
-        # ---------------------------------------------------------
-        # 1. HEADER BANNER (Dark Teal Gradient, Avatar, Name, Meta, Balance & Buttons)
-        # ---------------------------------------------------------
+        # 1. Header Banner (exact match with Customer Profile)
         banner = QFrame()
         banner.setObjectName("ProfileBanner")
         bl = QHBoxLayout(banner)
@@ -143,7 +163,8 @@ class PartnerProfilePage(QWidget):
         title = QLabel(self.partner_name)
         title.setObjectName("ProfileName")
         name_row.addWidget(title)
-        name_row.addWidget(chip("Company & Supplier", "blue"))
+        badge_txt = "Company & Supplier" if (self.company_id and self.supplier_id) else ("Company" if self.company_id else "Supplier")
+        name_row.addWidget(chip(badge_txt, "blue"))
         name_row.addWidget(chip("Active", "green"))
         name_row.addStretch(1)
         ident.addLayout(name_row)
@@ -164,7 +185,6 @@ class PartnerProfilePage(QWidget):
         ident.addWidget(meta)
         bl.addLayout(ident, 1)
 
-        # Balance display
         bal_box = QVBoxLayout()
         bal_box.setSpacing(0)
         cap = QLabel("OUTSTANDING BALANCE")
@@ -177,7 +197,6 @@ class PartnerProfilePage(QWidget):
         bal_box.addWidget(self.banner_balance)
         bl.addLayout(bal_box)
 
-        # Action Buttons in Banner
         act_box = QVBoxLayout()
         act_box.setSpacing(6)
         self.btn_new_activity = QPushButton("+  New Activity")
@@ -186,7 +205,7 @@ class PartnerProfilePage(QWidget):
             "padding: 6px 16px; border-radius: 6px; border: none;"
         )
         self.btn_new_activity.setMinimumHeight(34)
-        self.btn_new_activity.clicked.connect(self._open_new_activity)
+        self.btn_new_activity.clicked.connect(lambda: self._open_new_activity(self.kind))
 
         self.btn_record_adv = QPushButton("+  Record Advance")
         self.btn_record_adv.setStyleSheet(
@@ -199,34 +218,73 @@ class PartnerProfilePage(QWidget):
         act_box.addWidget(self.btn_new_activity)
         act_box.addWidget(self.btn_record_adv)
         bl.addLayout(act_box)
-
         root.addWidget(banner)
 
-        # ---------------------------------------------------------
-        # 2. SUMMARY BAR (Themed #SumGroup boxes matching Customer Profile)
-        # ---------------------------------------------------------
+        # 2. Summary Bar
         self._build_summary_bar(root)
 
-        # ---------------------------------------------------------
-        # 3. TABS (QTabWidget#ProfileTabs)
-        # ---------------------------------------------------------
+        # 3. 8 Clean Tabs matching Customer Profile
         self.tabs = QTabWidget()
         self.tabs.setObjectName("ProfileTabs")
         self.tabs.setDocumentMode(True)
+        self.tabs.setElideMode(Qt.ElideNone)
         _f = self.tabs.tabBar().font()
         _f.setWeight(QFont.DemiBold)
         self.tabs.tabBar().setFont(_f)
 
-        # --- Tab 1: Orders & Activities ---
-        tab_orders = QWidget()
-        ol = QVBoxLayout(tab_orders)
+        # --- Tab 1: Activity ---
+        self._build_activity_tab()
+
+        # --- Tab 2: Products ---
+        self._build_products_tab()
+
+        # --- Tab 3: Sales (if company_id) ---
+        self.sales_table = None
+        if self.company_id:
+            self._build_sales_tab()
+
+        # --- Tab 4: Orders / Purchase Orders (if supplier_id) ---
+        self.purchase_table = None
+        if self.supplier_id:
+            self._build_purchase_tab()
+
+        # --- Tab 5: Advances ---
+        self._build_advances_tab()
+
+        # --- Tab 6: Payments ---
+        self._build_payments_tab()
+
+        # --- Tab 7: Balances ---
+        self._build_balances_tab()
+
+        # --- Tab 8: History ---
+        self._build_history_tab()
+
+        root.addWidget(self.tabs, 1)
+
+    def _make_orders_table(self) -> QTableWidget:
+        tbl = QTableWidget(0, len(COLS))
+        tbl.setHorizontalHeaderLabels(COLS)
+        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        tbl.verticalHeader().setVisible(False)
+        tbl.verticalHeader().setDefaultSectionSize(44)
+        tbl.setShowGrid(False)
+        hh = tbl.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        hh.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        return tbl
+
+    def _build_activity_tab(self):
+        tab = QWidget()
+        ol = QVBoxLayout(tab)
         ol.setContentsMargins(0, 10, 0, 0)
         ol.setSpacing(10)
 
-        # Filter bar
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(8)
-
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by order #, product, or quality...")
         self.search.setClearButtonEnabled(True)
@@ -234,11 +292,10 @@ class PartnerProfilePage(QWidget):
         self.search.textChanged.connect(self._apply_filter)
         filter_bar.addWidget(self.search, 1)
 
-        self.btn_filter_all = QPushButton("All Activities")
+        self.btn_filter_all = QPushButton("All")
         self.btn_filter_active = QPushButton("Pending / In Transit")
         self.btn_filter_done = QPushButton("Finalized")
         self.btn_refresh = QPushButton("Refresh")
-
         for b in (self.btn_filter_all, self.btn_filter_active, self.btn_filter_done, self.btn_refresh):
             b.setMinimumHeight(32)
             filter_bar.addWidget(b)
@@ -249,22 +306,9 @@ class PartnerProfilePage(QWidget):
         self.btn_refresh.clicked.connect(self.reload)
         ol.addLayout(filter_bar)
 
-        self.table = QTableWidget(0, len(COLS))
-        self.table.setHorizontalHeaderLabels(COLS)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(44)
-        self.table.setShowGrid(False)
-
-        hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        self.table = self._make_orders_table()
         ol.addWidget(self.table, 1)
 
-        # Selected Order Detail Summary Box
         self.order_detail_box = QLabel("Click an order row to see detailed breakdown and notes here.")
         self.order_detail_box.setWordWrap(True)
         self.order_detail_box.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -275,11 +319,87 @@ class PartnerProfilePage(QWidget):
         )
         ol.addWidget(self.order_detail_box)
         self.table.currentCellChanged.connect(self._show_order_detail)
-        self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
+        self.table.cellDoubleClicked.connect(lambda r, _c: self._on_edit_from_list(self._filtered_orders, r))
 
-        self.tabs.addTab(tab_orders, "Orders & Activities")
+        self.tabs.addTab(tab, "Activity")
 
-        # --- Tab 2: Advances Ledger ---
+    def _build_products_tab(self):
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.setContentsMargins(0, 10, 0, 0)
+        vl.setSpacing(10)
+
+        bar = QHBoxLayout()
+        self.prod_search = QLineEdit()
+        self.prod_search.setPlaceholderText("Filter by product name, quality, or order #...")
+        self.prod_search.setClearButtonEnabled(True)
+        self.prod_search.setMinimumHeight(32)
+        self.prod_search.textChanged.connect(self._reload_products)
+        bar.addWidget(self.prod_search, 1)
+        self.lbl_prod_totals = QLabel("")
+        self.lbl_prod_totals.setStyleSheet("color:#0f766e; font-weight:600; font-size:12px;")
+        bar.addWidget(self.lbl_prod_totals)
+        vl.addLayout(bar)
+
+        self.products_table = QTableWidget(0, len(PROD_COLS))
+        self.products_table.setHorizontalHeaderLabels(PROD_COLS)
+        self.products_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.products_table.verticalHeader().setVisible(False)
+        self.products_table.verticalHeader().setDefaultSectionSize(40)
+        self.products_table.setShowGrid(False)
+        self.products_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.products_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.products_table.cellDoubleClicked.connect(self._on_product_double_click)
+        vl.addWidget(self.products_table, 1)
+
+        self.tabs.addTab(tab, "Products")
+
+    def _build_sales_tab(self):
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.setContentsMargins(0, 10, 0, 0)
+        vl.setSpacing(10)
+
+        bar = QHBoxLayout()
+        btn_new = QPushButton("+ New Sale Order")
+        btn_new.setStyleSheet(
+            "background:#059669; color:white; font-weight:bold; padding:6px 14px; border-radius:5px; border:none;"
+        )
+        btn_new.clicked.connect(lambda: self._open_new_activity("sales"))
+        bar.addWidget(btn_new)
+        bar.addStretch(1)
+        vl.addLayout(bar)
+
+        self.sales_table = self._make_orders_table()
+        self.sales_table.cellDoubleClicked.connect(lambda r, _c: self._on_edit_from_list(self._sales_orders, r))
+        vl.addWidget(self.sales_table, 1)
+
+        self.tabs.addTab(tab, "Sales")
+
+    def _build_purchase_tab(self):
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.setContentsMargins(0, 10, 0, 0)
+        vl.setSpacing(10)
+
+        bar = QHBoxLayout()
+        btn_new = QPushButton("+ New Purchase Order")
+        btn_new.setStyleSheet(
+            "background:#2563eb; color:white; font-weight:bold; padding:6px 14px; border-radius:5px; border:none;"
+        )
+        btn_new.clicked.connect(lambda: self._open_new_activity("purchase"))
+        bar.addWidget(btn_new)
+        bar.addStretch(1)
+        vl.addLayout(bar)
+
+        self.purchase_table = self._make_orders_table()
+        self.purchase_table.cellDoubleClicked.connect(lambda r, _c: self._on_edit_from_list(self._purchase_orders, r))
+        vl.addWidget(self.purchase_table, 1)
+
+        self.tabs.addTab(tab, "Orders")
+
+    def _build_advances_tab(self):
         tab_adv = QWidget()
         al = QVBoxLayout(tab_adv)
         al.setContentsMargins(0, 10, 0, 0)
@@ -287,7 +407,7 @@ class PartnerProfilePage(QWidget):
 
         adv_notice = QLabel(
             "<b>Notice:</b> Advances recorded here will <b>NEVER</b> be used automatically. "
-            "They remain safely held in this profile until you explicitly click <b>Use Advance</b> during or after finalization."
+            "They remain safely held in this profile until you explicitly click <b>Use Advance</b> or tick the box during finalization."
         )
         adv_notice.setStyleSheet(
             "background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 10px; color: #166534; font-size: 12.5px;"
@@ -324,8 +444,91 @@ class PartnerProfilePage(QWidget):
         adv_foot.addStretch()
         al.addLayout(adv_foot)
 
-        self.tabs.addTab(tab_adv, "Advances Ledger")
-        root.addWidget(self.tabs, 1)
+        self.tabs.addTab(tab_adv, "Advances")
+
+    def _build_payments_tab(self):
+        tab = QWidget()
+        pl = QVBoxLayout(tab)
+        pl.setContentsMargins(0, 10, 0, 0)
+        pl.setSpacing(10)
+
+        bar = QHBoxLayout()
+        btn_pay_order = QPushButton("+ Record Order Payment")
+        btn_pay_order.setStyleSheet(
+            "background: #059669; color: white; font-weight: bold; padding: 7px 16px; border-radius: 5px; border: none;"
+        )
+        btn_pay_order.clicked.connect(self._on_pick_and_pay_order)
+        bar.addWidget(btn_pay_order)
+        bar.addWidget(QLabel("  All payments are manual — nothing is deducted or settled automatically."))
+        bar.addStretch(1)
+        pl.addLayout(bar)
+
+        self.payments_table = QTableWidget(0, len(PAY_COLS))
+        self.payments_table.setHorizontalHeaderLabels(PAY_COLS)
+        self.payments_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.payments_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.payments_table.verticalHeader().setVisible(False)
+        self.payments_table.verticalHeader().setDefaultSectionSize(38)
+        self.payments_table.setShowGrid(False)
+        self.payments_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.payments_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        pl.addWidget(self.payments_table, 1)
+
+        self.tabs.addTab(tab, "Payments")
+
+    def _build_balances_tab(self):
+        tab = QWidget()
+        bl = QVBoxLayout(tab)
+        bl.setContentsMargins(0, 10, 0, 0)
+        bl.setSpacing(10)
+
+        self.bal_summary_lbl = QLabel("")
+        self.bal_summary_lbl.setWordWrap(True)
+        self.bal_summary_lbl.setStyleSheet(
+            "background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px; font-size:13px; color:#0f172a;"
+        )
+        bl.addWidget(self.bal_summary_lbl)
+
+        self.balances_table = QTableWidget(0, len(BAL_COLS))
+        self.balances_table.setHorizontalHeaderLabels(BAL_COLS)
+        self.balances_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.balances_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.balances_table.verticalHeader().setVisible(False)
+        self.balances_table.verticalHeader().setDefaultSectionSize(42)
+        self.balances_table.setShowGrid(False)
+        self.balances_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.balances_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        bl.addWidget(self.balances_table, 1)
+
+        self.tabs.addTab(tab, "Balances")
+
+    def _build_history_tab(self):
+        tab = QWidget()
+        hl = QVBoxLayout(tab)
+        hl.setContentsMargins(0, 10, 0, 0)
+        hl.setSpacing(10)
+
+        bar = QHBoxLayout()
+        self.hist_search = QLineEdit()
+        self.hist_search.setPlaceholderText("Search history by order #, ref, event, or operator...")
+        self.hist_search.setClearButtonEnabled(True)
+        self.hist_search.setMinimumHeight(32)
+        self.hist_search.textChanged.connect(self._render_history)
+        bar.addWidget(self.hist_search, 1)
+        hl.addLayout(bar)
+
+        self.history_table = QTableWidget(0, len(HIST_COLS))
+        self.history_table.setHorizontalHeaderLabels(HIST_COLS)
+        self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.verticalHeader().setDefaultSectionSize(38)
+        self.history_table.setShowGrid(False)
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        hl.addWidget(self.history_table, 1)
+
+        self.tabs.addTab(tab, "History")
 
     def _build_summary_bar(self, parent_layout):
         row = QHBoxLayout()
@@ -367,12 +570,12 @@ class PartnerProfilePage(QWidget):
         self._current_filter = flt
         self._apply_filter()
 
-    def _open_new_activity(self):
+    def _open_new_activity(self, default_kind: Optional[str] = None):
         dlg = NewActivityDialog(
             partner_name=self.partner_name,
             company_id=self.company_id,
             supplier_id=self.supplier_id,
-            default_activity=self.kind,
+            default_activity=default_kind or self.kind,
             parent=self,
         )
         if dlg.exec_() == dlg.Accepted:
@@ -393,22 +596,18 @@ class PartnerProfilePage(QWidget):
         self.reload()
 
     def reload(self):
-        # Refresh partner identity
         self.info = OrderProfileService.resolve_partner(self.partner_id, self.kind)
         self.company_id = self.info["company_id"]
         self.supplier_id = self.info["supplier_id"]
 
-        # Advance balances
         adv_bals = OrderProfileService.get_advance_balances(self.company_id, self.supplier_id)
-        adv_in = adv_bals["advance_in"]
-        adv_out = adv_bals["advance_out"]
-        self.sum_adv_in.setText(money(adv_in))
-        self.sum_adv_out.setText(money(adv_out))
+        self.sum_adv_in.setText(money(adv_bals["advance_in"]))
+        self.sum_adv_out.setText(money(adv_bals["advance_out"]))
 
-        # Orders list
         self._orders = OrderProfileService.list_partner_orders(self.company_id, self.supplier_id)
+        self._sales_orders = [o for o in self._orders if o["kind"] == "sales"]
+        self._purchase_orders = [o for o in self._orders if o["kind"] == "purchase"]
 
-        # Figures
         active_cnt = sum(1 for o in self._orders if o["status"] in ("draft", "in_transit"))
         final_val = sum((o["final_total_amount"] or 0) for o in self._orders if o["status"] == "confirmed")
         tot_paid = sum((o["paid_amount"] or 0) for o in self._orders)
@@ -421,7 +620,15 @@ class PartnerProfilePage(QWidget):
         self.banner_balance.setText(money(tot_bal))
 
         self._apply_filter()
+        self._reload_products()
+        if self.sales_table is not None:
+            self._render_orders_table(self.sales_table, self._sales_orders)
+        if self.purchase_table is not None:
+            self._render_orders_table(self.purchase_table, self._purchase_orders)
         self._reload_advances()
+        self._reload_payments()
+        self._reload_balances(adv_bals)
+        self._reload_history()
 
     def _reload_advances(self):
         adv_list = []
@@ -470,7 +677,6 @@ class PartnerProfilePage(QWidget):
                         it.setForeground(QColor("#dc2626"))
                 self.adv_table.setItem(i, c, it)
 
-            # Column 8: Actions
             if a["status"] == "completed":
                 cell = QWidget()
                 cl = QHBoxLayout(cell)
@@ -485,6 +691,159 @@ class PartnerProfilePage(QWidget):
             else:
                 self.adv_table.setItem(i, 8, QTableWidgetItem("—"))
 
+    def _reload_products(self):
+        needle = self.prod_search.text().strip().lower() if hasattr(self, "prod_search") else ""
+        rows = []
+        tot_bags = 0.0
+        tot_kg = 0.0
+        tot_val = 0.0
+        for o in self._orders:
+            blob = f"{o['order_no']} {o['product_name']} {o.get('quality', '')}".lower()
+            if needle and needle not in blob:
+                continue
+            rows.append(o)
+            is_fert = str(o["product_type"]).lower() in ("fertilizer", "fertilizers")
+            tot_bags += float(o.get("company_qty_bags") or o.get("initial_qty_bags") or 0)
+            if not is_fert:
+                tot_kg += float(o.get("accepted_weight_kg") or o.get("company_weight_kg") or o.get("initial_weight_kg") or 0)
+            tot_val += float(o.get("final_total_amount") if o.get("final_total_amount") is not None else (o.get("estimated_total") or 0))
+
+        self.lbl_prod_totals.setText(f"{len(rows)} line(s)  •  {tot_bags:,.0f} bags  •  {tot_kg:,.2f} kg  •  {money(tot_val)}")
+        self.products_table.setRowCount(len(rows))
+        for i, o in enumerate(rows):
+            is_sale = o["kind"] == "sales"
+            is_fert = str(o["product_type"]).lower() in ("fertilizer", "fertilizers")
+            init_q = f"{o['initial_qty_bags']:,.0f} bags" if is_fert else f"{o['initial_weight_kg']:,.2f} kg ({o['initial_qty_bags']:,.0f} bags)"
+            comp_p = o.get("company_price")
+            if comp_p is not None:
+                ver_q = f"{(o.get('company_qty_bags') or 0):,.0f} bags" if is_fert else f"{(o.get('company_weight_kg') or 0):,.2f} kg"
+                ver_p = money(comp_p)
+            else:
+                ver_q, ver_p = "—", "—"
+            fin_a = money(o["final_total_amount"]) if o.get("final_total_amount") is not None else f"{money(o.get('estimated_total', 0))} (est.)"
+            st = "Delivered" if o["status"] == "confirmed" else o["status"].replace("_", " ").title()
+
+            vals = [
+                o["order_no"], _day(o["created_at"]), "Sale" if is_sale else "Purchase",
+                o["product_name"], o.get("quality") or "—", init_q, money(o["initial_price"]),
+                ver_q, ver_p, fin_a, st,
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c == 0:
+                    it.setData(Qt.UserRole, o)
+                if c in (6, 8, 9):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if c == 10:
+                    it.setForeground(QColor(STATUS_COLOR.get(o["status"], "#0f172a")))
+                self.products_table.setItem(i, c, it)
+
+    def _on_product_double_click(self, row: int, _col: int):
+        it = self.products_table.item(row, 0)
+        o = it.data(Qt.UserRole) if it else None
+        if o:
+            self._on_edit_clicked(o)
+
+    def _reload_payments(self):
+        self._payments = OrderProfileService.list_partner_payments(self.company_id, self.supplier_id)
+        self.payments_table.setRowCount(len(self._payments))
+        for i, p in enumerate(self._payments):
+            vals = [
+                f"PAY-{p['id']}", _dt_full(p["dt"]), p["order_no"],
+                "Sale Order" if p["kind"] == "sales" else "Purchase Order",
+                p["direction"], money(p["amount"]), p["method"], p["source"],
+                p["notes"] or "—", p["status"].title(), p["by"],
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c == 5:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if c == 9 and p["status"] == "voided":
+                    it.setForeground(QColor("#dc2626"))
+                elif c == 7 and p["source"] == "From Advance":
+                    it.setForeground(QColor("#0284c7"))
+                self.payments_table.setItem(i, c, it)
+
+    def _reload_balances(self, adv_bals: Dict[str, float]):
+        sales_tot = sum((o["final_total_amount"] or 0) for o in self._sales_orders if o["status"] == "confirmed")
+        sales_paid = sum((o["paid_amount"] or 0) for o in self._sales_orders)
+        sales_bal = sum((o["balance"] or 0) for o in self._sales_orders if o["balance"] is not None)
+
+        pur_tot = sum((o["final_total_amount"] or 0) for o in self._purchase_orders if o["status"] == "confirmed")
+        pur_paid = sum((o["paid_amount"] or 0) for o in self._purchase_orders)
+        pur_bal = sum((o["balance"] or 0) for o in self._purchase_orders if o["balance"] is not None)
+
+        self.bal_summary_lbl.setText(
+            f"<b>Sales Orders (Company Owes Us):</b> Finalized {money(sales_tot)}  |  Paid {money(sales_paid)}  |  "
+            f"<span style='color:#dc2626;'><b>Balance: {money(sales_bal)}</b></span><br>"
+            f"<b>Purchase Orders (We Owe Supplier):</b> Finalized {money(pur_tot)}  |  Paid {money(pur_paid)}  |  "
+            f"<span style='color:#d97706;'><b>Balance: {money(pur_bal)}</b></span><br>"
+            f"<b>Unapplied Advances:</b> Advance IN (Sales) <span style='color:#059669;'><b>{money(adv_bals['advance_in'])}</b></span>  |  "
+            f"Advance OUT (Purchases) <span style='color:#2563eb;'><b>{money(adv_bals['advance_out'])}</b></span>"
+        )
+
+        open_orders = [o for o in self._orders if o["status"] != "cancelled" and (o["balance"] is None or o["balance"] > 0.005)]
+        self.balances_table.setRowCount(len(open_orders))
+        has_adv_in = adv_bals["advance_in"] > 0.005
+        has_adv_out = adv_bals["advance_out"] > 0.005
+
+        for i, o in enumerate(open_orders):
+            is_sale = o["kind"] == "sales"
+            tot_s = money(o["final_total_amount"]) if o.get("final_total_amount") is not None else f"{money(o.get('estimated_total', 0))} (est.)"
+            bal = o.get("balance")
+            bal_s = money(bal) if bal is not None else "Awaiting Finalization"
+            st = "Delivered" if o["status"] == "confirmed" else o["status"].replace("_", " ").title()
+
+            vals = [
+                o["order_no"], _day(o["created_at"]),
+                "Sale Order" if is_sale else "Purchase Order",
+                tot_s, money(o.get("paid_amount", 0)), bal_s, st,
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c in (3, 4, 5):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if c == 5 and bal is not None and bal > 0.005:
+                    it.setForeground(QColor("#dc2626"))
+                self.balances_table.setItem(i, c, it)
+
+            cell = QWidget()
+            cl = QHBoxLayout(cell)
+            cl.setContentsMargins(4, 2, 4, 2)
+            cl.setSpacing(6)
+            btn_pay = QPushButton("Pay")
+            btn_pay.setStyleSheet(
+                "background-color:#059669; color:white; font-weight:bold; padding:3px 10px; border-radius:4px; font-size:11px; border:none;"
+            )
+            btn_pay.clicked.connect(lambda *_, row_data=o: self._on_pay_clicked(row_data))
+            cl.addWidget(btn_pay)
+
+            has_adv = has_adv_in if is_sale else has_adv_out
+            if has_adv and bal is not None and bal > 0.005 and o["status"] == "confirmed":
+                btn_adv = QPushButton("Use Advance")
+                btn_adv.setStyleSheet(
+                    "background-color:#0284c7; color:white; font-weight:bold; padding:3px 10px; border-radius:4px; font-size:11px; border:none;"
+                )
+                btn_adv.clicked.connect(lambda *_, row_data=o: self._on_use_advance_clicked(row_data))
+                cl.addWidget(btn_adv)
+            self.balances_table.setCellWidget(i, 7, cell)
+
+    def _reload_history(self):
+        self._history = OrderProfileService.list_partner_history(self.company_id, self.supplier_id)
+        self._render_history()
+
+    def _render_history(self):
+        needle = self.hist_search.text().strip().lower() if hasattr(self, "hist_search") else ""
+        rows = [
+            h for h in self._history
+            if not needle or needle in f"{h['ref']} {h['event']} {h['details']} {h['by']}".lower()
+        ]
+        self.history_table.setRowCount(len(rows))
+        for i, h in enumerate(rows):
+            vals = [_dt_full(h["dt"]), h["ref"], h["event"], h["details"], h["by"]]
+            for c, v in enumerate(vals):
+                self.history_table.setItem(i, c, QTableWidgetItem(v))
+
     def _apply_filter(self):
         term = self.search.text().strip().lower()
         filtered = []
@@ -494,18 +853,17 @@ class PartnerProfilePage(QWidget):
                 continue
             if self._current_filter == "done" and o["status"] != "confirmed":
                 continue
-
             if term:
                 text_blob = f"{o['order_no']} {o['product_name']} {o['quality']} {o['notes']}".lower()
                 if term not in text_blob:
                     continue
-
             filtered.append(o)
 
-        self._render_orders_table(filtered)
+        self._filtered_orders = filtered
+        self._render_orders_table(self.table, filtered)
 
-    def _render_orders_table(self, rows: List[Dict[str, Any]]):
-        self.table.setRowCount(len(rows))
+    def _render_orders_table(self, tbl: QTableWidget, rows: List[Dict[str, Any]]):
+        tbl.setRowCount(len(rows))
 
         adv_bals = OrderProfileService.get_advance_balances(self.company_id, self.supplier_id)
         has_adv_in = adv_bals["advance_in"] > 0.005
@@ -515,34 +873,28 @@ class PartnerProfilePage(QWidget):
             is_sale = o["kind"] == "sales"
             is_fert = str(o["product_type"]).lower() in ("fertilizer", "fertilizers")
 
-            # 1. Order #
             it_no = QTableWidgetItem(o["order_no"])
             f = it_no.font()
             f.setBold(True)
             it_no.setFont(f)
-            self.table.setItem(i, 0, it_no)
+            tbl.setItem(i, 0, it_no)
 
-            # 2. Date
-            self.table.setItem(i, 1, QTableWidgetItem(_day(o["created_at"])))
+            tbl.setItem(i, 1, QTableWidgetItem(_day(o["created_at"])))
 
-            # 3. Activity
             act_str = "Sale Order" if is_sale else "Purchase Order"
             it_act = QTableWidgetItem(act_str)
             it_act.setForeground(QColor("#059669" if is_sale else "#2563eb"))
-            self.table.setItem(i, 2, it_act)
+            tbl.setItem(i, 2, it_act)
 
-            # 4. Product & Quality
             q_str = f" ({o['quality']})" if o.get("quality") else ""
-            self.table.setItem(i, 3, QTableWidgetItem(f"{o['product_name']}{q_str}"))
+            tbl.setItem(i, 3, QTableWidgetItem(f"{o['product_name']}{q_str}"))
 
-            # 5. Initial / Ordered
             if is_fert:
                 init_str = f"{o['initial_qty_bags']:,.0f} bags @ {money(o['initial_price'])}/bag"
             else:
                 init_str = f"{o['initial_weight_kg']:,.0f} kg ({o['initial_qty_bags']:,.0f} bags) @ {money(o['initial_price'])}/kg"
-            self.table.setItem(i, 4, QTableWidgetItem(init_str))
+            tbl.setItem(i, 4, QTableWidgetItem(init_str))
 
-            # 6. Company Verified
             comp_p = o.get("company_price")
             comp_w = o.get("company_weight_kg")
             comp_b = o.get("company_qty_bags")
@@ -556,28 +908,22 @@ class PartnerProfilePage(QWidget):
             it_comp = QTableWidgetItem(comp_str)
             if comp_p is None:
                 it_comp.setForeground(QColor("#94a3b8"))
-            self.table.setItem(i, 5, it_comp)
+            tbl.setItem(i, 5, it_comp)
 
-            # 7. Final Amount
             amt_val = o.get("final_total_amount")
-            if amt_val is not None:
-                amt_str = money(amt_val)
-            else:
-                amt_str = f"{money(o.get('estimated_total', 0))} (est.)"
+            amt_str = money(amt_val) if amt_val is not None else f"{money(o.get('estimated_total', 0))} (est.)"
             it_amt = QTableWidgetItem(amt_str)
             it_amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(i, 6, it_amt)
+            tbl.setItem(i, 6, it_amt)
 
-            # 8. Status
             status_str = "Delivered" if o["status"] == "confirmed" else o["status"].replace("_", " ").title()
             it_st = QTableWidgetItem(status_str)
             it_st.setForeground(QColor(STATUS_COLOR.get(o["status"], "#0f172a")))
             f_st = it_st.font()
             f_st.setBold(True)
             it_st.setFont(f_st)
-            self.table.setItem(i, 7, it_st)
+            tbl.setItem(i, 7, it_st)
 
-            # 9. Settlement
             bal = o.get("balance")
             paid = o.get("paid_amount", 0)
             if o["status"] == "confirmed":
@@ -596,15 +942,13 @@ class PartnerProfilePage(QWidget):
 
             it_settle = QTableWidgetItem(settle_str)
             it_settle.setForeground(QColor(color_settle))
-            self.table.setItem(i, 8, it_settle)
+            tbl.setItem(i, 8, it_settle)
 
-            # 10. Actions (CellWidget)
             cell = QWidget()
             cell_lay = QHBoxLayout(cell)
             cell_lay.setContentsMargins(4, 2, 4, 2)
             cell_lay.setSpacing(6)
 
-            # Edit button (always available to edit product, quality, price, bags, kg, expected date, notes)
             btn_edit = QPushButton("Edit")
             btn_edit.setStyleSheet(
                 "background-color: #334155; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
@@ -612,7 +956,6 @@ class PartnerProfilePage(QWidget):
             btn_edit.clicked.connect(lambda *_, row_data=o: self._on_edit_clicked(row_data))
             cell_lay.addWidget(btn_edit)
 
-            # Finalize button (for draft or in_transit orders awaiting company verification)
             if o["status"] != "confirmed":
                 btn_fin = QPushButton("Finalize")
                 btn_fin.setStyleSheet(
@@ -621,7 +964,6 @@ class PartnerProfilePage(QWidget):
                 btn_fin.clicked.connect(lambda *_, row_data=o: self._on_finalize_clicked(row_data))
                 cell_lay.addWidget(btn_fin)
 
-            # Use Advance button (Point 9: only if system knows/detects there is recorded advance in profile)
             has_adv_for_kind = has_adv_in if is_sale else has_adv_out
             has_bal = bal is not None and bal > 0.005
 
@@ -641,7 +983,6 @@ class PartnerProfilePage(QWidget):
                 btn_adv.clicked.connect(lambda *_, row_data=o: self._on_use_advance_clicked(row_data))
                 cell_lay.addWidget(btn_adv)
 
-            # Slip button
             btn_slip = QPushButton("Slip")
             btn_slip.setStyleSheet(
                 "background-color: #475569; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
@@ -649,7 +990,6 @@ class PartnerProfilePage(QWidget):
             btn_slip.clicked.connect(lambda *_, row_data=o: self._on_slip_clicked(row_data))
             cell_lay.addWidget(btn_slip)
 
-            # Delete button (for draft or cancelled orders)
             if self.is_admin and o["status"] in ("draft", "cancelled"):
                 btn_del = QPushButton("Delete")
                 btn_del.setStyleSheet(
@@ -658,11 +998,11 @@ class PartnerProfilePage(QWidget):
                 btn_del.clicked.connect(lambda *_, row_data=o: self._on_delete_clicked(row_data))
                 cell_lay.addWidget(btn_del)
 
-            self.table.setCellWidget(i, 9, cell)
+            tbl.setCellWidget(i, 9, cell)
 
     def _show_order_detail(self, row: int, _col: int):
-        if 0 <= row < len(self._orders):
-            o = self._orders[row]
+        if 0 <= row < len(self._filtered_orders):
+            o = self._filtered_orders[row]
             is_sale = o["kind"] == "sales"
             act_name = "Sale Order (Selling to Company)" if is_sale else "Purchase Order (Buying from Supplier)"
             dt_str = o["created_at"].strftime("%A %d %B %Y - %I:%M %p") if hasattr(o["created_at"], "strftime") else str(o["created_at"])
@@ -694,9 +1034,9 @@ class PartnerProfilePage(QWidget):
                 f"{notes_s}"
             )
 
-    def _on_table_double_clicked(self, row: int, _col: int):
-        if 0 <= row < len(self._orders):
-            self._on_edit_clicked(self._orders[row])
+    def _on_edit_from_list(self, rows: List[Dict[str, Any]], row: int):
+        if 0 <= row < len(rows):
+            self._on_edit_clicked(rows[row])
 
     def _on_edit_clicked(self, order_data: Dict[str, Any]):
         dlg = EditActivityDialog(order_data, self.partner_name, parent=self)
@@ -717,6 +1057,23 @@ class PartnerProfilePage(QWidget):
         dlg = OrderPayDialog(order_data, self.partner_name, parent=self)
         if dlg.exec_() == dlg.Accepted:
             self.reload()
+
+    def _on_pick_and_pay_order(self):
+        unpaid = [o for o in self._orders if o["status"] != "cancelled" and (o["balance"] is None or o["balance"] > 0.005)]
+        if not unpaid:
+            QMessageBox.information(self, "Order Payment", "There are no unpaid or open orders for this partner.")
+            return
+        if len(unpaid) == 1:
+            self._on_pay_clicked(unpaid[0])
+            return
+        labels = [
+            f"{o['order_no']} ({'Sale' if o['kind'] == 'sales' else 'Purchase'}) - "
+            f"Bal: {money(o['balance']) if o['balance'] is not None else 'Est. ' + money(o.get('estimated_total', 0))}"
+            for o in unpaid
+        ]
+        chosen, ok = QInputDialog.getItem(self, "Record Order Payment", "Select an order to pay:", labels, 0, False)
+        if ok:
+            self._on_pay_clicked(unpaid[labels.index(chosen)])
 
     def _open_repay_advance(self, advance_id: int = 0):
         avail = [a for a in self._advances if a.get("status") == "completed"]

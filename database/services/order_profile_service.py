@@ -845,3 +845,178 @@ class OrderProfileService:
             )
 
         return {"ok": True, "order_id": int(order_id)}
+
+    @staticmethod
+    def list_partner_payments(company_id: Optional[int], supplier_id: Optional[int]) -> List[Dict[str, Any]]:
+        """Returns all OrderPayment rows across this partner's Sales Orders and Purchase Orders."""
+        from database.models.order_payment import OrderPayment
+        from database.models.user import User
+
+        out: List[Dict[str, Any]] = []
+        with get_session() as s:
+            users = {int(u.id): u.username for u in s.query(User).all()}
+            so_map: Dict[int, str] = {}
+            po_map: Dict[int, str] = {}
+            if company_id:
+                so_map = {
+                    int(o.id): o.order_no
+                    for o in s.query(SalesOrder).filter(SalesOrder.buyer_company_id == int(company_id)).all()
+                }
+            if supplier_id:
+                po_map = {
+                    int(o.id): o.order_no
+                    for o in s.query(PurchaseOrder).filter(PurchaseOrder.supplier_id == int(supplier_id)).all()
+                }
+
+            if so_map:
+                for p in (
+                    s.query(OrderPayment)
+                    .filter(OrderPayment.order_type == "sales_order", OrderPayment.order_id.in_(list(so_map)))
+                    .order_by(OrderPayment.created_at.desc(), OrderPayment.id.desc())
+                    .all()
+                ):
+                    notes = p.notes or ""
+                    out.append({
+                        "id": int(p.id),
+                        "dt": p.created_at,
+                        "kind": "sales",
+                        "order_id": int(p.order_id),
+                        "order_no": so_map.get(int(p.order_id), f"SO-{p.order_id}"),
+                        "direction": "IN (Received)",
+                        "amount": _f(p.amount),
+                        "method": (p.method or "-").title(),
+                        "source": "From Advance" if "From advance" in notes else "Direct Payment",
+                        "notes": notes,
+                        "status": p.status,
+                        "by": users.get(int(p.created_by_user_id), "-"),
+                    })
+
+            if po_map:
+                for p in (
+                    s.query(OrderPayment)
+                    .filter(OrderPayment.order_type == "purchase_order", OrderPayment.order_id.in_(list(po_map)))
+                    .order_by(OrderPayment.created_at.desc(), OrderPayment.id.desc())
+                    .all()
+                ):
+                    notes = p.notes or ""
+                    out.append({
+                        "id": int(p.id),
+                        "dt": p.created_at,
+                        "kind": "purchase",
+                        "order_id": int(p.order_id),
+                        "order_no": po_map.get(int(p.order_id), f"PO-{p.order_id}"),
+                        "direction": "OUT (Paid)",
+                        "amount": _f(p.amount),
+                        "method": (p.method or "-").title(),
+                        "source": "From Advance" if "From advance" in notes else "Direct Payment",
+                        "notes": notes,
+                        "status": p.status,
+                        "by": users.get(int(p.created_by_user_id), "-"),
+                    })
+
+        out.sort(key=lambda r: r["dt"] or datetime.min, reverse=True)
+        return out
+
+    @staticmethod
+    def list_partner_history(company_id: Optional[int], supplier_id: Optional[int]) -> List[Dict[str, Any]]:
+        """Chronological transaction & milestone history for this partner's orders, payments, and advances."""
+        from database.models.user import User
+
+        events: List[Dict[str, Any]] = []
+        with get_session() as s:
+            users = {int(u.id): u.username for u in s.query(User).all()}
+
+            if company_id:
+                for so in s.query(SalesOrder).filter(SalesOrder.buyer_company_id == int(company_id)).all():
+                    prod = so.items[0].product.name if so.items and so.items[0].product else ""
+                    if so.created_at:
+                        events.append({
+                            "dt": so.created_at,
+                            "ref": so.order_no,
+                            "event": "Sale Order Created",
+                            "details": f"{prod} ({so.notes or 'No notes'})",
+                            "by": users.get(int(so.created_by_user_id or 0), "-"),
+                        })
+                    if so.dispatched_at:
+                        events.append({
+                            "dt": so.dispatched_at,
+                            "ref": so.order_no,
+                            "event": "Sale Order Dispatched",
+                            "details": f"On the road ({prod})",
+                            "by": users.get(int(so.dispatched_by_user_id or 0), "-"),
+                        })
+                    if so.confirmed_at:
+                        events.append({
+                            "dt": so.confirmed_at,
+                            "ref": so.order_no,
+                            "event": "Sale Order Finalized",
+                            "details": f"Final Total: {_f(so.final_total_amount):,.2f}",
+                            "by": users.get(int(so.confirmed_by_user_id or 0), "-"),
+                        })
+
+            if supplier_id:
+                for po in s.query(PurchaseOrder).filter(PurchaseOrder.supplier_id == int(supplier_id)).all():
+                    prod = po.items[0].product.name if po.items and po.items[0].product else ""
+                    if po.created_at:
+                        events.append({
+                            "dt": po.created_at,
+                            "ref": po.order_no,
+                            "event": "Purchase Order Created",
+                            "details": f"{prod} ({po.notes or 'No notes'})",
+                            "by": users.get(int(po.created_by_user_id or 0), "-"),
+                        })
+                    if po.dispatched_at:
+                        events.append({
+                            "dt": po.dispatched_at,
+                            "ref": po.order_no,
+                            "event": "Purchase Order In Transit",
+                            "details": f"On the road ({prod})",
+                            "by": users.get(int(po.dispatched_by_user_id or 0), "-"),
+                        })
+                    if po.confirmed_at:
+                        events.append({
+                            "dt": po.confirmed_at,
+                            "ref": po.order_no,
+                            "event": "Purchase Order Finalized",
+                            "details": f"Final Total: {_f(po.final_total_amount):,.2f}",
+                            "by": users.get(int(po.confirmed_by_user_id or 0), "-"),
+                        })
+
+        for p in OrderProfileService.list_partner_payments(company_id, supplier_id):
+            events.append({
+                "dt": p["dt"],
+                "ref": f"{p['order_no']} (PAY-{p['id']})",
+                "event": f"Order Payment ({p['source']})" + (" [VOIDED]" if p["status"] == "voided" else ""),
+                "details": f"₦{p['amount']:,.2f} via {p['method']} — {p['notes']}",
+                "by": p["by"],
+            })
+
+        if company_id:
+            for a in OrderMoneyService.list_money("sales", partner_id=company_id):
+                events.append({
+                    "dt": a.get("date"),
+                    "ref": f"ADV-{a['id']}",
+                    "event": f"Advance {a['direction'].upper()} ({a['status'].title()})",
+                    "details": f"₦{float(a['amount']):,.2f} via {a.get('method') or '-'} — {a.get('note') or ''}",
+                    "by": a.get("by") or "-",
+                })
+        if supplier_id:
+            for a in OrderMoneyService.list_money("purchase", partner_id=supplier_id):
+                events.append({
+                    "dt": a.get("date"),
+                    "ref": f"ADV-{a['id']}",
+                    "event": f"Advance {a['direction'].upper()} ({a['status'].title()})",
+                    "details": f"₦{float(a['amount']):,.2f} via {a.get('method') or '-'} — {a.get('note') or ''}",
+                    "by": a.get("by") or "-",
+                })
+
+        def _sort_key(ev):
+            dt = ev["dt"]
+            if dt is None:
+                return datetime.min
+            if isinstance(dt, date) and not isinstance(dt, datetime):
+                return datetime.combine(dt, datetime.min.time())
+            return dt
+
+        events.sort(key=_sort_key, reverse=True)
+        return events

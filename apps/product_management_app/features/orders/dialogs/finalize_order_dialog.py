@@ -193,8 +193,8 @@ class FinalizeOrderDialog(QDialog):
             adv_hdr.setStyleSheet("color: #065f46; font-size: 13px;")
             adv_lay.addWidget(adv_hdr)
 
-            self.chk_use_adv = QCheckBox("Use Advance for settlement of this order")
-            self.chk_use_adv.setChecked(True)
+            self.chk_use_adv = QCheckBox("Use Advance for settlement of this order (uncheck to keep advance unused)")
+            self.chk_use_adv.setChecked(False)
             self.chk_use_adv.setStyleSheet("font-weight: bold; color: #047857;")
             self.chk_use_adv.toggled.connect(self._recalc)
             adv_lay.addWidget(self.chk_use_adv)
@@ -203,6 +203,7 @@ class FinalizeOrderDialog(QDialog):
             f_adv.addWidget(QLabel("Amount to Apply from Advance (₦):"))
             self.txt_adv_amount = QLineEdit()
             self.txt_adv_amount.setMaximumWidth(160)
+            self.txt_adv_amount.setEnabled(False)
             f_adv.addWidget(self.txt_adv_amount)
             f_adv.addStretch()
             adv_lay.addLayout(f_adv)
@@ -273,9 +274,14 @@ class FinalizeOrderDialog(QDialog):
         self.lbl_variance.setText(f"Variance vs Initial: {diff_str}")
 
         # Update default advance amount
-        if self.txt_adv_amount and self.chk_use_adv and self.chk_use_adv.isChecked():
-            to_apply = min(self.avail_advance, total)
-            self.txt_adv_amount.setText(f"{to_apply:,.2f}")
+        if self.txt_adv_amount and self.chk_use_adv:
+            checked = self.chk_use_adv.isChecked()
+            self.txt_adv_amount.setEnabled(checked)
+            if checked:
+                to_apply = min(self.avail_advance, total)
+                self.txt_adv_amount.setText(f"{to_apply:,.2f}")
+            else:
+                self.txt_adv_amount.setText("")
 
     def _confirm(self):
         price = _f(self.txt_price.text())

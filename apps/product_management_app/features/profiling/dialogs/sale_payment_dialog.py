@@ -1,5 +1,7 @@
 # apps\product_management_app\features\profiling\dialogs\sale_payment_dialog.py
 
+from datetime import datetime
+
 from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox,
