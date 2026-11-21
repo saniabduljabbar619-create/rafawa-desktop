@@ -198,7 +198,7 @@ class OrdersHubView(QWidget):
         nav_l.setSpacing(10)
 
         self.nav_seg = Segmented([
-            ("partners", "Partner Directory (Companies & Suppliers)"),
+            ("partners", "Partner Directory (Companies && Suppliers)"),
             ("board", "All Orders Board / History"),
         ])
         nav_l.addWidget(self.nav_seg)
@@ -332,6 +332,7 @@ class OrdersHubView(QWidget):
         self._trail.append(self.stack.currentWidget())
         self.stack.addWidget(page)
         self.stack.setCurrentWidget(page)
+        self.nav_bar.setVisible(False)
         self.tabs_row.setVisible(False)
         self.header.setVisible(False)
 
@@ -348,9 +349,10 @@ class OrdersHubView(QWidget):
                 getattr(prev, fn)()
                 break
         if not self._trail:
+            self.nav_bar.setVisible(prev in (self.directory, self.board))
             home = prev is self.board
             self.header.setVisible(home)
-            self.tabs_row.setVisible(not home)
+            self.tabs_row.setVisible(False)
         self.refresh_kpis()
 
     def _close_deep_pages(self) -> None:

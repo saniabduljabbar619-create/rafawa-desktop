@@ -14,21 +14,22 @@ Dedicated Company / Supplier Profile:
 """
 from __future__ import annotations
 
+import csv
 from typing import Any, Dict, List, Optional
 
-from PySide2.QtCore import Qt, Signal
+from PySide2.QtCore import Qt, QDate, Signal
 from PySide2.QtGui import QColor, QFont
 from PySide2.QtWidgets import (
-    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+    QPushButton, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from apps.product_management_app.features.orders.dialogs.apply_advance_dialog import ApplyAdvanceDialog
 from apps.product_management_app.features.orders.dialogs.edit_activity_dialog import EditActivityDialog
 from apps.product_management_app.features.orders.dialogs.finalize_order_dialog import FinalizeOrderDialog
 from apps.product_management_app.features.orders.dialogs.new_activity_dialog import NewActivityDialog
-from apps.product_management_app.features.orders.dialogs.order_pay_dialog import OrderPayDialog
+from apps.product_management_app.features.orders.dialogs.order_pay_dialog import OrderBatchPayDialog, OrderPayDialog
 from apps.product_management_app.features.orders.dialogs.order_slip_dialog import OrderSlipDialog
 from apps.product_management_app.features.orders.dialogs.record_advance_dialog import RecordAdvanceDialog
 from apps.product_management_app.features.orders.dialogs.repay_advance_dialog import RepayAdvanceDialog
@@ -262,6 +263,36 @@ class PartnerProfilePage(QWidget):
 
         root.addWidget(self.tabs, 1)
 
+    def _add_date_filter_row(self, parent_layout, on_change):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        chk = QCheckBox("Filter by date:")
+        d_from = QDateEdit(QDate.currentDate().addDays(-30))
+        d_from.setCalendarPopup(True)
+        d_from.setEnabled(False)
+        d_to = QDateEdit(QDate.currentDate())
+        d_to.setCalendarPopup(True)
+        d_to.setEnabled(False)
+
+        def _toggle(state):
+            on = bool(state)
+            d_from.setEnabled(on)
+            d_to.setEnabled(on)
+            on_change()
+
+        chk.stateChanged.connect(_toggle)
+        d_from.dateChanged.connect(lambda *_: on_change())
+        d_to.dateChanged.connect(lambda *_: on_change())
+
+        row.addWidget(chk)
+        row.addWidget(QLabel("From:"))
+        row.addWidget(d_from)
+        row.addWidget(QLabel("To:"))
+        row.addWidget(d_to)
+        row.addStretch(1)
+        parent_layout.addLayout(row)
+        return chk, d_from, d_to
+
     def _make_orders_table(self) -> QTableWidget:
         tbl = QTableWidget(0, len(COLS))
         tbl.setHorizontalHeaderLabels(COLS)
@@ -269,19 +300,22 @@ class PartnerProfilePage(QWidget):
         tbl.setSelectionMode(QAbstractItemView.SingleSelection)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
         tbl.verticalHeader().setVisible(False)
-        tbl.verticalHeader().setDefaultSectionSize(44)
+        tbl.verticalHeader().setDefaultSectionSize(46)
         tbl.setShowGrid(False)
         hh = tbl.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(9, QHeaderView.Fixed)
+        tbl.setColumnWidth(9, 250)
         return tbl
 
     def _build_activity_tab(self):
         tab = QWidget()
         ol = QVBoxLayout(tab)
         ol.setContentsMargins(0, 10, 0, 0)
-        ol.setSpacing(10)
+        ol.setSpacing(8)
+
+        self.act_date_chk, self.act_d_from, self.act_d_to = self._add_date_filter_row(ol, self._apply_filter)
 
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(8)
@@ -295,18 +329,31 @@ class PartnerProfilePage(QWidget):
         self.btn_filter_all = QPushButton("All")
         self.btn_filter_active = QPushButton("Pending / In Transit")
         self.btn_filter_done = QPushButton("Finalized")
+        self.btn_edit_selected = QPushButton("Edit Order / Prices")
+        self.btn_pay_selected = QPushButton("Make Payment")
+        self.btn_export_act = QPushButton("Export CSV")
         self.btn_refresh = QPushButton("Refresh")
-        for b in (self.btn_filter_all, self.btn_filter_active, self.btn_filter_done, self.btn_refresh):
+        for b in (
+            self.btn_filter_all, self.btn_filter_active, self.btn_filter_done,
+            self.btn_edit_selected, self.btn_pay_selected, self.btn_export_act, self.btn_refresh,
+        ):
             b.setMinimumHeight(32)
             filter_bar.addWidget(b)
 
         self.btn_filter_all.clicked.connect(lambda: self._set_status_filter("all"))
         self.btn_filter_active.clicked.connect(lambda: self._set_status_filter("active"))
         self.btn_filter_done.clicked.connect(lambda: self._set_status_filter("done"))
+        self.btn_edit_selected.clicked.connect(lambda: self._edit_selected_from_table(self.table, self._filtered_orders))
+        self.btn_pay_selected.clicked.connect(self._on_open_batch_pay)
+        self.btn_export_act.clicked.connect(self._export_activity_csv)
         self.btn_refresh.clicked.connect(self.reload)
         ol.addLayout(filter_bar)
 
         self.table = self._make_orders_table()
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            lambda pos: self._show_order_context_menu(self.table, self._filtered_orders, pos)
+        )
         ol.addWidget(self.table, 1)
 
         self.order_detail_box = QLabel("Click an order row to see detailed breakdown and notes here.")
@@ -336,6 +383,10 @@ class PartnerProfilePage(QWidget):
         self.prod_search.setMinimumHeight(32)
         self.prod_search.textChanged.connect(self._reload_products)
         bar.addWidget(self.prod_search, 1)
+        btn_edit_p = QPushButton("Edit Prices / Specs")
+        btn_edit_p.setMinimumHeight(32)
+        btn_edit_p.clicked.connect(self._edit_selected_product_row)
+        bar.addWidget(btn_edit_p)
         self.lbl_prod_totals = QLabel("")
         self.lbl_prod_totals.setStyleSheet("color:#0f766e; font-weight:600; font-size:12px;")
         bar.addWidget(self.lbl_prod_totals)
@@ -367,11 +418,21 @@ class PartnerProfilePage(QWidget):
             "background:#059669; color:white; font-weight:bold; padding:6px 14px; border-radius:5px; border:none;"
         )
         btn_new.clicked.connect(lambda: self._open_new_activity("sales"))
+        btn_edit = QPushButton("Edit Order / Prices")
+        btn_edit.clicked.connect(lambda: self._edit_selected_from_table(self.sales_table, self._sales_orders))
+        btn_pay = QPushButton("Make Payment")
+        btn_pay.clicked.connect(self._on_open_batch_pay)
         bar.addWidget(btn_new)
+        bar.addWidget(btn_edit)
+        bar.addWidget(btn_pay)
         bar.addStretch(1)
         vl.addLayout(bar)
 
         self.sales_table = self._make_orders_table()
+        self.sales_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sales_table.customContextMenuRequested.connect(
+            lambda pos: self._show_order_context_menu(self.sales_table, self._sales_orders, pos)
+        )
         self.sales_table.cellDoubleClicked.connect(lambda r, _c: self._on_edit_from_list(self._sales_orders, r))
         vl.addWidget(self.sales_table, 1)
 
@@ -389,11 +450,21 @@ class PartnerProfilePage(QWidget):
             "background:#2563eb; color:white; font-weight:bold; padding:6px 14px; border-radius:5px; border:none;"
         )
         btn_new.clicked.connect(lambda: self._open_new_activity("purchase"))
+        btn_edit = QPushButton("Edit Order / Prices")
+        btn_edit.clicked.connect(lambda: self._edit_selected_from_table(self.purchase_table, self._purchase_orders))
+        btn_pay = QPushButton("Make Payment")
+        btn_pay.clicked.connect(self._on_open_batch_pay)
         bar.addWidget(btn_new)
+        bar.addWidget(btn_edit)
+        bar.addWidget(btn_pay)
         bar.addStretch(1)
         vl.addLayout(bar)
 
         self.purchase_table = self._make_orders_table()
+        self.purchase_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.purchase_table.customContextMenuRequested.connect(
+            lambda pos: self._show_order_context_menu(self.purchase_table, self._purchase_orders, pos)
+        )
         self.purchase_table.cellDoubleClicked.connect(lambda r, _c: self._on_edit_from_list(self._purchase_orders, r))
         vl.addWidget(self.purchase_table, 1)
 
@@ -421,9 +492,11 @@ class PartnerProfilePage(QWidget):
         self.adv_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.adv_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.adv_table.verticalHeader().setVisible(False)
-        self.adv_table.verticalHeader().setDefaultSectionSize(40)
+        self.adv_table.verticalHeader().setDefaultSectionSize(44)
         self.adv_table.setShowGrid(False)
         self.adv_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.adv_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Fixed)
+        self.adv_table.setColumnWidth(8, 110)
         al.addWidget(self.adv_table, 1)
 
         adv_foot = QHBoxLayout()
@@ -441,6 +514,12 @@ class PartnerProfilePage(QWidget):
         self.btn_adv_repay.clicked.connect(lambda: self._open_repay_advance(0))
         adv_foot.addWidget(self.btn_adv_repay)
 
+        if self.is_admin:
+            self.btn_void_adv = QPushButton("Void Selected Advance")
+            self.btn_void_adv.setStyleSheet("padding: 7px 14px; border-radius: 5px;")
+            self.btn_void_adv.clicked.connect(self._on_void_selected_advance)
+            adv_foot.addWidget(self.btn_void_adv)
+
         adv_foot.addStretch()
         al.addLayout(adv_foot)
 
@@ -450,15 +529,29 @@ class PartnerProfilePage(QWidget):
         tab = QWidget()
         pl = QVBoxLayout(tab)
         pl.setContentsMargins(0, 10, 0, 0)
-        pl.setSpacing(10)
+        pl.setSpacing(8)
+
+        self.pay_date_chk, self.pay_d_from, self.pay_d_to = self._add_date_filter_row(pl, self._render_payments_table)
 
         bar = QHBoxLayout()
-        btn_pay_order = QPushButton("+ Record Order Payment")
+        btn_pay_order = QPushButton("Make Payment")
         btn_pay_order.setStyleSheet(
             "background: #059669; color: white; font-weight: bold; padding: 7px 16px; border-radius: 5px; border: none;"
         )
-        btn_pay_order.clicked.connect(self._on_pick_and_pay_order)
+        btn_pay_order.clicked.connect(self._on_open_batch_pay)
         bar.addWidget(btn_pay_order)
+
+        btn_edit_p = QPushButton("Edit Order / Prices")
+        btn_edit_p.setMinimumHeight(32)
+        btn_edit_p.clicked.connect(self._edit_order_from_payment_row)
+        bar.addWidget(btn_edit_p)
+
+        if self.is_admin:
+            btn_void_p = QPushButton("Void Selected Payment")
+            btn_void_p.setMinimumHeight(32)
+            btn_void_p.clicked.connect(self._on_void_selected_payment)
+            bar.addWidget(btn_void_p)
+
         bar.addWidget(QLabel("  All payments are manual — nothing is deducted or settled automatically."))
         bar.addStretch(1)
         pl.addLayout(bar)
@@ -746,8 +839,23 @@ class PartnerProfilePage(QWidget):
 
     def _reload_payments(self):
         self._payments = OrderProfileService.list_partner_payments(self.company_id, self.supplier_id)
-        self.payments_table.setRowCount(len(self._payments))
-        for i, p in enumerate(self._payments):
+        self._render_payments_table()
+
+    def _render_payments_table(self):
+        use_dates = hasattr(self, "pay_date_chk") and self.pay_date_chk.isChecked()
+        d_from = self.pay_d_from.date().toPython() if use_dates else None
+        d_to = self.pay_d_to.date().toPython() if use_dates else None
+
+        rows = []
+        for p in self._payments:
+            if use_dates and p.get("dt"):
+                d_val = p["dt"].date() if hasattr(p["dt"], "date") else p["dt"]
+                if d_val < d_from or d_val > d_to:
+                    continue
+            rows.append(p)
+
+        self.payments_table.setRowCount(len(rows))
+        for i, p in enumerate(rows):
             vals = [
                 f"PAY-{p['id']}", _dt_full(p["dt"]), p["order_no"],
                 "Sale Order" if p["kind"] == "sales" else "Purchase Order",
@@ -756,6 +864,8 @@ class PartnerProfilePage(QWidget):
             ]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
+                if c == 0:
+                    it.setData(Qt.UserRole, p)
                 if c == 5:
                     it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if c == 9 and p["status"] == "voided":
@@ -846,6 +956,9 @@ class PartnerProfilePage(QWidget):
 
     def _apply_filter(self):
         term = self.search.text().strip().lower()
+        use_dates = hasattr(self, "act_date_chk") and self.act_date_chk.isChecked()
+        d_from = self.act_d_from.date().toPython() if use_dates else None
+        d_to = self.act_d_to.date().toPython() if use_dates else None
         filtered = []
 
         for o in self._orders:
@@ -853,6 +966,10 @@ class PartnerProfilePage(QWidget):
                 continue
             if self._current_filter == "done" and o["status"] != "confirmed":
                 continue
+            if use_dates and o.get("created_at"):
+                d_val = o["created_at"].date() if hasattr(o["created_at"], "date") else o["created_at"]
+                if d_val < d_from or d_val > d_to:
+                    continue
             if term:
                 text_blob = f"{o['order_no']} {o['product_name']} {o['quality']} {o['notes']}".lower()
                 if term not in text_blob:
@@ -946,21 +1063,26 @@ class PartnerProfilePage(QWidget):
 
             cell = QWidget()
             cell_lay = QHBoxLayout(cell)
-            cell_lay.setContentsMargins(4, 2, 4, 2)
+            cell_lay.setContentsMargins(6, 4, 6, 4)
             cell_lay.setSpacing(6)
 
-            btn_edit = QPushButton("Edit")
-            btn_edit.setStyleSheet(
-                "background-color: #334155; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
-            )
+            def _act_btn(text: str, bg: str, min_w: int) -> QPushButton:
+                b = QPushButton(text)
+                b.setFixedHeight(26)
+                b.setMinimumWidth(min_w)
+                b.setCursor(Qt.PointingHandCursor)
+                b.setStyleSheet(
+                    f"background-color: {bg}; color: white; font-weight: 600; "
+                    "padding: 2px 8px; border-radius: 4px; font-size: 11px; border: none;"
+                )
+                return b
+
+            btn_edit = _act_btn("Edit", "#334155", 48)
             btn_edit.clicked.connect(lambda *_, row_data=o: self._on_edit_clicked(row_data))
             cell_lay.addWidget(btn_edit)
 
             if o["status"] != "confirmed":
-                btn_fin = QPushButton("Finalize")
-                btn_fin.setStyleSheet(
-                    "background-color: #0f766e; color: white; font-weight: 600; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
-                )
+                btn_fin = _act_btn("Finalize", "#0f766e", 62)
                 btn_fin.clicked.connect(lambda *_, row_data=o: self._on_finalize_clicked(row_data))
                 cell_lay.addWidget(btn_fin)
 
@@ -968,37 +1090,34 @@ class PartnerProfilePage(QWidget):
             has_bal = bal is not None and bal > 0.005
 
             if o["status"] != "cancelled" and (bal is None or bal > 0.005):
-                btn_pay = QPushButton("Pay")
-                btn_pay.setStyleSheet(
-                    "background-color: #059669; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
-                )
+                btn_pay = _act_btn("Pay", "#059669", 46)
                 btn_pay.clicked.connect(lambda *_, row_data=o: self._on_pay_clicked(row_data))
                 cell_lay.addWidget(btn_pay)
 
             if has_adv_for_kind and has_bal and o["status"] == "confirmed":
-                btn_adv = QPushButton("Use Advance")
-                btn_adv.setStyleSheet(
-                    "background-color: #0284c7; color: white; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
-                )
+                btn_adv = _act_btn("Use Advance", "#0284c7", 88)
                 btn_adv.clicked.connect(lambda *_, row_data=o: self._on_use_advance_clicked(row_data))
                 cell_lay.addWidget(btn_adv)
 
-            btn_slip = QPushButton("Slip")
-            btn_slip.setStyleSheet(
-                "background-color: #475569; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; border: none;"
-            )
+            btn_slip = _act_btn("Slip", "#475569", 44)
             btn_slip.clicked.connect(lambda *_, row_data=o: self._on_slip_clicked(row_data))
             cell_lay.addWidget(btn_slip)
 
             if self.is_admin and o["status"] in ("draft", "cancelled"):
-                btn_del = QPushButton("Delete")
-                btn_del.setStyleSheet(
-                    "background-color: #ef4444; color: white; padding: 4px 6px; border-radius: 4px; font-size: 11px; border: none;"
-                )
+                btn_del = _act_btn("Delete", "#ef4444", 54)
                 btn_del.clicked.connect(lambda *_, row_data=o: self._on_delete_clicked(row_data))
                 cell_lay.addWidget(btn_del)
 
+            cell_lay.addStretch(1)
             tbl.setCellWidget(i, 9, cell)
+
+        # Ensure Actions column is always wide enough for every button
+        max_w = 210
+        for r in range(tbl.rowCount()):
+            w = tbl.cellWidget(r, 9)
+            if w:
+                max_w = max(max_w, w.sizeHint().width() + 12)
+        tbl.setColumnWidth(9, max_w)
 
     def _show_order_detail(self, row: int, _col: int):
         if 0 <= row < len(self._filtered_orders):
@@ -1100,3 +1219,131 @@ class PartnerProfilePage(QWidget):
                 self.reload()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+
+    def _edit_selected_from_table(self, tbl: QTableWidget, rows: List[Dict[str, Any]]):
+        r = tbl.currentRow()
+        if not (0 <= r < len(rows)):
+            QMessageBox.information(self, "Edit Order", "Select an order row first.")
+            return
+        self._on_edit_clicked(rows[r])
+
+    def _edit_selected_product_row(self):
+        r = self.products_table.currentRow()
+        if r < 0:
+            QMessageBox.information(self, "Edit Prices / Specs", "Select a product row first.")
+            return
+        it = self.products_table.item(r, 0)
+        o = it.data(Qt.UserRole) if it else None
+        if o:
+            self._on_edit_clicked(o)
+
+    def _edit_order_from_payment_row(self):
+        r = self.payments_table.currentRow()
+        if r < 0:
+            QMessageBox.information(self, "Edit Order / Prices", "Select a payment row first.")
+            return
+        it = self.payments_table.item(r, 0)
+        p = it.data(Qt.UserRole) if it else None
+        if not p:
+            return
+        match = next((o for o in self._orders if int(o["id"]) == int(p["order_id"]) and o["kind"] == p["kind"]), None)
+        if match:
+            self._on_edit_clicked(match)
+
+    def _on_open_batch_pay(self):
+        unpaid = [o for o in self._orders if o["status"] != "cancelled" and (o["balance"] is None or o["balance"] > 0.005)]
+        if not unpaid:
+            QMessageBox.information(self, "Make Payment", "There are no unpaid or open orders for this partner.")
+            return
+        dlg = OrderBatchPayDialog(self._orders, self.partner_name, parent=self)
+        if dlg.exec_() == dlg.Accepted:
+            self.reload()
+
+    def _show_order_context_menu(self, tbl: QTableWidget, rows: List[Dict[str, Any]], pos):
+        r = tbl.rowAt(pos.y())
+        if not (0 <= r < len(rows)):
+            return
+        tbl.selectRow(r)
+        o = rows[r]
+        menu = QMenu(self)
+        act_edit = menu.addAction("Edit Order / Prices")
+        act_fin = menu.addAction("Finalize Order") if o["status"] != "confirmed" else None
+        act_pay = menu.addAction("Make Payment") if o["status"] != "cancelled" else None
+        act_slip = menu.addAction("View / Print Slip")
+        chosen = menu.exec_(tbl.viewport().mapToGlobal(pos))
+        if chosen == act_edit:
+            self._on_edit_clicked(o)
+        elif act_fin and chosen == act_fin:
+            self._on_finalize_clicked(o)
+        elif act_pay and chosen == act_pay:
+            self._on_pay_clicked(o)
+        elif chosen == act_slip:
+            self._on_slip_clicked(o)
+
+    def _on_void_selected_advance(self):
+        r = self.adv_table.currentRow()
+        if not (0 <= r < len(self._advances)):
+            QMessageBox.information(self, "Void Advance", "Select an advance row first.")
+            return
+        a = self._advances[r]
+        if a["status"] != "completed":
+            QMessageBox.warning(self, "Void Advance", "Only an available (unapplied) advance can be voided.")
+            return
+        reason, ok = QInputDialog.getText(self, "Void Advance", f"Reason for voiding Advance #{a['id']} ({money(a['amount'])}):")
+        if not ok or not reason.strip():
+            return
+        try:
+            OrderMoneyService.void_money(int(a["id"]), reason=reason.strip())
+            self.reload()
+        except Exception as e:
+            QMessageBox.critical(self, "Void Failed", str(e))
+
+    def _on_void_selected_payment(self):
+        r = self.payments_table.currentRow()
+        if r < 0:
+            QMessageBox.information(self, "Void Payment", "Select a payment row first.")
+            return
+        it = self.payments_table.item(r, 0)
+        p = it.data(Qt.UserRole) if it else None
+        if not p:
+            return
+        if p["status"] == "voided":
+            QMessageBox.information(self, "Void Payment", "This payment is already voided.")
+            return
+        reason, ok = QInputDialog.getText(self, "Void Payment", f"Reason for voiding PAY-{p['id']} ({money(p['amount'])}):")
+        if not ok or not reason.strip():
+            return
+        try:
+            OrderSheetService.void_payment(int(p["id"]), reason=reason.strip())
+            self.reload()
+        except Exception as e:
+            QMessageBox.critical(self, "Void Failed", str(e))
+
+    def _export_activity_csv(self):
+        if not self._filtered_orders:
+            QMessageBox.information(self, "Export CSV", "No orders to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Partner Orders", f"{self.partner_name}_orders.csv", "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                w.writerow(["Order #", "Date", "Activity", "Product", "Quality", "Initial Bags", "Initial Kg",
+                            "Initial Price", "Verified Bags", "Verified Kg", "Verified Price", "Final Amount",
+                            "Paid", "Balance", "Status", "Notes"])
+                for o in self._filtered_orders:
+                    w.writerow([
+                        o["order_no"], _day(o["created_at"]),
+                        "Sale Order" if o["kind"] == "sales" else "Purchase Order",
+                        o["product_name"], o.get("quality") or "",
+                        o["initial_qty_bags"], o["initial_weight_kg"], o["initial_price"],
+                        o.get("company_qty_bags") or "", o.get("company_weight_kg") or "", o.get("company_price") or "",
+                        o.get("final_total_amount") or "", o.get("paid_amount") or 0,
+                        o.get("balance") if o.get("balance") is not None else "",
+                        o["status"], o.get("notes") or "",
+                    ])
+        except Exception as e:
+            QMessageBox.warning(self, "Export CSV", f"Could not save CSV:\n{e}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Saved {len(self._filtered_orders)} order(s) to:\n{path}")
